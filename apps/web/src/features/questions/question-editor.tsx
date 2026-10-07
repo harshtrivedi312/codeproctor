@@ -269,6 +269,10 @@ export function QuestionEditor({
       if (error.status === 403)
         return 'Your role cannot do this. Ask a Super Admin if you think this is a mistake.';
       if (error.status === 404) return 'This question no longer exists. Go back to the list.';
+      if (error.status === 503 && error.code === 'BUSY')
+        return 'The service is busy and nothing was saved. Your edits are still on this page. Wait a moment, then press Save again.';
+      if (error.status === 500)
+        return 'Something went wrong. Check before trying again: the change may already have happened. Reload the latest version to see what is saved; your edits stay on this page until you do.';
       if (error.status === 401)
         return 'Your session ended before this could be saved. You will be asked to sign in again, and the edits on this page will be lost. Copy anything you need first.';
     }
@@ -356,6 +360,13 @@ export function QuestionEditor({
         setProblem(
           `Your changes were saved as a new version, but the ${e.step} could not be: ${describe(e)} Reload the latest version to see where things stand.`,
         );
+      } else if (e.status >= 500) {
+        // A 500 is never retried: the step that failed may have been applied (an audit write can
+        // fail after the commit). Look before saving again; the retry is checked by revision.
+        setProblem(
+          `Part of your changes were saved, and the ${e.step} step may have gone through as well. Something went wrong on the server. Check before pressing Save again: your edits on this page stay, and Save only goes on if nobody else changed the question.`,
+        );
+        await resync(e);
       } else {
         setProblem(
           `Some of your changes were saved, but the ${e.step} could not be: ${describe(e)} Fix that and press Save again; nothing you typed is lost.`,

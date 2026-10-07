@@ -10,9 +10,17 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { BODY_PARSER_DETAIL, bodyParserStatus } from './body-parsers';
+import {
+  LOCK_CONTENTION_CODE,
+  LOCK_CONTENTION_DETAIL,
+  LOCK_CONTENTION_RETRY_AFTER_SECONDS,
+  lockContentionCode,
+} from './db-contention';
+import { AuditWriteAfterCommitError } from '../audit/audit-write-after-commit.error';
+import { OutcomeUnknownError } from './outcome-unknown.error';
 import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
-import { OrgContextMissingError } from '../database/errors';
+import { OrgContextMissingError, OrgScopeError } from '../database/errors';
 import { scrubPrismaError } from '../database/error-scrub';
 import {
   CodedConflictException,
@@ -70,11 +78,22 @@ export class ProblemFilter implements ExceptionFilter {
     // the trace id, so the bug is not masked (FR-103, TC-008).
     const noScope = exception instanceof OrgContextMissingError;
     const parserStatus = bodyParserStatus(exception);
+    // Database lock contention (DL-37, FU-BE-42): 503 + Retry-After on every route. An
+    // HttpException is never reclassified.
+    const lockCode =
+      exception instanceof HttpException ||
+      exception instanceof OrgScopeError ||
+      exception instanceof AuditWriteAfterCommitError ||
+      exception instanceof OutcomeUnknownError
+        ? undefined
+        : lockContentionCode(exception);
     const status = noScope
       ? HttpStatus.FORBIDDEN
       : exception instanceof HttpException
         ? exception.getStatus()
-        : (parserStatus ?? HttpStatus.INTERNAL_SERVER_ERROR);
+        : lockCode !== undefined
+          ? HttpStatus.SERVICE_UNAVAILABLE
+          : (parserStatus ?? HttpStatus.INTERNAL_SERVER_ERROR);
 
     const problem: ProblemDetails = {
       type: 'about:blank',
@@ -87,6 +106,41 @@ export class ProblemFilter implements ExceptionFilter {
     if (noScope) {
       this.logger.error({ traceId, errorName: exception.name }, 'Query without an org context');
       problem.detail = 'Access denied.';
+    } else if (exception instanceof AuditWriteAfterCommitError) {
+      // The action committed; the audit row did not (P-37 carve-out). A fixed 500 with no detail,
+      // no code and no Retry-After, so a client never retries a non-idempotent action. Logged by
+      // class name, the audit action and trace id only (api-contract section 8: the error name and
+      // the audit action, never entity, actor or organisation ids). This line is the alertable
+      // signal for a missing audit row (FR-105).
+      this.logger.error(
+        { traceId, errorName: exception.name, auditAction: exception.action },
+        'Audit write after commit failed',
+      );
+    } else if (exception instanceof OutcomeUnknownError) {
+      // The action's commit may or may not have landed (FU-BE-208). The generic 500 body (no
+      // detail, no code, no Retry-After). Logged by error name and route only (no entity, actor or
+      // organisation id, no message): this error-level line is the alert signal.
+      this.logger.error(
+        { traceId, errorName: exception.name, route: exception.route },
+        'Write outcome unknown',
+      );
+    } else if (lockCode !== undefined) {
+      // Class name and the fixed code token only: the message can hold SQL and parameters.
+      // P2028 also means a closed or unknown transaction (a code bug), so it is logged at error
+      // level to be noticed when it recurs; the genuine lock cases stay at warn.
+      const fields = {
+        traceId,
+        errorName: exception instanceof Error ? exception.name : 'NonError',
+        lockCode,
+      };
+      if (lockCode === 'P2028') this.logger.error(fields, 'Database transaction error');
+      else this.logger.warn(fields, 'Database lock contention');
+      problem.detail = LOCK_CONTENTION_DETAIL;
+      // Set here, never copied from the error.
+      problem.code = LOCK_CONTENTION_CODE;
+      if (!res.headersSent) {
+        res.setHeader('Retry-After', String(LOCK_CONTENTION_RETRY_AFTER_SECONDS));
+      }
     } else if (parserStatus !== undefined) {
       problem.detail = BODY_PARSER_DETAIL[parserStatus];
     } else if (exception instanceof HttpException) {
@@ -111,7 +165,9 @@ export class ProblemFilter implements ExceptionFilter {
       if (
         (exception instanceof CodedForbiddenException ||
           exception instanceof CodedConflictException) &&
-        status < 500
+        status < 500 &&
+        // BUSY is set by the lock path only, whatever a coded exception was built with.
+        (exception.code as string) !== LOCK_CONTENTION_CODE
       ) {
         problem.code = exception.code;
       }
@@ -138,6 +194,13 @@ export class ProblemFilter implements ExceptionFilter {
       );
     }
 
+    // Headers already sent (an error while the response was streaming): nothing more can be
+    // written, and ending the response would make a truncated 200 look complete. Destroy the
+    // socket so the client sees an aborted response. Applies to every error class.
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
     // A request refused before the throttler never had its body read: close the connection after
     // the answer (no immediate destroy: that can RST and hide the answer; the leftover is capped by
     // the server requestTimeout) (client-errors, FU-BE-100).

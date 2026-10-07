@@ -532,7 +532,9 @@ describe('A save that stops half way says where (FR-204)', () => {
     await u.type(screen.getByLabelText('Title'), '!');
     await u.click(screen.getByRole('button', { name: 'Save' }));
     expect(
-      await screen.findByText(/Some of your changes were saved, but the variants could not be/),
+      await screen.findByText(
+        /Part of your changes were saved, and the variants step may have gone through as well/,
+      ),
     ).toBeInTheDocument();
     // A draft: no reload is forced (nothing is conflicting) and the edits are still on the page.
     expect(
@@ -613,7 +615,9 @@ describe('A save whose test-case call fails (FR-204)', () => {
     await u.click(screen.getByRole('button', { name: 'Add test case' }));
     await u.click(screen.getByRole('button', { name: 'Save' }));
     expect(
-      await screen.findByText(/Some of your changes were saved, but the test cases could not be/),
+      await screen.findByText(
+        /Part of your changes were saved, and the test cases step may have gone through as well/,
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/^Saved/)).not.toBeInTheDocument();
     expect((await detail('q-rotate')).version.title).toMatch(/!$/);

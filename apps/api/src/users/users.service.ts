@@ -27,7 +27,9 @@ import { AuthService } from '../auth/auth.service';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
 import { TokenValidityService } from '../common/auth/token-validity.service';
 import { reauthFailed } from '../common/coded.exception';
-import { hitWindowCounter } from '../common/redis-counter';
+import { lockContentionCode } from '../common/db-contention';
+import { OutcomeUnknownError } from '../common/outcome-unknown.error';
+import { hitWindowCounter, refundWindowCounter } from '../common/redis-counter';
 import { errorName } from '../common/request-context';
 import type { RequestContext } from '../common/request-context';
 import { ensureConnected } from '../infrastructure/redis-ready';
@@ -49,6 +51,10 @@ import type {
 } from './dto/users.dto';
 
 export const INVITE_TTL_MS = 72 * 60 * 60 * 1000;
+
+interface TxPhase {
+  finished: boolean;
+}
 
 export interface Actor {
   id: string;
@@ -156,9 +162,11 @@ export class UsersService {
    */
   async invite(actor: Actor, dto: InviteStaffUserDto, ctx: RequestContext): Promise<StaffUserDto> {
     const verified = await this.auth.verifyCurrentPassword(actor.id, dto.currentPassword, ctx);
-    await this.takeInviteSlot(actor.orgId);
+    const slot = await this.takeInviteSlot(actor.orgId);
     const token = newOpaqueToken();
     let created: User;
+    // Phase tracking for the failure rule (DL-37, FU-BE-208): set inside the callback.
+    const phase: TxPhase = { finished: false };
     try {
       created = await this.prisma.client.$transaction(async (tx) => {
         await this.requireSameAdmin(tx, actor, verified.passwordHash);
@@ -184,29 +192,46 @@ export class UsersService {
             metadata: { role: dto.role },
           },
         });
+        phase.finished = true;
         return user;
       });
     } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      // P2002 can only come from the create inside the callback, so it never follows the commit.
+      // Known limit (FU-BE-208): a retry after an unknown-outcome 500 can hit P2002 because the
+      // first attempt did commit. That is indistinguishable server-side from an ordinary
+      // duplicate, so it keeps the ordinary behaviour (409 plus a USER_INVITE_CONFLICT row).
+      if (
+        !phase.finished &&
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
         // The create and USER_INVITED rolled back together, so the attempt would leave no record
         // and a SUPER_ADMIN could probe other organizations' staff emails unseen (DL-36). Record it
         // outside that transaction: actor, org and time only, no email and no user id. If this
         // insert fails the request fails (500) rather than answering the probe unrecorded.
-        await this.prisma.client.auditLog.create({
-          data: {
-            orgId: actor.orgId,
-            actorId: actor.id,
-            action: 'USER_INVITE_CONFLICT',
-            entityType: 'user',
-            entityId: null,
-            ip: ctx.ip ?? null,
-            metadata: {},
-          },
-        });
+        try {
+          await this.prisma.client.auditLog.create({
+            data: {
+              orgId: actor.orgId,
+              actorId: actor.id,
+              action: 'USER_INVITE_CONFLICT',
+              entityType: 'user',
+              entityId: null,
+              ip: ctx.ip ?? null,
+              metadata: {},
+            },
+          });
+        } catch (auditError) {
+          // Contention here is a 503 that invites a retry: the slot goes back (DL-37).
+          await this.refundSlotOnContention(slot, auditError);
+          throw auditError;
+        }
         throw new ConflictException('A user with this email already exists.');
       }
-      throw e;
+      return this.failInviteTx(e, phase, slot, 'users.invite');
     }
+    // The mail goes out only after a known commit. On OutcomeUnknownError (thrown above) no mail
+    // is sent: the invitee has no link, and the client reads the user list and uses re-issue.
     try {
       await this.mail.sendStaffInvite(
         created.email,
@@ -237,45 +262,51 @@ export class UsersService {
     ctx: RequestContext,
   ): Promise<StaffUserDto> {
     const verified = await this.auth.verifyCurrentPassword(actor.id, currentPassword, ctx);
-    await this.takeInviteSlot(actor.orgId);
+    const slot = await this.takeInviteSlot(actor.orgId);
     const targetId = rawTargetId.toLowerCase();
     const token = newOpaqueToken();
-    const updated = await this.prisma.client.$transaction(async (tx) => {
-      await this.requireSameAdmin(tx, actor, verified.passwordHash);
-      const found = await this.raw('lock the target user row, same org only', () =>
-        tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
+    const phase: TxPhase = { finished: false };
+    const updated = await this.prisma.client
+      .$transaction(async (tx) => {
+        await this.requireSameAdmin(tx, actor, verified.passwordHash);
+        const found = await this.raw('lock the target user row, same org only', () =>
+          tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
           SELECT id, is_active, (password_hash IS NOT NULL) AS has_password FROM users
           WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
           FOR NO KEY UPDATE`),
-      );
-      const target = found[0];
-      if (!target) throw new NotFoundException('User not found.');
-      if (target.has_password || !target.is_active) {
-        throw new ConflictException('Only a pending invitation can be re-issued.');
-      }
-      const done = await tx.user.updateMany({
-        where: { id: targetId, passwordHash: null, isActive: true },
-        data: {
-          setPasswordTokenHash: sha256Hex(token),
-          setPasswordExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
-          updatedAt: new Date(),
-        },
-      });
-      if (done.count !== 1)
-        throw new ConflictException('Only a pending invitation can be re-issued.');
-      await tx.auditLog.create({
-        data: {
-          orgId: actor.orgId,
-          actorId: actor.id,
-          action: 'USER_INVITE_REISSUED',
-          entityType: 'user',
-          entityId: targetId,
-          ip: ctx.ip ?? null,
-          metadata: { method: 'POST', route: '/api/v1/admin/users/:userId/invite' },
-        },
-      });
-      return tx.user.findUniqueOrThrow({ where: { id: targetId } });
-    });
+        );
+        const target = found[0];
+        if (!target) throw new NotFoundException('User not found.');
+        if (target.has_password || !target.is_active) {
+          throw new ConflictException('Only a pending invitation can be re-issued.');
+        }
+        const done = await tx.user.updateMany({
+          where: { id: targetId, passwordHash: null, isActive: true },
+          data: {
+            setPasswordTokenHash: sha256Hex(token),
+            setPasswordExpiresAt: new Date(Date.now() + INVITE_TTL_MS),
+            updatedAt: new Date(),
+          },
+        });
+        if (done.count !== 1)
+          throw new ConflictException('Only a pending invitation can be re-issued.');
+        await tx.auditLog.create({
+          data: {
+            orgId: actor.orgId,
+            actorId: actor.id,
+            action: 'USER_INVITE_REISSUED',
+            entityType: 'user',
+            entityId: targetId,
+            ip: ctx.ip ?? null,
+            metadata: { method: 'POST', route: '/api/v1/admin/users/:userId/invite' },
+          },
+        });
+        const row = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
+        phase.finished = true;
+        return row;
+      })
+      .catch((e: unknown) => this.failInviteTx(e, phase, slot, 'users.invite.reissue'));
+    // No mail on OutcomeUnknownError (thrown above): the client reads the list and re-issues.
     try {
       await this.mail.sendStaffInvite(
         updated.email,
@@ -287,8 +318,37 @@ export class UsersService {
     return this.toDto(updated);
   }
 
-  /** Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429. */
-  private async takeInviteSlot(orgId: string): Promise<void> {
+  /**
+   * Classifies a failed invite or re-issue transaction (DL-37, FU-BE-208) and always throws.
+   * Our own HttpExceptions and every failure before the callback returned keep the existing
+   * behaviour: rethrown as is, the slot refunded only for contention (503 BUSY). After the callback
+   * returned, 40001, 40P01 and P2034 are rollbacks (503 BUSY, slot refunded); anything else (P2028
+   * or P1017 at COMMIT, a connection error) may have committed: OutcomeUnknownError, and the slot
+   * is NOT refunded, so a retried invite cannot get a free slot.
+   */
+  private async failInviteTx(
+    e: unknown,
+    phase: TxPhase,
+    slot: string,
+    route: string,
+  ): Promise<never> {
+    if (e instanceof HttpException || !phase.finished) {
+      await this.refundSlotOnContention(slot, e);
+      throw e;
+    }
+    const code = lockContentionCode(e);
+    if (code === '40001' || code === '40P01' || code === 'P2034') {
+      await this.refundSlotOnContention(slot, e);
+      throw e;
+    }
+    throw new OutcomeUnknownError(route);
+  }
+
+  /**
+   * Fixed window per org and hour. Redis down is a 503 (fail closed), over the limit a 429.
+   * Returns the window key that was counted, so a failed attempt can give its slot back.
+   */
+  private async takeInviteSlot(orgId: string): Promise<string> {
     const key = `invite:org:${orgId}:${Math.floor(Date.now() / (INVITE_WINDOW_SECONDS * 1000))}`;
     let count: number;
     try {
@@ -305,6 +365,19 @@ export class UsersService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
+    return key;
+  }
+
+  /**
+   * DL-37: lock contention answers 503 and invites a retry, so the invite slot of the attempt
+   * that never happened is given back; otherwise contention alone could exhaust the org's budget.
+   * Only for contention: a refused invite (409, 404) keeps its slot as before. This counter does
+   * not record a failed authentication (the admin's password was already verified), so refunding
+   * it cannot erase an attacker's count. Best effort, never masks the original error.
+   */
+  private async refundSlotOnContention(slotKey: string, error: unknown): Promise<void> {
+    if (lockContentionCode(error) === undefined) return;
+    await refundWindowCounter(this.redis, slotKey);
   }
 
   /**
