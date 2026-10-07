@@ -662,6 +662,49 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(logSpy.mock.calls.some((c) => c[1] === 'Write outcome unknown')).toBe(false);
     });
 
+    it('FU-BE-208, FU-BE-220, DL-37, FR-102: plain login: a lock error from the family INSERT itself (before insert.done) is 503 BUSY and the attempt is refunded once (counter back to 0)', async () => {
+      const u = await createUser({ role: UserRole.RECRUITER, totp: false });
+      const base = appPrisma.client as unknown as {
+        $queryRaw: (...a: unknown[]) => Promise<unknown>;
+      };
+      const real = base.$queryRaw.bind(base);
+      jest.spyOn(base, '$queryRaw').mockImplementation(async (...args: unknown[]) => {
+        const text = JSON.stringify((args[0] as { strings?: string[] } | undefined)?.strings ?? '');
+        if (text.includes('INSERT INTO refresh_tokens')) throw lockError();
+        return real(...args);
+      });
+      const refund = spyRefund();
+      await login(u.email).expect(503);
+      expect(refund).toHaveBeenCalledTimes(1);
+      expect(await failedLogins(u.id)).toBe(0);
+    });
+
+    it.each([
+      ['the commit did not land (real rollback)', false],
+      ['the commit landed', true],
+    ])(
+      'FU-BE-208, FU-BE-220, DL-37, FR-102: recovery-code login, P2028 at COMMIT of the recovery transaction when %s: no refund (counter 1 if not landed, 0 if landed) and the code is consumed per the real DB state',
+      async (_n, landed) => {
+        const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+        const recovery = newRecoveryCode();
+        await prisma.user.update({
+          where: { id: u.id },
+          data: { recoveryCodeHashes: [sha256Hex(normalizeRecoveryCode(recovery))] },
+        });
+        const challenge = await challengeFor(u.email);
+        const refund = spyRefund();
+        if (landed) commitThenFail(p2028);
+        else failAfterCallback();
+        // Still answered 503 on this path: tracked by FU-BE-219.
+        await verify2fa(challenge, recovery).expect(503);
+        expect(refund).not.toHaveBeenCalled();
+        // Landed: the transaction's own clearFailures committed (0). Not landed: the reservation stays.
+        expect(await failedLogins(u.id)).toBe(landed ? 0 : 1);
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.recoveryCodeHashes).toHaveLength(landed ? 0 : 1);
+      },
+    );
+
     it('FU-BE-208, FR-102: a successful login keeps its mark: the same code cannot be replayed with a fresh challenge', async () => {
       const u = await createUser({ role: UserRole.REVIEWER, totp: true });
       const code = authenticator.generate(SECRET);
