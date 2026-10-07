@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -16,7 +17,7 @@ import { parseEnv } from 'node:util';
 import { after, before, describe, it } from 'node:test';
 import { findProblems } from './local-db-guard.mjs';
 import { REPO_ROOT } from './test-support.mjs';
-import { buildLocalEnv } from './local-env.mjs';
+import { buildLocalEnv, detectSupport } from './local-env.mjs';
 
 const SCRIPT = `${REPO_ROOT}infra/scripts/local-env.mjs`;
 
@@ -66,6 +67,45 @@ describe('local-env (local demo)', () => {
   it('the result passes the localhost guard that db:migrate and db:seed run', () => {
     const env = parseEnv(readFileSync(join(dir, '.env'), 'utf8'));
     assert.deepEqual(findProblems({ env, dotenv: env }), []);
+  });
+
+  it('the MinIO login and the S3 keys are the same local values, and the object store points at MinIO', () => {
+    const env = parseEnv(readFileSync(join(dir, '.env'), 'utf8'));
+    assert.equal(env.S3_SECRET_ACCESS_KEY, env.MINIO_ROOT_PASSWORD);
+    assert.equal(env.S3_ACCESS_KEY_ID, env.MINIO_ROOT_USER);
+    assert.ok(env.MINIO_ROOT_PASSWORD.length >= 8);
+    assert.equal(env.S3_ENDPOINT, 'http://localhost:9000');
+    assert.equal(env.S3_FORCE_PATH_STYLE, 'true');
+    assert.equal(env.S3_MEDIA_BUCKET, 'codeproctor-media');
+  });
+
+  it('the dev mail sink and the execution stub are switched on only when the API supports them', () => {
+    const example = readFileSync(`${REPO_ROOT}.env.example`, 'utf8');
+    const off = parseEnv(buildLocalEnv(example, { smtpDev: false, execStub: false }));
+    assert.equal(off.EMAIL_PROVIDER, 'noop');
+    assert.equal(off.SMTP_DEV_HOST, undefined);
+    assert.equal(off.JUDGE0_MODE, undefined);
+    const on = parseEnv(buildLocalEnv(example, { smtpDev: true, execStub: true }));
+    assert.equal(on.EMAIL_PROVIDER, 'smtp-dev');
+    assert.equal(on.SMTP_DEV_HOST, '127.0.0.1');
+    assert.equal(on.SMTP_DEV_PORT, '1025');
+    assert.equal(on.JUDGE0_MODE, 'stub');
+    assert.equal(on.APP_ENV, 'development');
+  });
+
+  it('detectSupport reads the API environment schema', () => {
+    const root = mkdtempSync(join(tmpdir(), 'local-env-support-'));
+    try {
+      assert.deepEqual(detectSupport(root), { smtpDev: false, execStub: false });
+      mkdirSync(join(root, 'apps/api/src/config'), { recursive: true });
+      writeFileSync(
+        join(root, 'apps/api/src/config/env.ts'),
+        "EMAIL_PROVIDER: z.enum(['ses', 'noop', 'smtp-dev']), JUDGE0_MODE: z.enum(['real', 'stub'])",
+      );
+      assert.deepEqual(detectSupport(root), { smtpDev: true, execStub: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('two runs give different secrets', () => {

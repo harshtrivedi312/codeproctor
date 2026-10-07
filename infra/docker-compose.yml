@@ -1,5 +1,6 @@
-# Local infrastructure for CodeProctor: PostgreSQL 16, Redis 8.8 and Adminer.
-# Judge0 is added in BE-05. The app role is created by a DB-03 migration (ADR 0006 section 7); there is no init script.
+# Local infrastructure for CodeProctor: PostgreSQL 16, Redis 8.8, Adminer, and for the local demo
+# (DL-52, D-67) Mailpit (a dev mail sink) and MinIO (an S3-compatible object store). The worker is
+# behind the `worker` profile until it has an entrypoint. Judge0 is added in BE-05. The app role is created by a DB-03 migration (ADR 0006 section 7); there is no init script.
 #
 # Run from the repository root (credentials come from .env, see .env.example):
 #   pnpm dev:infra
@@ -62,6 +63,68 @@ services:
       retries: 6
       start_period: 5s
 
+  # Mailpit catches every email the API sends (candidate one-time codes, invitations) so a local run
+  # needs no real mail server and nothing leaves the machine. Local development only: the API's
+  # smtp-dev mail adapter is refused unless APP_ENV is exactly "development". Web UI: http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:v1.21
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:1025:1025'
+      - '127.0.0.1:8025:8025'
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  # MinIO is the local S3-compatible object store (media, ID images, consent PDFs, reports). The
+  # entrypoint creates the two buckets before the server starts (in single-drive mode a top-level
+  # directory of /data is a bucket) and the browser upload CORS is set for the local web origin.
+  # The S3_* values in .env point here; staging and the pilot use real S3 (ADR 0001 section 2.1).
+  # Console: http://localhost:9001 (the MINIO_ROOT_* values from .env).
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: unless-stopped
+    entrypoint:
+      - sh
+      - -c
+      - mkdir -p /data/codeproctor-media /data/codeproctor-backup && exec minio server /data --console-address ':9001'
+    environment:
+      - MINIO_ROOT_USER
+      - MINIO_ROOT_PASSWORD
+      - MINIO_API_CORS_ALLOW_ORIGIN=http://localhost:3000
+    ports:
+      - '127.0.0.1:9000:9000'
+      - '127.0.0.1:9001:9001'
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  # The analysis worker (Python 3.12, FastAPI). Off by default: apps/worker has modules and tests but
+  # no entrypoint yet (Integrity B adds it). Start with `docker compose --profile worker up -d` once
+  # it exists; the build context and command below are the plan, not a working service.
+  worker:
+    profiles: ['worker']
+    build:
+      context: ../apps/worker
+    restart: unless-stopped
+    environment:
+      - APP_ENV=development
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - '127.0.0.1:8000:8000'
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:
+  minio_data:

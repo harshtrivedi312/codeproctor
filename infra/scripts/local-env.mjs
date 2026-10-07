@@ -20,10 +20,15 @@ const NAME = 'local-env';
 const hex = (bytes) => randomBytes(bytes).toString('hex');
 const b64 = (bytes) => randomBytes(bytes).toString('base64');
 
-/** The .env text for a local run, built from the text of .env.example. Pure apart from randomness. */
-export function buildLocalEnv(example) {
+/**
+ * The .env text for a local run, built from the text of .env.example. Pure apart from randomness.
+ * `supports` says which local-only API features exist in this checkout (see `detectSupport`): when the
+ * API supports them, the commented demo lines (the dev mail sink, the execution stub) are switched on.
+ */
+export function buildLocalEnv(example, supports = { smtpDev: false, execStub: false }) {
   const postgresPassword = hex(16);
   const appUserPassword = hex(16);
+  const minioPassword = hex(16);
   const values = {
     POSTGRES_PASSWORD: postgresPassword,
     APP_USER_PASSWORD: appUserPassword,
@@ -35,6 +40,8 @@ export function buildLocalEnv(example) {
     OTP_PEPPER: b64(48),
     ENCRYPTION_KEY: b64(32),
     SESSION_KEY_ENC_KEY_k1: b64(32),
+    MINIO_ROOT_PASSWORD: minioPassword,
+    S3_SECRET_ACCESS_KEY: minioPassword,
     JUDGE0_AUTH_TOKEN: hex(24),
     JUDGE0_AUTHZ_TOKEN: hex(24),
     JUDGE0_DB_PASSWORD: hex(16),
@@ -45,11 +52,29 @@ export function buildLocalEnv(example) {
     if (m === null || !(m[1] in values)) return line;
     return `${m[1]}=${values[m[1]]}`;
   });
-  const text = lines.join('\n');
+  let text = lines.join('\n');
+  if (supports.smtpDev) {
+    text = text
+      .replace(/^EMAIL_PROVIDER=noop$/m, 'EMAIL_PROVIDER=smtp-dev')
+      .replace(/^# (SMTP_DEV_HOST=.*)$/m, '$1')
+      .replace(/^# (SMTP_DEV_PORT=.*)$/m, '$1');
+  }
+  if (supports.execStub) text = text.replace(/^# (JUDGE0_MODE=stub)$/m, '$1');
   // Anything still marked change-me would stop the API or ship a known value: refuse instead.
   const left = [...text.matchAll(/^([A-Za-z0-9_]+)=.*change-me/gm)].map((m) => m[1]);
   if (left.length > 0) throw new Error(`no local value is known for: ${left.join(', ')}`);
   return text;
+}
+
+/** Which local-only API features this checkout has: read from the API's environment schema. */
+export function detectSupport(root) {
+  let schema = '';
+  try {
+    schema = readFileSync(join(root, 'apps/api/src/config/env.ts'), 'utf8');
+  } catch {
+    // No API sources: nothing is switched on.
+  }
+  return { smtpDev: schema.includes("'smtp-dev'"), execStub: schema.includes('JUDGE0_MODE') };
 }
 
 export const WEB_ENV_LOCAL = 'NEXT_PUBLIC_API_URL=http://localhost:4000/api\n';
@@ -76,14 +101,25 @@ function main() {
     process.exit(1);
   }
   let text;
+  const notes = [];
   try {
-    text = buildLocalEnv(readFileSync(examplePath, 'utf8'));
+    const supports = detectSupport(root);
+    text = buildLocalEnv(readFileSync(examplePath, 'utf8'), supports);
+    notes.push(
+      supports.smtpDev
+        ? 'mail: Mailpit (smtp-dev) is on.'
+        : 'mail: the API has no dev mail sink yet; mail is dropped (noop).',
+      supports.execStub
+        ? 'execution: the local stub is on.'
+        : 'execution: the API has no local stub yet.',
+    );
   } catch (error) {
     console.error(`${NAME}: ${error instanceof Error ? error.message : 'failed.'}`);
     process.exit(1);
   }
   writeFileSync(envPath, text, { mode: 0o600, flag: 'wx' });
   console.log('wrote .env (random local secrets; git-ignored).');
+  for (const note of notes) console.log(note);
   if (existsSync(webPath)) {
     console.log('apps/web/.env.local already exists and is left as it is.');
   } else {
