@@ -3,7 +3,9 @@ import { render } from '@testing-library/react';
 import { setAccessToken } from '@/lib/auth-token';
 import { nav, router } from './nav-mock';
 import { AuthProvider } from '@/features/auth/auth-provider';
+import { busyStore } from '@/lib/api/busy';
 import { beginSession, publishSession } from '@/lib/auth-session';
+import { resetMockFaults } from '@/mocks/fault-handlers';
 import { resetMockAdminState } from '@/mocks/admin-handlers';
 import { resetMockQuestionState } from '@/mocks/question-handlers';
 import { resetMockInvitationState } from '@/mocks/invitation-handlers';
@@ -22,6 +24,8 @@ export function resetAuthTestState(): void {
   resetMockQuestionState();
   resetMockTestState();
   resetMockInvitationState();
+  resetMockFaults();
+  busyStore.reset();
 }
 
 export function renderWithAuth(ui: React.ReactElement) {
