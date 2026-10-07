@@ -12,7 +12,7 @@
 import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue, Worker } from 'bullmq';
-import type { ConnectionOptions, Job } from 'bullmq';
+import type { Job } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { Inject } from '@nestjs/common';
 import { z } from 'zod';
@@ -23,7 +23,10 @@ import { PrismaService } from '../database/prisma.service';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import { LIVE_STATUSES } from '../session/session-transitions';
+import { bullConnection } from '../session/bull-connection';
 import { ConsentPdfService } from './consent-pdf.service';
+
+export { bullConnection };
 
 export const SESSION_QUEUE = 'session-jobs';
 /** FR-609: more than 60 s without a heartbeat logs DISCONNECTED. */
@@ -50,19 +53,6 @@ const serverEventData = z.object({
   type: z.literal('RECONNECTED'),
   atMs: z.number().int(),
 });
-
-/** BullMQ takes connection options, not a URL; derive them from REDIS_URL. */
-export function bullConnection(redisUrl: string): ConnectionOptions {
-  const url = new URL(redisUrl);
-  return {
-    host: url.hostname,
-    port: url.port === '' ? 6379 : Number(url.port),
-    ...(url.username !== '' ? { username: decodeURIComponent(url.username) } : {}),
-    ...(url.password !== '' ? { password: decodeURIComponent(url.password) } : {}),
-    ...(url.pathname.length > 1 ? { db: Number(url.pathname.slice(1)) } : {}),
-    ...(url.protocol === 'rediss:' ? { tls: {} } : {}),
-  };
-}
 
 @Injectable()
 export class SessionJobsService implements OnModuleInit, OnApplicationShutdown {
