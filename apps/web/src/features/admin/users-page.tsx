@@ -17,7 +17,13 @@ import { ROLE_LABELS } from '@/features/auth/user-badge';
 import type { Schemas } from '@/lib/api/client';
 import { ConfirmDialog } from './confirm-dialog';
 import { formatDate } from './format';
-import { ApiFailure, useInviteUser, useStaffUsers, useUpdateUser } from './queries';
+import {
+  ApiFailure,
+  useInviteUser,
+  useStaffUsers,
+  useUpdateUser,
+  writeFailureText,
+} from './queries';
 import { inviteStaffSchema, type InviteStaffValues } from './schemas';
 import { SettingsFrame } from './settings-frame';
 
@@ -63,7 +69,10 @@ function UsersContent(): React.JSX.Element {
           toast.error(
             e instanceof ApiFailure && e.status === 409
               ? 'This role change is not allowed. You cannot change your own role, and the last Super Admin cannot be changed. Ask another Super Admin if you need this.'
-              : 'Could not change the role. Check your connection and try again.',
+              : writeFailureText(
+                  e,
+                  'Could not change the role. Check your connection and try again.',
+                ),
           ),
         onSettled: () => setRoleChange(null),
       },
@@ -157,7 +166,10 @@ function UsersContent(): React.JSX.Element {
                 { id: u.id, active: true },
                 {
                   onSuccess: () => toast.success(`${u.name} can sign in again.`),
-                  onError: () => toast.error('Could not reactivate. Try again in a moment.'),
+                  onError: (e) =>
+                    toast.error(
+                      writeFailureText(e, 'Could not reactivate. Try again in a moment.'),
+                    ),
                 },
               )
             }
@@ -245,7 +257,7 @@ function UsersContent(): React.JSX.Element {
                 toast.error(
                   e instanceof ApiFailure && e.status === 409
                     ? 'This user cannot be deactivated (for example the last Super Admin). Give another person the role first.'
-                    : 'Could not deactivate. Try again in a moment.',
+                    : writeFailureText(e, 'Could not deactivate. Try again in a moment.'),
                 );
                 setToDeactivate(null);
               },
@@ -288,7 +300,10 @@ function InviteDialog({
         setServerError(
           e instanceof ApiFailure && e.status === 409
             ? 'Someone with this email already has an account. Use a different email, or change their role in the table.'
-            : 'We could not send the invitation. Check your connection and try again.',
+            : writeFailureText(
+                e,
+                'We could not send the invitation. Check your connection and try again.',
+              ),
         ),
     });
   }

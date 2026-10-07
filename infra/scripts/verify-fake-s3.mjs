@@ -9,10 +9,17 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], close: () => Promise<void> }>} */
+/** failList: every listing answers 500; failHead: every HEAD answers a bare 403; failPut: every PUT does; precondition: every conditional PUT answers 412; conflicts: the next N conditional PUTs answer 409.
+ * @returns {Promise<{ port: number, faults: { failList: boolean, failHead: boolean, failPut: boolean, precondition: boolean, conflicts: number }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], puts: Array<{ path: string, conditional: boolean }>, close: () => Promise<void> }>} */
 export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
-  const faults = { failList: false };
+  const faults = {
+    failList: false,
+    failHead: false,
+    failPut: false,
+    precondition: false,
+    conflicts: 0,
+  };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
   const objects = new Map();
   /** @type {Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>} */
@@ -22,6 +29,8 @@ export async function startFakeS3({ versioned = false } = {}) {
   let counter = 0;
   /** Every DELETE request, as "bucket/key" (tests assert versioned backups issue none). */
   const deletes = [];
+  /** Every accepted PUT, with whether it carried If-None-Match: * (tests assert the erasure list is written conditionally). */
+  const puts = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const path = decodeURIComponent(url.pathname.slice(1));
@@ -33,6 +42,25 @@ export async function startFakeS3({ versioned = false } = {}) {
         res.end(req.method === 'HEAD' ? undefined : body);
       };
       if (req.method === 'PUT') {
+        if (faults.failPut) return send(403);
+        // The next `conflicts` conditional PUTs answer 409 (a concurrent conditional write in flight).
+        if (faults.conflicts > 0 && req.headers['if-none-match'] === '*') {
+          faults.conflicts -= 1;
+          return send(409, xml('<Error><Code>ConditionalRequestConflict</Code></Error>'), {
+            'content-type': 'application/xml',
+          });
+        }
+        // A writer that created the key between our listing and our PUT: the condition fails.
+        if (faults.precondition && req.headers['if-none-match'] === '*')
+          return send(412, xml('<Error><Code>PreconditionFailed</Code></Error>'), {
+            'content-type': 'application/xml',
+          });
+        // A conditional create (If-None-Match: *): refused with 412 when the key already exists.
+        if (req.headers['if-none-match'] === '*' && objects.has(path))
+          return send(412, xml('<Error><Code>PreconditionFailed</Code></Error>'), {
+            'content-type': 'application/xml',
+          });
+        puts.push({ path, conditional: req.headers['if-none-match'] === '*' });
         const body = Buffer.concat(chunks);
         const meta = {};
         for (const [h, v] of Object.entries(req.headers))
@@ -74,6 +102,7 @@ export async function startFakeS3({ versioned = false } = {}) {
           { 'content-type': 'application/xml' },
         );
       }
+      if (req.method === 'HEAD' && faults.failHead) return send(403);
       if (req.method === 'GET' || req.method === 'HEAD') {
         const wanted = url.searchParams.get('versionId');
         const history = versions.get(path) ?? [];
@@ -106,6 +135,7 @@ export async function startFakeS3({ versioned = false } = {}) {
     versions,
     metas,
     deletes,
+    puts,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

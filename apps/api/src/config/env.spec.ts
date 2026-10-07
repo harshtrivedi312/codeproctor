@@ -420,3 +420,131 @@ describe('NFR-04 environment validation', () => {
     });
   });
 });
+
+describe('FU-BE-194 database pool settings', () => {
+  it('FU-BE-194: defaults apply', () => {
+    const env = validateEnv(valid);
+    expect(env.DB_POOL_MAX).toBe(10);
+    expect(env.DB_CONNECT_TIMEOUT_MS).toBe(5_000);
+    expect(env.DB_WARMUP_TIMEOUT_MS).toBe(5_000);
+    expect(env.DB_IDLE_TIMEOUT_MS).toBe(60_000);
+  });
+
+  it.each([
+    ['DB_POOL_MAX', ['0', '-1', '1.5', '51', '']],
+    ['DB_CONNECT_TIMEOUT_MS', ['0', '-1', '1.5', '60001', '']],
+    ['DB_WARMUP_TIMEOUT_MS', ['0', '-1', '1.5', '60001', '']],
+    ['DB_IDLE_TIMEOUT_MS', ['0', '-1', '1.5', '300001', '']],
+  ])('FU-BE-194: %s refuses 0, negatives, fractions, above-max and an empty value', (name, bad) => {
+    for (const value of bad) {
+      expect(() => validateEnv({ ...valid, [name]: value })).toThrow(new RegExp(name));
+    }
+  });
+
+  it('FU-BE-194: the maximum values are accepted', () => {
+    const env = validateEnv({
+      ...valid,
+      DB_POOL_MAX: '50',
+      DB_CONNECT_TIMEOUT_MS: '60000',
+      DB_WARMUP_TIMEOUT_MS: '60000',
+      DB_IDLE_TIMEOUT_MS: '300000',
+    });
+    expect(env.DB_POOL_MAX).toBe(50);
+    expect(env.DB_IDLE_TIMEOUT_MS).toBe(300_000);
+  });
+
+  describe('DL-52 NFR-04 placeholder secrets', () => {
+    const ph = {
+      JWT_ACCESS_SECRET: 'change-me-local-access-secret-0000000000',
+      COOKIE_SECRET: 'Change-Me-local-cookie-secret-00000000000',
+      JWT_CANDIDATE_SECRET: 'change-me-local-candidate-secret-00000000',
+      OTP_PEPPER: 'change-me-local-otp-pepper-0000000000000',
+      ENCRYPTION_KEY: Buffer.from('change-me-local-encrypt-key-0001').toString('base64'),
+      JUDGE0_AUTH_TOKEN: 'change-me',
+      JUDGE0_AUTHZ_TOKEN: 'change-me',
+    };
+    const sessionKey = Buffer.from('change-me-local-session-key-0001').toString('base64');
+    const good = {
+      ...valid,
+      JWT_CANDIDATE_SECRET: 'c'.repeat(40),
+      OTP_PEPPER: 'd'.repeat(40),
+      SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
+    };
+
+    it.each(['staging', 'pilot', 'production'])(
+      'DL-52 NFR-04: each placeholder alone is refused in %s, a generated value is accepted',
+      (APP_ENV) => {
+        const base = { ...good, APP_ENV, ...liveExtras(APP_ENV) };
+        expect(() => validateEnv(base)).not.toThrow();
+        for (const [name, value] of Object.entries(ph)) {
+          expect(() => validateEnv({ ...base, [name]: value })).toThrow(new RegExp(name));
+        }
+        expect(() => validateEnv({ ...base, SESSION_KEY_ENC_KEY_k1: sessionKey })).toThrow(
+          /SESSION_KEY_ENC_KEY_k1/,
+        );
+        // A non-active kid is checked too.
+        expect(() => validateEnv({ ...base, SESSION_KEY_ENC_KEY_k0: sessionKey })).toThrow(
+          /SESSION_KEY_ENC_KEY_k0/,
+        );
+      },
+    );
+
+    it('DL-52 NFR-04: NODE_ENV=production is shared whatever APP_ENV says', () => {
+      expect(() =>
+        validateEnv({
+          ...good,
+          ...liveExtras('pilot'),
+          APP_ENV: 'development',
+          NODE_ENV: 'production',
+          OTP_PEPPER: ph.OTP_PEPPER,
+          SESSION_KEY_ENC_KEY_k1: sessionKey,
+        }),
+      ).toThrow(/OTP_PEPPER/);
+      expect(() =>
+        validateEnv({
+          ...good,
+          ...liveExtras('pilot'),
+          APP_ENV: 'development',
+          NODE_ENV: 'production',
+          SESSION_KEY_ENC_KEY_k1: sessionKey,
+        }),
+      ).toThrow(/SESSION_KEY_ENC_KEY_k1/);
+    });
+
+    it('DL-52 NFR-04: the placeholder match ignores quotes, spaces and offset', () => {
+      const base = { ...good, APP_ENV: 'staging' };
+      const pad = 'x'.repeat(30);
+      expect(() => validateEnv({ ...base, OTP_PEPPER: `"change-me-${pad}` })).toThrow(/OTP_PEPPER/);
+      expect(() => validateEnv({ ...base, OTP_PEPPER: `   CHANGE-ME-${pad}` })).toThrow(
+        /OTP_PEPPER/,
+      );
+      expect(() => validateEnv({ ...base, OTP_PEPPER: `${pad}-change-me` })).toThrow(/OTP_PEPPER/);
+      const offsetKey = Buffer.from('xx-change-me-local-key-000000000').toString('base64');
+      expect(() => validateEnv({ ...base, ENCRYPTION_KEY: offsetKey })).toThrow(/ENCRYPTION_KEY/);
+      expect(() => validateEnv({ ...base, SESSION_KEY_ENC_KEY_k1: offsetKey })).toThrow(
+        /SESSION_KEY_ENC_KEY_k1/,
+      );
+    });
+
+    it.each(['development', 'test'])('DL-52 NFR-04: placeholders are accepted in %s', (APP_ENV) => {
+      expect(() =>
+        validateEnv({ ...valid, ...ph, APP_ENV, SESSION_KEY_ENC_KEY_k1: sessionKey }),
+      ).not.toThrow();
+    });
+  });
+});
+
+/** Settings pilot and production need besides the secrets, so only the placeholders can fail. */
+function liveExtras(appEnv: string): Record<string, string> {
+  if (appEnv === 'staging') return {};
+  return {
+    JUDGE0_URL: 'http://127.0.0.1:2358',
+    JUDGE0_AUTH_TOKEN: 'j'.repeat(40),
+    JUDGE0_AUTHZ_TOKEN: 'k'.repeat(40),
+    EMAIL_PROVIDER: 'ses',
+    SES_FROM_ADDRESS: 'no-reply@example.com',
+    WEB_ORIGIN: 'https://app.example.com',
+    TRUST_PROXY_HOPS: '1',
+    REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+  };
+}
