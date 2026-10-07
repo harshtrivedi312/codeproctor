@@ -96,6 +96,8 @@ describe('.env.example (DL-52, NFR-04)', () => {
     const { APP_ENV: _unused, ...rest } = active;
     void _unused;
     expect(() => validateEnv(rest)).toThrow(/APP_ENV/);
+    for (const APP_ENV of ['', 'prod', 'dev', 'Development'])
+      expect(() => validateEnv({ ...active, APP_ENV })).toThrow(/APP_ENV/);
     expect(isSharedEnv({ APP_ENV: 'prod' })).toBe(true);
     expect(isSharedEnv({ APP_ENV: 'development', NODE_ENV: 'production' })).toBe(true);
   });
