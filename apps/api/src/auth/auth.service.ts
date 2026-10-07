@@ -533,6 +533,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     try {
       const session = await this.prisma.client.$transaction(async (tx) => {
         phase.started = true;
+        phase.finished = false; // a re-run of the callback must not keep a stale flag
         const enabled = await tx.user.updateMany({
           // The secret must still be the one the code was checked against.
           where: {
@@ -668,6 +669,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         !wrongCode &&
         !insert.done &&
         isCleanRollback({ started: true, finished: false }, e) &&
+        // Defensive: the signal is only thrown after the INSERT returned (insert.done), so this
+        // never matters today; it keeps a refused session from ever releasing the mark.
         !(e instanceof PasswordChangedSignal)
       ) {
         await releaseMark(mark);
@@ -749,6 +752,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     try {
       await this.prisma.client.$transaction(async (tx) => {
         phase.started = true;
+        phase.finished = false; // a re-run of the callback must not keep a stale flag
         const updated = await tx.user.updateMany({
           where: {
             id: user.id,

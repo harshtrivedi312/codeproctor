@@ -7,6 +7,7 @@ import type { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
 import type { Redis } from 'ioredis';
 import { authenticator } from 'otplib';
+import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import type { TokenService } from '../common/auth/token.service';
@@ -164,8 +165,13 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         throw error();
       }, opts)) as unknown as typeof client.$transaction);
   }
-  const markKey = (userId: string): string =>
-    `auth:totp:used:${userId}:${Math.floor(Date.now() / 1000 / 30)}`;
+  // Scans for the user's used-step keys, so a 30 s step boundary between generating a code and
+  // asserting cannot make the check flaky.
+  const markKeys = (userId: string): Promise<string[]> => redis.keys(`auth:totp:used:${userId}:*`);
+  const markCount = async (userId: string): Promise<number> => (await markKeys(userId)).length;
+  const dropMarks = async (userId: string): Promise<void> => {
+    for (const k of await markKeys(userId)) await redis.del(k);
+  };
 
   describe('login with a TOTP code (completeLogin)', () => {
     it('FU-BE-208, DL-37, FR-102: a clean rollback (503 BUSY) gives the code back: the retry with the SAME code signs in and the failed_logins counter is unchanged', async () => {
@@ -186,7 +192,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       const code = authenticator.generate(SECRET);
       spyOnService('clearFailures').mockRejectedValueOnce(lockError());
       await verify2fa(challenge, code).expect(503);
-      expect(await redis.exists(markKey(u.id))).toBe(1);
+      expect(await markCount(u.id)).toBe(1);
       expect(await failedLogins(u.id)).toBe(0);
       await verify2fa(challenge, code).expect(400);
       expect(await failedLogins(u.id)).toBe(1);
@@ -196,7 +202,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       const u = await createUser({ role: UserRole.REVIEWER, totp: true });
       const code = authenticator.generate(SECRET);
       await verify2fa(await challengeFor(u.email), code).expect(200);
-      expect(await redis.exists(markKey(u.id))).toBe(1);
+      expect(await markCount(u.id)).toBe(1);
       await verify2fa(await challengeFor(u.email), code).expect(400);
     });
 
@@ -216,7 +222,6 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
     it('FU-BE-208: release deletes only the key this request set, never one set by another request', async () => {
       const u = await createUser({ totp: true });
       const mark: { release?: () => Promise<void> } = {};
-      const key = markKey(u.id);
       expect(
         await totp.verify(
           u.id,
@@ -225,10 +230,64 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
           mark,
         ),
       ).toBe(true);
-      await redis.set(key, 'someone-else', 'EX', 60);
+      const [key] = await markKeys(u.id);
+      await redis.set(key ?? '', 'someone-else', 'EX', 60);
       await mark.release?.();
-      expect(await redis.get(key)).toBe('someone-else');
-      await redis.del(key);
+      expect(await redis.get(key ?? '')).toBe('someone-else');
+      await dropMarks(u.id);
+    });
+
+    it('FU-BE-208: release deletes its own unchanged key', async () => {
+      const u = await createUser({ totp: true });
+      const mark: { release?: () => Promise<void> } = {};
+      expect(
+        await totp.verify(
+          u.id,
+          encryptSecret(SECRET, Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64')),
+          authenticator.generate(SECRET),
+          mark,
+        ),
+      ).toBe(true);
+      expect(await markCount(u.id)).toBe(1);
+      await mark.release?.();
+      expect(await markCount(u.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: a REAL 55P03 on the refresh-family INSERT (row lock held elsewhere, short lock_timeout) is 503 BUSY, releases the mark, and the retry with the SAME code signs in', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+      const challenge = await challengeFor(u.email);
+      const code = authenticator.generate(SECRET);
+      const holder = new Client({ connectionString: process.env.DATABASE_URL });
+      await holder.connect();
+      const base = appPrisma.client as unknown as {
+        $queryRaw: (...a: unknown[]) => Promise<unknown>;
+      };
+      const real = base.$queryRaw.bind(base);
+      const spy = jest.spyOn(base, '$queryRaw').mockImplementation(async (...args: unknown[]) => {
+        const text = JSON.stringify((args[0] as { strings?: string[] } | undefined)?.strings ?? '');
+        if (!text.includes('INSERT INTO refresh_tokens')) return real(...args);
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [u.id]);
+        try {
+          return await prisma.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '200ms'`);
+            return (tx.$queryRaw as (...a: unknown[]) => Promise<unknown>)(...args);
+          });
+        } finally {
+          // Free the row at once: the request's own refund UPDATE must not wait on the holder.
+          await holder.query('ROLLBACK');
+        }
+      });
+      try {
+        await verify2fa(challenge, code).expect(503);
+        expect(await markCount(u.id)).toBe(0);
+      } finally {
+        spy.mockRestore();
+        await holder.query('ROLLBACK').catch(() => undefined);
+        await holder.end();
+      }
+      await verify2fa(challenge, code).expect(200);
+      expect(await failedLogins(u.id)).toBe(0);
     });
   });
 
@@ -266,7 +325,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       const code = authenticator.generate(e.key);
       failAfterCallback();
       await confirm(e.token, code).expect(503);
-      expect(await redis.exists(markKey(e.id))).toBe(1);
+      expect(await markCount(e.id)).toBe(1);
       await confirm(e.token, code).expect(400);
       expect(await failedLogins(e.id)).toBe(1);
     });
@@ -280,6 +339,27 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       await confirm(e.token, code).expect(503);
       await confirm(e.token, code).expect(200);
       expect(await failedLogins(e.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: 40001 at commit is a rollback: the code comes back', async () => {
+      const e = await startedEnrollment();
+      const code = authenticator.generate(e.key);
+      failAfterCallback(() => Object.assign(new Error('serialization'), { code: '40001' }));
+      await confirm(e.token, code).expect(503);
+      await confirm(e.token, code).expect(200);
+    });
+
+    it('FU-BE-208, FR-102: a non-lock error inside the callback (AlreadyEnrolledSignal, 409) keeps the mark', async () => {
+      const e = await startedEnrollment();
+      const code = authenticator.generate(e.key);
+      const realVerify = totp.verify.bind(totp);
+      jest.spyOn(totp, 'verify').mockImplementationOnce(async (...args) => {
+        const ok = await realVerify(...args);
+        await prisma.user.update({ where: { id: e.id }, data: { totpSecretEnc: null } });
+        return ok;
+      });
+      await confirm(e.token, code).expect(409);
+      expect(await markCount(e.id)).toBe(1);
     });
 
     it('FU-BE-208, FR-102: wrong enrollment codes still count and lock at 5', async () => {
@@ -324,7 +404,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       const code = authenticator.generate(e.key);
       failAfterCallback();
       await confirm(e.challenge, code).expect(503);
-      expect(await redis.exists(markKey(e.id))).toBe(1);
+      expect(await markCount(e.id)).toBe(1);
       await confirm(e.challenge, code).expect(400);
       expect(await failedLogins(e.id)).toBe(1);
     });
@@ -381,7 +461,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
       failAfterCallback();
       await disable(d.token, code).expect(503);
-      expect(await redis.exists(markKey(d.id))).toBe(1);
+      expect(await markCount(d.id)).toBe(1);
       await disable(d.token, code).expect(403);
       expect(await failedLogins(d.id)).toBe(1);
     });
@@ -397,6 +477,28 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       await disable(d.token, code).expect(503);
       await disable(d.token, code).expect(204);
       expect(await failedLogins(d.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: 40001 at commit is a rollback: the code comes back', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      failAfterCallback(() => Object.assign(new Error('serialization'), { code: '40001' }));
+      await disable(d.token, code).expect(503);
+      await disable(d.token, code).expect(204);
+    });
+
+    it('FU-BE-208, FR-102: a non-lock refusal inside the callback (409 from explainRefusedChange) keeps the mark', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      const realVerify = totp.verify.bind(totp);
+      jest.spyOn(totp, 'verify').mockImplementationOnce(async (...args) => {
+        const ok = await realVerify(...args);
+        await prisma.user.update({ where: { id: d.id }, data: { totpSecretEnc: null } });
+        return ok;
+      });
+      await disable(d.token, code).expect(409);
+      expect(await markCount(d.id)).toBe(1);
     });
 
     it('FU-BE-208, FR-102: wrong codes still count and lock at 5', async () => {
