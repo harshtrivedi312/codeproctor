@@ -93,10 +93,10 @@ s3_put_once() {
   # after a short, doubling pause (bounded: 5 tries). It is never success. 412 is.
   tries=0
   delay=${BACKUP_PUT_RETRY_DELAY_SECONDS:-1}
-  case "$delay" in '' | *[!0-9]*) delay=1 ;; esac
+  case "$delay" in '' | *[!0-9]* | 0[0-9]* | ???*) delay=1 ;; esac
   while :; do
     tries=$((tries + 1))
-    if s3api put-object --bucket "$BUCKET" --key "$2" --body "$1" --content-type "$3" --if-none-match '*' > /dev/null 2> "$WORK/put.err"; then
+    if s3api put-object --bucket "$BUCKET" --key "$2" --body "$1" --content-type "$3" --if-none-match '*' ${BACKUP_SSE:+--server-side-encryption "$BACKUP_SSE"} > /dev/null 2> "$WORK/put.err"; then
       return 0
     fi
     if grep -Eq 'PreconditionFailed|\(412\)' "$WORK/put.err"; then
@@ -109,8 +109,8 @@ s3_put_once() {
       continue
     fi
     # Only the error code reaches the log (never the message, which could name a key or an endpoint).
-    code=$(sed -n 's/.*An error occurred (\([A-Za-z0-9]*\)).*/\1/p' "$WORK/put.err" | head -1)
-    die "could not write the erasure list entry after $tries tries (error ${code:-unknown}; not a 'precondition failed' answer)."
+    code=$(sed -n 's/.*An error occurred (\([A-Za-z0-9]*\)).*/\1/p' "$WORK/put.err" | head -n 1)
+    die "could not write the erasure list entry (attempt $tries; error ${code:-unknown}; not a 'precondition failed' answer)."
   done
 }
 

@@ -251,7 +251,7 @@ describe('DB-07 guards (NFR-03)', () => {
         store.faults.conflicts = 100;
         const bad = await run(ERASURES, ['append', other, '20261005T020001Z'], e);
         assert.equal(bad.status, 1, bad.stderr);
-        assert.match(bad.stderr, /after 5 tries/);
+        assert.match(bad.stderr, /attempt 5; error/);
         assert.equal(store.faults.conflicts, 95, 'exactly 5 tries, then it stops');
         assert.ok(
           !store.objects.has(`b/db/erasure-list/20261005T020001Z-${other}.json`),
