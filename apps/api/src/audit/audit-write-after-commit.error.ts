@@ -7,7 +7,7 @@
 // the filter logs it so a missing audit row (FR-105) is never silent. Contention inside the
 // action's own transaction is not this type and stays 503 BUSY.
 export class AuditWriteAfterCommitError extends Error {
-  constructor(readonly action: string = 'UNKNOWN') {
+  constructor(readonly action: string) {
     super('Audit write failed after the action committed');
     this.name = 'AuditWriteAfterCommitError';
   }
