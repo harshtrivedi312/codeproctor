@@ -4,7 +4,7 @@
 
 Updated 2026-10-01 (ARC-01 Phase B, D-16..D-23). Changed: TC-007, TC-012, TC-030, TC-048, TC-094. Added: TC-095..TC-099, each marked "added 2026-10-01" and placed in its module table.
 
-Updated 2026-10-06 (ADR 0017, C-43..C-48, C-49). Added: TC-101..TC-111, each marked "added 2026-10-06", in the section "Pilot deployment (ADR 0017)" at the end. They are architect-drafted from ADR 0017 sections 4 to 9 and 15; the owner accepts them with the ADR.
+Updated 2026-10-06 (ADR 0017, C-43..C-48, C-49). Added: TC-101..TC-114, each marked "added 2026-10-06", in the section "Pilot deployment (ADR 0017)" at the end. They are architect-drafted from ADR 0017 sections 4 to 9 and 15; the owner accepts them with the ADR.
 
 ## Identity & access (M1)
 
