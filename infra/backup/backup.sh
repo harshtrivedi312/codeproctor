@@ -104,8 +104,15 @@ if [ "$BACKUP_MODE" = versioned ]; then
   # Before overwriting anything: an existing object without a version id means the bucket is not
   # versioned, and this upload would replace the only backup ("null" is fine: it is an object from
   # before versioning was switched on). A missing object (first backup) is fine too.
-  prev=$(s3api head-object --bucket "$BUCKET" --key "$key" --query VersionId --output text 2> /dev/null || true)
-  case "$prev" in None) die "the bucket does not return a version id for the existing $key: it is not versioned. Nothing was uploaded." ;; esac
+  # Only "not found" counts as a first backup. Any other failure (403, a network error, throttling, a
+  # wrong endpoint) must stop the run: it cannot be told apart from an existing, unversioned backup.
+  if prev=$(s3api head-object --bucket "$BUCKET" --key "$key" --query VersionId --output text 2> "$WORK/head.err"); then
+    case "$prev" in None) die "the bucket does not return a version id for the existing $key: it is not versioned. Nothing was uploaded." ;; esac
+  elif grep -Eq '\(404\)|NoSuchKey|Not Found' "$WORK/head.err"; then
+    log "no earlier backup at $key: this is the first one."
+  else
+    die "cannot check for an earlier backup at $key, so nothing was uploaded (not a 'not found' answer)."
+  fi
 fi
 set --
 [ -z "${BACKUP_SSE:-}" ] || set -- --sse "$BACKUP_SSE"
