@@ -38,6 +38,8 @@ export interface PendingChallenge {
 export const LOGIN_PATH = '/admin/login';
 /** Shown once on the login page after turning 2FA off. A fixed word, nothing about the user. */
 export const TWO_FACTOR_OFF_LOGIN_PATH = '/admin/login?reason=two-factor-off';
+/** After the fixed 500 on 2FA disable: the server may or may not have turned 2FA off (contract section 8). */
+export const TWO_FACTOR_UNCONFIRMED_LOGIN_PATH = '/admin/login?reason=two-factor-unconfirmed';
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -59,8 +61,13 @@ interface AuthContextValue {
    * go to login with a one-time notice. Nothing is left pending afterwards, so no "could not
    * confirm sign-out" warning and no logout retry. The sign-out marker is set briefly as a
    * cross-tab broadcast (other tabs sign out) and cleared last.
+   * With `confirmWithLogout` (the 2FA disable answered the fixed "outcome unknown" 500) the commit
+   * may not have landed, so the refresh cookie may still be valid: POST /auth/logout runs as well,
+   * and the login page gets a notice that does not claim 2FA is off. The logout's 401 is expected
+   * (the server may have revoked the family) and starts no refresh: refreshes are blocked until the
+   * next sign-in.
    */
-  signOutRevoked: () => Promise<void>;
+  signOutRevoked: (options?: { confirmWithLogout?: boolean }) => Promise<void>;
   /** The silent refresh got 503 BUSY and gave up: nobody was signed out; offer a manual retry. */
   refreshBusy: boolean;
   retryRefresh: () => void;
@@ -264,24 +271,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     beginSession(userId);
   }, []);
 
-  const signOutRevoked = React.useCallback(async () => {
-    setSignedOutByUser(true);
-    setLoginPath(TWO_FACTOR_OFF_LOGIN_PATH);
-    // Synchronously blocks every new refresh (and tells other tabs through the marker, which is
-    // set briefly on purpose as a cross-tab broadcast: do not optimise it away), then forget the
-    // session at once. A request that gets a 401 from here on cannot start a refresh against a
-    // family the server just revoked (that would look like token reuse, TC-005).
-    const settled = beginSignOut();
-    publishSession(null);
-    await settled;
-    await queryClient.cancelQueries();
-    queryClient.clear();
-    setPending(null);
-    setSignOutUnconfirmed(false);
-    // The server already revoked the session: nothing to confirm, no logout to retry. Cleared last.
-    confirmSignedOut();
-    router.replace(TWO_FACTOR_OFF_LOGIN_PATH);
-  }, [router, queryClient]);
+  const signOutRevoked = React.useCallback(
+    async (options?: { confirmWithLogout?: boolean }) => {
+      const unconfirmed = options?.confirmWithLogout === true;
+      const target = unconfirmed ? TWO_FACTOR_UNCONFIRMED_LOGIN_PATH : TWO_FACTOR_OFF_LOGIN_PATH;
+      setSignedOutByUser(true);
+      setLoginPath(target);
+      // Synchronously blocks every new refresh (and tells other tabs through the marker, which is
+      // set briefly on purpose as a cross-tab broadcast: do not optimise it away), then forget the
+      // session at once. A request that gets a 401 from here on cannot start a refresh against a
+      // family the server just revoked (that would look like token reuse, TC-005).
+      const settled = beginSignOut();
+      publishSession(null);
+      await settled;
+      await queryClient.cancelQueries();
+      queryClient.clear();
+      setPending(null);
+      setSignOutUnconfirmed(false);
+      if (unconfirmed) {
+        // Same as after a 204 on main: end the family and clear the cookie. confirmLogout leaves the
+        // marker set (and the login screen's Retry) if the server did not answer.
+        await confirmLogout();
+      } else {
+        // The server already revoked the session: nothing to confirm, no logout to retry. Cleared last.
+        confirmSignedOut();
+      }
+      router.replace(target);
+    },
+    [router, queryClient, confirmLogout],
+  );
 
   const value = React.useMemo<AuthContextValue>(
     () => ({

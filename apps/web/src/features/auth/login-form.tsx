@@ -91,6 +91,8 @@ export function LoginForm(): React.JSX.Element {
   const expired = params.get('reason') === 'expired';
   const reset = params.get('reset') === 'done';
   const twoFactorOff = params.get('reason') === 'two-factor-off';
+  // After the fixed "outcome unknown" 500 (api-contract section 8): say what we know, and how to find out.
+  const unconfirmedReason = params.get('reason');
 
   return (
     <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} noValidate className="space-y-4">
@@ -103,6 +105,26 @@ export function LoginForm(): React.JSX.Element {
       {twoFactorOff && !banner ? (
         <Alert tone="info" role="status">
           Two-factor sign-in is turned off and you were signed out on all devices. Sign in again.
+        </Alert>
+      ) : null}
+      {!banner && unconfirmedReason === 'two-factor-unconfirmed' ? (
+        <Alert tone="warning" role="status" title="We could not confirm the change">
+          You were signed out on this device. If sign-in no longer asks for an authenticator code,
+          two-factor sign-in is off. If it still asks, it is on: sign in, then turn it off again on
+          the Security page if you want to.
+        </Alert>
+      ) : null}
+      {!banner && unconfirmedReason === 'enroll-unconfirmed' ? (
+        <Alert tone="warning" role="status" title="We could not confirm that set-up finished">
+          Sign in again. If you are asked for a code from your authenticator app, set-up worked:
+          enter the code, then open the Security page and get new recovery codes, because the codes
+          from that attempt were lost. If you are asked to set up again, scan the new QR code.
+        </Alert>
+      ) : null}
+      {!banner && unconfirmedReason === 'recovery-unconfirmed' ? (
+        <Alert tone="warning" role="status" title="We could not confirm that sign-in finished">
+          Sign in again from the start. If the recovery code is now refused, it was already used:
+          enter another recovery code or the code from your authenticator app.
         </Alert>
       ) : null}
       {signOutUnconfirmed ? (

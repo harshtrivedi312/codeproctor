@@ -60,6 +60,13 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
         finishedRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=expired');
+      } else if (response.status === 500 && !/^\d{6}$/.test(values.code.trim())) {
+        // A recovery code answered the fixed "outcome unknown" 500 (contract section 8): the code
+        // may be spent and a session may exist, and the challenge is not released. Never resend it:
+        // start again from the password step.
+        finishedRef.current = true;
+        setPending(null);
+        router.replace('/admin/login?reason=recovery-unconfirmed');
       } else if (response.status === 503) {
         // Never retried here: a code works once inside its 30 s step, so sending the same one
         // again would be refused as a replay and counted as a failed attempt.

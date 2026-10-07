@@ -117,6 +117,13 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
         leavingRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=expired');
+      } else if (response.status === 500) {
+        // Outcome unknown (contract section 8): the first code may have been accepted. Nothing to
+        // read without a session, and never re-confirm with this code: go to sign-in. It asks for
+        // the authenticator code if set-up landed (then get new recovery codes), or starts enrolment again.
+        leavingRef.current = true;
+        setPending(null);
+        router.replace('/admin/login?reason=enroll-unconfirmed');
       } else {
         setServerError('wrong');
         setValue('code', '');

@@ -84,6 +84,10 @@ const FAILURE_HINT: Record<
     title: 'We could not reach the server',
     hint: 'Check your connection and try again.',
   },
+  outcomeUnknown: {
+    title: 'We could not confirm the result',
+    hint: 'Nothing was retried for you. Check the current state before trying again.',
+  },
   unknown: {
     title: 'Something went wrong',
     hint: 'Try again in a moment. If it keeps happening, contact your administrator.',
@@ -92,7 +96,12 @@ const FAILURE_HINT: Record<
 
 type Stage =
   | { kind: 'password'; passwordWrong: boolean }
-  | { kind: 'confirm'; manualKey: string; qr: string }
+  | { kind: 'confirm'; manualKey: string; qr: string; restarted?: boolean }
+  /**
+   * Set-up confirm answered the fixed 500 (outcome unknown): finding out whether 2FA is on. `on`:
+   * it is, so the recovery codes in the lost answer are gone; `retry`: the check itself failed.
+   */
+  | { kind: 'unconfirmed'; state: 'checking' | 'on' | 'retry' }
   | { kind: 'codes'; codes: string[] };
 
 /**
@@ -135,6 +144,18 @@ export function ActionDialog({
     }
     if (action === 'disable') {
       const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
+      if (!out.ok && out.failure === 'outcomeUnknown') {
+        // The fixed 500 (contract section 8): a landed commit revokes this session, a lost one
+        // leaves the cookie valid. Either way end this session as after a 204, plus POST
+        // /auth/logout so a silent refresh cannot bring it back. A 401 after this is expected and
+        // starts no refresh (refreshes are blocked from here until the next sign-in).
+        if (stamp.generation !== getGeneration() || stamp.userId !== getSessionUserId()) {
+          onClose();
+          return 'ok';
+        }
+        await signOutRevoked({ confirmWithLogout: true });
+        return 'ok';
+      }
       if (!out.ok) return fail(out.failure);
       // Another tab signed in as someone else (or this tab already signed out) while the call
       // was in flight: that session is not ours to end. Just close.
@@ -185,8 +206,65 @@ export function ActionDialog({
       return 'failed';
     }
     if (out.failure === 'code') return 'wrongCode';
+    if (out.failure === 'outcomeUnknown') {
+      // The fixed 500: 2FA may or may not be on now. Never confirm again with this code.
+      void checkSetupOutcome();
+      return 'failed';
+    }
     setFailure(out.failure);
     return 'failed';
+  }
+
+  /**
+   * Finds out whether set-up landed, with the password this dialog still holds (setup/start answers
+   * 409 when 2FA is already on; until `totpEnabled` ships that is the only read). On: the codes in
+   * the lost answer are gone, so offer new ones. Off: set-up starts again with a new QR code.
+   */
+  async function checkSetupOutcome(): Promise<void> {
+    setFailure(null);
+    setStage({ kind: 'unconfirmed', state: 'checking' });
+    const out = await startSetup(password);
+    if (out.ok) {
+      if (!out.data.qrDataUrl.startsWith('data:image/png;base64,')) {
+        setStage({ kind: 'unconfirmed', state: 'retry' });
+        return;
+      }
+      setStage({
+        kind: 'confirm',
+        manualKey: out.data.manualKey,
+        qr: out.data.qrDataUrl,
+        restarted: true,
+      });
+      return;
+    }
+    if (out.failure === 'conflict') {
+      setStage({ kind: 'unconfirmed', state: 'on' });
+      return;
+    }
+    if (out.failure === 'password') {
+      setPassword('');
+      setStage({ kind: 'password', passwordWrong: true });
+      return;
+    }
+    setFailure(out.failure);
+    setStage({ kind: 'unconfirmed', state: 'retry' });
+  }
+
+  /** 2FA is on but the one-time codes were lost: issue a new set (the old ones stop working). */
+  async function regenerateAfterUnknown(): Promise<void> {
+    setFailure(null);
+    const out = await regenerateRecoveryCodes(password);
+    if (out.ok) {
+      setPassword('');
+      setStage({ kind: 'codes', codes: out.data.recoveryCodes });
+      return;
+    }
+    if (out.failure === 'password') {
+      setPassword('');
+      setStage({ kind: 'password', passwordWrong: true });
+      return;
+    }
+    setFailure(out.failure);
   }
 
   const locked = stage.kind === 'codes';
@@ -231,7 +309,24 @@ export function ActionDialog({
               manualKey={stage.manualKey}
               qr={stage.qr}
               failure={failure}
+              restarted={stage.restarted === true}
               onSubmit={onCode}
+              onCancel={onClose}
+            />
+          </>
+        ) : null}
+        {stage.kind === 'unconfirmed' ? (
+          <>
+            <DialogTitle>We could not confirm the result</DialogTitle>
+            <DialogDescription>
+              The server did not say whether two-factor sign-in was turned on. We did not send the
+              code again.
+            </DialogDescription>
+            <UnconfirmedStep
+              state={stage.state}
+              failure={failure}
+              onCheck={() => void checkSetupOutcome()}
+              onRegenerate={() => void regenerateAfterUnknown()}
               onCancel={onClose}
             />
           </>
@@ -377,16 +472,86 @@ function groupKey(key: string): string {
   return key.match(/.{1,4}/g)?.join(' ') ?? key;
 }
 
+function UnconfirmedStep({
+  state,
+  failure,
+  onCheck,
+  onRegenerate,
+  onCancel,
+}: {
+  state: 'checking' | 'on' | 'retry';
+  failure: Failure | null;
+  onCheck: () => void;
+  onRegenerate: () => void;
+  onCancel: () => void;
+}): React.JSX.Element {
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => setBusy(false), [state, failure]);
+  return (
+    <div className="mt-4 space-y-4" data-testid="setup-unconfirmed">
+      <FailureAlert failure={failure} />
+      {state === 'checking' ? (
+        <p role="status" className="text-sm">
+          Checking whether two-factor sign-in is on…
+        </p>
+      ) : null}
+      {state === 'on' ? (
+        <Alert tone="warning" role="status" title="Two-factor sign-in is on">
+          Set-up went through, but your recovery codes were lost on the way. Get a new set now. Your
+          authenticator app already works, and nothing needs to be scanned again.
+        </Alert>
+      ) : null}
+      {state === 'retry' ? (
+        <Alert tone="warning" role="status" title="We could not check yet">
+          Check your connection, then check again. Do not enter the same code again.
+        </Alert>
+      ) : null}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Close
+        </Button>
+        {state === 'on' ? (
+          <Button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              onRegenerate();
+            }}
+          >
+            Get new recovery codes
+          </Button>
+        ) : null}
+        {state === 'retry' ? (
+          <Button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              onCheck();
+            }}
+          >
+            Check again
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function ConfirmStep({
   manualKey,
   qr,
   failure,
+  restarted,
   onSubmit,
   onCancel,
 }: {
   manualKey: string;
   qr: string;
   failure: Failure | null;
+  /** Set-up was started again after an unconfirmed answer: the old QR code and code are void. */
+  restarted: boolean;
   onSubmit: (values: CodeFormValues) => Promise<'ok' | 'wrongCode' | 'failed'>;
   onCancel: () => void;
 }): React.JSX.Element {
@@ -427,6 +592,12 @@ function ConfirmStep({
           {groupKey(manualKey)}
         </p>
       </div>
+      {restarted ? (
+        <Alert tone="info" role="status" title="Set-up did not go through, so we started it again">
+          Scan this new QR code (remove the old entry from your app) and enter a fresh code. The old
+          code cannot be used.
+        </Alert>
+      ) : null}
       {wrongCode ? (
         <Alert tone="error" role="alert" title="That code did not match">
           Wait for a fresh code in your app and enter it again. If it keeps failing, check that your

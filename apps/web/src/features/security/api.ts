@@ -25,6 +25,11 @@ export type Failure =
   | 'session'
   /** 503: try again in a moment (nothing was counted). */
   | 'busy'
+  /**
+   * The fixed 500 of the unknown-outcome routes (contract section 8, FU-BE-208): the commit may or
+   * may not have landed. Never retried; each caller recovers in its own way.
+   */
+  | 'outcomeUnknown'
   | 'network'
   | 'unknown';
 
@@ -36,7 +41,12 @@ interface Result<T> {
   response: Response;
 }
 
-async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcome<T>> {
+async function run<T>(
+  send: () => Promise<Result<T>>,
+  empty?: T,
+  /** True on the routes whose 500 means "outcome unknown" (setup/confirm, disable). */
+  outcomeUnknownOn500 = false,
+): Promise<Outcome<T>> {
   try {
     const stamp = captureSessionStamp();
     let result = await send();
@@ -66,6 +76,9 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
     if (response.status === 409) return { ok: false, failure: 'conflict' };
     if (response.status === 401) return { ok: false, failure: 'session' };
     if (response.status === 503) return { ok: false, failure: 'busy' };
+    if (response.status === 500 && outcomeUnknownOn500) {
+      return { ok: false, failure: 'outcomeUnknown' };
+    }
     return { ok: false, failure: 'unknown' };
   } catch {
     return { ok: false, failure: 'network' };
@@ -83,17 +96,23 @@ export const startSetup = (currentPassword: string) =>
   run<SetupStart>(() => api.POST('/v1/auth/2fa/setup/start', { body: { currentPassword } }));
 
 export const confirmSetup = (currentPassword: string, code: string) =>
-  run<Schemas['RecoveryCodes']>(() =>
-    api.POST('/v1/auth/2fa/setup/confirm', { body: { currentPassword, code } }),
+  run<Schemas['RecoveryCodes']>(
+    () => api.POST('/v1/auth/2fa/setup/confirm', { body: { currentPassword, code } }),
+    undefined,
+    true,
   );
 
 export const disableTwoFactor = (currentPassword: string, totpCode: string) =>
-  run<true>(async () => {
-    const { error, response } = await api.POST('/v1/auth/2fa/disable', {
-      body: { currentPassword, totpCode: totpCode.trim() },
-    });
-    return { data: undefined, error, response };
-  }, true);
+  run<true>(
+    async () => {
+      const { error, response } = await api.POST('/v1/auth/2fa/disable', {
+        body: { currentPassword, totpCode: totpCode.trim() },
+      });
+      return { data: undefined, error, response };
+    },
+    true,
+    true,
+  );
 
 export const regenerateRecoveryCodes = (currentPassword: string) =>
   run<Schemas['RecoveryCodes']>(() =>

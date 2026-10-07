@@ -158,6 +158,19 @@ export function seedMockTwoFactor(email: string): void {
   save(state);
 }
 
+/**
+ * Tests: what a landed 2FA disable leaves behind (2FA off, refresh sessions revoked), for the
+ * "outcome unknown" fault where the commit went through but the answer was lost (contract section 8).
+ */
+export function seedMockTwoFactorOff(email: string): void {
+  const user = findUser(email);
+  if (!user) return;
+  const state = load();
+  state.totpOn = state.totpOn.filter((e) => e !== user.email);
+  state.refreshFor = null;
+  save(state);
+}
+
 function sessionFor(user: MockUser): Schemas['AuthSession'] {
   return {
     accessToken: `mock-access-${user.role}-${Math.random().toString(36).slice(2)}`,
