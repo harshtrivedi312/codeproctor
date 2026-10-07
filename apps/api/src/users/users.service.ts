@@ -28,6 +28,7 @@ import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
 import { TokenValidityService } from '../common/auth/token-validity.service';
 import { reauthFailed } from '../common/coded.exception';
 import { lockContentionCode } from '../common/db-contention';
+import { OutcomeUnknownError } from '../common/outcome-unknown.error';
 import { hitWindowCounter, refundWindowCounter } from '../common/redis-counter';
 import { errorName } from '../common/request-context';
 import type { RequestContext } from '../common/request-context';
@@ -50,6 +51,11 @@ import type {
 } from './dto/users.dto';
 
 export const INVITE_TTL_MS = 72 * 60 * 60 * 1000;
+
+interface TxPhase {
+  started: boolean;
+  finished: boolean;
+}
 
 export interface Actor {
   id: string;
@@ -160,8 +166,11 @@ export class UsersService {
     const slot = await this.takeInviteSlot(actor.orgId);
     const token = newOpaqueToken();
     let created: User;
+    // Phase tracking for the failure rule (DL-37, FU-BE-208): set inside the callback.
+    const phase: TxPhase = { started: false, finished: false };
     try {
       created = await this.prisma.client.$transaction(async (tx) => {
+        phase.started = true;
         await this.requireSameAdmin(tx, actor, verified.passwordHash);
         const user = await tx.user.create({
           data: {
@@ -185,10 +194,19 @@ export class UsersService {
             metadata: { role: dto.role },
           },
         });
+        phase.finished = true;
         return user;
       });
     } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      // P2002 can only come from the create inside the callback, so it never follows the commit.
+      // Known limit (FU-BE-208): a retry after an unknown-outcome 500 can hit P2002 because the
+      // first attempt did commit. That is indistinguishable server-side from an ordinary
+      // duplicate, so it keeps the ordinary behaviour (409 plus a USER_INVITE_CONFLICT row).
+      if (
+        !phase.finished &&
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === 'P2002'
+      ) {
         // The create and USER_INVITED rolled back together, so the attempt would leave no record
         // and a SUPER_ADMIN could probe other organizations' staff emails unseen (DL-36). Record it
         // outside that transaction: actor, org and time only, no email and no user id. If this
@@ -212,11 +230,10 @@ export class UsersService {
         }
         throw new ConflictException('A user with this email already exists.');
       }
-      // A busy database answers 503 and invites a retry: the slot of the attempt that never
-      // happened goes back (DL-37), or contention would burn the org's invite budget.
-      await this.refundSlotOnContention(slot, e);
-      throw e;
+      return this.failInviteTx(e, phase, slot, 'users.invite');
     }
+    // The mail goes out only after a known commit. On OutcomeUnknownError (thrown above) no mail
+    // is sent: the invitee has no link, and the client reads the user list and uses re-issue.
     try {
       await this.mail.sendStaffInvite(
         created.email,
@@ -250,8 +267,10 @@ export class UsersService {
     const slot = await this.takeInviteSlot(actor.orgId);
     const targetId = rawTargetId.toLowerCase();
     const token = newOpaqueToken();
+    const phase: TxPhase = { started: false, finished: false };
     const updated = await this.prisma.client
       .$transaction(async (tx) => {
+        phase.started = true;
         await this.requireSameAdmin(tx, actor, verified.passwordHash);
         const found = await this.raw('lock the target user row, same org only', () =>
           tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
@@ -285,12 +304,12 @@ export class UsersService {
             metadata: { method: 'POST', route: '/api/v1/admin/users/:userId/invite' },
           },
         });
-        return tx.user.findUniqueOrThrow({ where: { id: targetId } });
+        const row = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
+        phase.finished = true;
+        return row;
       })
-      .catch(async (e: unknown) => {
-        await this.refundSlotOnContention(slot, e);
-        throw e;
-      });
+      .catch((e: unknown) => this.failInviteTx(e, phase, slot, 'users.invite.reissue'));
+    // No mail on OutcomeUnknownError (thrown above): the client reads the list and re-issues.
     try {
       await this.mail.sendStaffInvite(
         updated.email,
@@ -300,6 +319,32 @@ export class UsersService {
       this.logger.error(`Staff invite email failed (${errorName(e)})`);
     }
     return this.toDto(updated);
+  }
+
+  /**
+   * Classifies a failed invite or re-issue transaction (DL-37, FU-BE-208) and always throws.
+   * Our own HttpExceptions and every failure before the callback returned keep the existing
+   * behaviour: rethrown as is, the slot refunded only for contention (503 BUSY). After the callback
+   * returned, 40001, 40P01 and P2034 are rollbacks (503 BUSY, slot refunded); anything else (P2028
+   * or P1017 at COMMIT, a connection error) may have committed: OutcomeUnknownError, and the slot
+   * is NOT refunded, so a retried invite cannot get a free slot.
+   */
+  private async failInviteTx(
+    e: unknown,
+    phase: TxPhase,
+    slot: string,
+    route: string,
+  ): Promise<never> {
+    if (e instanceof HttpException || !phase.finished) {
+      await this.refundSlotOnContention(slot, e);
+      throw e;
+    }
+    const code = lockContentionCode(e);
+    if (code === '40001' || code === '40P01' || code === 'P2034') {
+      await this.refundSlotOnContention(slot, e);
+      throw e;
+    }
+    throw new OutcomeUnknownError(route);
   }
 
   /**
