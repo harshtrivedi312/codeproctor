@@ -38,10 +38,10 @@ import { TestStartService } from './test-start.service';
   ],
   exports: [
     CandidateTokenService,
-    CandidateScope,
     SessionRateLimiter,
     CandidateMailPort,
     ObjectStoragePort,
+    CandidateScope,
   ],
 })
 export class CandidateModule {}

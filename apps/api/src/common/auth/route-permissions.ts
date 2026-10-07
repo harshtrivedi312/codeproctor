@@ -113,6 +113,27 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_consent:decline',
   },
+  // Answers and finish (BE-11, FR-502, FR-506, ADR 0013 section 5.11).
+  'POST /candidate/answers/:questionId/run': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:run',
+  },
+  'POST /candidate/answers/:questionId/submit': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:submit',
+  },
+  'POST /candidate/session/finish': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:finish',
+  },
+  'PUT /candidate/answers/:questionId/draft': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:draft',
+  },
+  'POST /candidate/session/section/finish': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_section:finish',
+  },
   'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
   'POST /candidate/session/test/start': {
     principal: 'CANDIDATE',
