@@ -92,6 +92,81 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
     expect((await read(id)).status).toBe('OPENED');
   });
 
+  describe('ifPauseReasons compare-and-set (BE-10, ADR 0013 CS-4.4a)', () => {
+    async function pausedWith(reasons: Array<'FULLSCREEN_EXIT' | 'PROCTOR'>): Promise<string> {
+      const inv = await createInvitation(owner, tenant, {
+        status: 'PAUSED',
+        session: { pauseReasons: reasons },
+      });
+      return inv.sessionId;
+    }
+
+    it('FR-106: a matching list lets the transition through and writes the patch', async () => {
+      const id = await pausedWith(['FULLSCREEN_EXIT']);
+      await inOrg(() =>
+        service.transition({
+          sessionId: id,
+          from: 'PAUSED',
+          to: 'IN_PROGRESS',
+          ifPauseReasons: ['FULLSCREEN_EXIT'],
+          patch: { pauseReasons: [] },
+        }),
+      );
+      const row = await read(id);
+      expect(row.status).toBe('IN_PROGRESS');
+      expect(row.pauseReasons).toEqual([]);
+    });
+
+    it('FR-106: a list that no longer matches (a reason was added) is a conflict and changes nothing', async () => {
+      const id = await pausedWith(['FULLSCREEN_EXIT', 'PROCTOR']);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: id,
+            from: 'PAUSED',
+            to: 'IN_PROGRESS',
+            ifPauseReasons: ['FULLSCREEN_EXIT'],
+            patch: { pauseReasons: [] },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(SessionStateConflictError);
+      const row = await read(id);
+      expect(row.status).toBe('PAUSED');
+      expect(row.pauseReasons).toEqual(['FULLSCREEN_EXIT', 'PROCTOR']);
+    });
+
+    it('FR-106: an empty list matches an empty column, and not a non-empty one', async () => {
+      const empty = (await createInvitation(owner, tenant, { status: 'IN_PROGRESS' })).sessionId;
+      await inOrg(() =>
+        service.transition({
+          sessionId: empty,
+          from: 'IN_PROGRESS',
+          to: 'PAUSED',
+          ifPauseReasons: [],
+          patch: { pauseReasons: ['FULLSCREEN_EXIT'] },
+        }),
+      );
+      expect((await read(empty)).status).toBe('PAUSED');
+      const busy = await pausedWith(['PROCTOR']);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: busy,
+            from: 'PAUSED',
+            to: 'IN_PROGRESS',
+            ifPauseReasons: [],
+          }),
+        ),
+      ).rejects.toBeInstanceOf(SessionStateConflictError);
+    });
+
+    it('FR-106: without the option the old behaviour holds (only the status is compared)', async () => {
+      const id = await pausedWith(['FULLSCREEN_EXIT', 'PROCTOR']);
+      await inOrg(() => service.transition({ sessionId: id, from: 'PAUSED', to: 'IN_PROGRESS' }));
+      expect((await read(id)).status).toBe('IN_PROGRESS');
+    });
+  });
+
   it('FR-106: concurrent attempts at one transition have exactly one winner', async () => {
     const id = await sessionIn('OPENED');
     const results = await Promise.allSettled(

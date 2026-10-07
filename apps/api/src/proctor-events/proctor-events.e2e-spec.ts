@@ -602,6 +602,33 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
       expect(await batches(r)).toHaveLength(0);
     });
 
+    it('NFR-04: a signed batch with a huge flat array is handled, not a stack overflow (400, not a 500 the SDK retries)', async () => {
+      const r = await running();
+      const flat = Array.from({ length: 100_000 }, () => 1);
+      const res = await sendEvents(r, 0, [
+        event('EXTENSION_INTERFERENCE', { payload: { signal: flat } }),
+      ]).expect(400);
+      expect(res.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      const q = await owner.sessionQuestion.create({
+        data: {
+          sessionId: r.inv.sessionId,
+          testQuestionId: tenant.test.testQuestionIds[0],
+          questionVersionId: tenant.test.fixedVersionIds[0],
+          position: 1,
+          points: 1,
+        },
+        select: { id: true },
+      });
+      const body = canonical({
+        seq: 0,
+        sessionQuestionId: q.id,
+        startedAt: new Date().toISOString(),
+        events: Array.from({ length: 900_000 }, () => 1),
+      });
+      const res2 = await postBatch('keystrokes', tokenFor(r), body, sign(keyAt(r), body));
+      expect(res2.status).toBe(400);
+    });
+
     it('TC-063: the same signed batch sent twice at once stores one batch; one answer is duplicate', async () => {
       const r = await running();
       const body = canonical({ seq: 0, events: [event('TAB_SWITCH'), event('FOCUS_LOST')] });
