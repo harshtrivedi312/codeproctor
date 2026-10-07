@@ -1615,6 +1615,9 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/identity/presign', permission: 'candidate_identity:upload' },
   { key: 'POST /candidate/session/identity', permission: 'candidate_identity:upload' },
   { key: 'GET /candidate/session/identity', permission: 'candidate_identity:upload' },
+  // BE-10 proctor event ingestion (Integrity A, PR #301): signed batches, ADR 0013 section 2.
+  { key: 'POST /candidate/session/events', permission: 'candidate_events:write' },
+  { key: 'POST /candidate/session/keystrokes', permission: 'candidate_keystrokes:write' },
   // BE-11 answers and finish (Backend B, PR #187, gated): keys and permissions as registered on that branch.
   { key: 'POST /candidate/answers/:questionId/run', permission: 'candidate_answer:run' },
   { key: 'POST /candidate/answers/:questionId/submit', permission: 'candidate_answer:submit' },
