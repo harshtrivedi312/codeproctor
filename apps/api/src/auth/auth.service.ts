@@ -44,6 +44,7 @@ import { TokenValidityService } from '../common/auth/token-validity.service';
 import { CodedForbiddenException, disableRefused, reauthFailed } from '../common/coded.exception';
 import { hitWindowCounter } from '../common/redis-counter';
 import { PasswordService } from './password.service';
+import { RefreshOutcomeUnknownException } from './refresh-outcome-unknown.exception';
 import { TotpService } from './totp.service';
 
 export const MAX_FAILED_LOGINS = 5;
@@ -99,6 +100,10 @@ function isRetryable(e: unknown): boolean {
     lockContentionCode(e) !== undefined
   );
 }
+
+/** Attempts and pause for the refresh paths' revokeFamily (api-contract section 8, Refresh). */
+const REVOKE_ATTEMPTS = 3;
+const REVOKE_RETRY_DELAY_MS = 30;
 
 /** How long shutdown waits for deferred reset and lock mail. */
 const SHUTDOWN_SETTLE_MS = 5_000;
@@ -877,7 +882,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   ): Promise<SessionOutcome> {
     if (existing.revokedAt) {
       // A rotated or revoked token came back: assume theft and kill the whole family (TC-005).
-      const revoked = await this.revokeFamily(existing.familyId);
+      const revoked = await this.revokeFamilyBounded(existing.familyId);
       // Audit only when the reuse actually killed live tokens, not on every later retry.
       if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
       throw new UnauthorizedException('Authentication required.');
@@ -886,13 +891,13 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       throw new UnauthorizedException('Authentication required.');
     }
     if (!user.isActive) {
-      await this.revokeFamily(existing.familyId);
+      await this.revokeFamilyBounded(existing.familyId);
       throw new UnauthorizedException('Authentication required.');
     }
     // Defence in depth: a role that requires 2FA never gets a token from a family that was not
     // opened through 2FA (a promotion racing a password sign-in). Same 401, family revoked.
     if (TOTP_REQUIRED_ROLES.includes(user.role) && !user.totpEnabled) {
-      await this.revokeFamily(existing.familyId);
+      await this.revokeFamilyBounded(existing.familyId);
       throw new UnauthorizedException('Authentication required.');
     }
 
@@ -936,37 +941,42 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       });
     } catch (e) {
       if (e instanceof PasswordChangedSignal) {
-        await this.revokeFamily(existing.familyId);
+        await this.revokeFamilyBounded(existing.familyId);
         throw new UnauthorizedException('Authentication required.');
       }
       if (e instanceof RefreshReuseSignal) {
         // Only a real reuse kills live tokens; a reset that revoked the family first does not
         // raise a theft alert (FU-BE-41).
-        const revoked = await this.revokeFamily(existing.familyId);
+        const revoked = await this.revokeFamilyBounded(existing.familyId);
         if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
         throw new UnauthorizedException('Authentication required.');
       }
-      // Failure rule (FR-104, TC-005, DL-37, hub ruling FU-BE-207; pool exhaustion is FU-BE-197). This transaction inserts the new refresh
-      // token and flips the old one to revoked. If the commit landed on the server but the client
-      // saw P2028 or a lost connection, a 503 would invite a retry with the OLD token, which is now
-      // revoked, and reuse detection would kill the whole family (a forced logout that looks like
-      // theft). So only a failure that is certainly a clean rollback answers 503 BUSY:
-      //   - before the callback started (no transaction: pool timeout, contention on BEGIN, and
-      //     Prisma's own start-timeout P2028 are all nothing-happened failures);
-      //   - inside the callback body, a statement-level lock error (55P03, 40P01, 40001, P2034).
-      // Everything else (the callback finished and the commit failed, P2028 inside, a connection
-      // loss, anything unexpected) is outcome-unknown: a fixed non-retryable 401 tells the client to
-      // sign in again. It changes no state and revokes nothing. Since #216 lockContentionCode maps
-      // P2028 to 503 BUSY on every route, which is exactly the retry trap this closes. The pool
-      // timeout (#276) needs no token here: it surfaces before the callback starts, by phase.
+      // Failure rule (FR-104, TC-005, DL-37, api-contract section 8 Refresh bullet; FU-BE-207).
+      // The transaction inserts the new token and revokes the old one. A retry with the OLD token
+      // after a commit that landed would be read as reuse and revoke the family (a false theft
+      // alert), so only a failure that is certainly a rollback answers 503 BUSY:
+      //   - before the callback started (pool timeout, contention on BEGIN, start timeout);
+      //   - inside the callback body: lock timeout, deadlock, serialization failure, P2034, and
+      //     P2028 (the transaction timing out mid-callback is a rollback);
+      //   - after the callback returned: 40001, 40P01 and P2034 at COMMIT (rollbacks; P2034 is a
+      //     write conflict, treated like 40001, the ruling does not list it separately).
+      // Anything else after the callback returned (P2028 or P1017 at COMMIT, a connection error)
+      // has an unknown outcome: the fixed 401 plus a cleared cookie (RefreshOutcomeUnknownException).
+      // Any other error inside the callback (not a database contention error) is an ordinary 401:
+      // nothing is known to have committed, so the cookie stays. Never a 500.
       if (!callbackStarted) throw e;
       const code = lockContentionCode(e);
-      if (!callbackFinished && code !== undefined && code !== 'P2028') throw e;
+      if (!callbackFinished) {
+        if (code !== undefined) throw e;
+        this.logger.error(`Refresh rotation failed (${safeErrorName(e)}) REFRESH_ROTATE_FAILED`);
+        throw new UnauthorizedException('Authentication required.');
+      }
+      if (code === '40001' || code === '40P01' || code === 'P2034') throw e;
       // Name and fixed code token only, never the message (it can hold SQL and values).
       this.logger.error(
         `Refresh rotation outcome unknown (${safeErrorName(e)}, ${code ?? 'no-code'}) REFRESH_ROTATE_UNKNOWN`,
       );
-      throw new UnauthorizedException('Authentication required.');
+      throw new RefreshOutcomeUnknownException();
     }
     return { body, refreshToken: next };
   }
@@ -1351,6 +1361,31 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         metadata,
       },
     });
+  }
+
+  /**
+   * revokeFamily for the refresh paths (reuse, inactive user, role needing 2FA, changed password).
+   * It runs outside the rotation transaction, so contention before commit is a clean failure and
+   * is retried a bounded number of times. On final failure it resolves to 0 and the caller answers
+   * the ordinary 401, never 503 BUSY: an attacker holding a stolen token does not retry, so a 503
+   * would let detected theft fail open. The error log line (REFRESH_REVOKE_FAILED, name and code
+   * only) is the alert signal. Returns the number of tokens revoked.
+   */
+  private async revokeFamilyBounded(familyId: string): Promise<number> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= REVOKE_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.revokeFamily(familyId);
+      } catch (e) {
+        last = e;
+        if (attempt < REVOKE_ATTEMPTS)
+          await new Promise((r) => setTimeout(r, REVOKE_RETRY_DELAY_MS));
+      }
+    }
+    this.logger.error(
+      `Refresh family revoke failed (${safeErrorName(last)}, ${lockContentionCode(last) ?? 'no-code'}) REFRESH_REVOKE_FAILED`,
+    );
+    return 0;
   }
 
   private async revokeFamily(familyId: string): Promise<number> {

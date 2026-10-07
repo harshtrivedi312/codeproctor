@@ -8,7 +8,6 @@ import {
   Post,
   Req,
   Res,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   ApiAcceptedResponse,
@@ -31,6 +30,7 @@ import type { AuthedRequest } from '../common/auth/auth.types';
 import { Public, Roles } from '../common/auth/decorators';
 import { UserRole } from '../generated/prisma/client';
 import { AuthService, REFRESH_TTL_MS } from './auth.service';
+import { RefreshOutcomeUnknownException } from './refresh-outcome-unknown.exception';
 import type { SessionOutcome } from './auth.service';
 import { ctxOf } from '../common/request-context';
 import {
@@ -308,13 +308,12 @@ export class AuthController {
       setRefreshCookie(res, outcome);
       return outcome.body.session;
     } catch (e) {
-      // A refused refresh cookie can never succeed later (unknown, expired, revoked, or the fixed
-      // outcome-unknown 401 whose commit may have landed). Clear it so a later page load or tab
-      // does not send a revoked token and trip reuse detection (FR-104, TC-005, FU-BE-207).
-      // Only when the request carried one (raw cookies, so a tampered signed cookie is cleared
-      // too): a cookieless cross-site POST must not clear a victim's cookie. A 503 BUSY keeps
-      // the cookie: that retry is safe by construction.
-      if (e instanceof UnauthorizedException && carriedRefreshCookie(req)) {
+      // Only an outcome-unknown rotation clears the cookie (the commit may have landed, so the
+      // presented token may now be revoked and a later silent refresh would look like theft,
+      // TC-005). Never on an ordinary 401: that could wipe a winning tab's new cookie. Only when
+      // the request carried one (raw cookies, so a tampered signed cookie is cleared too): a
+      // cookieless cross-site POST must not clear a victim's cookie. A 503 BUSY keeps the cookie.
+      if (e instanceof RefreshOutcomeUnknownException && carriedRefreshCookie(req)) {
         res.clearCookie(REFRESH_COOKIE, {
           httpOnly: true,
           secure: true,

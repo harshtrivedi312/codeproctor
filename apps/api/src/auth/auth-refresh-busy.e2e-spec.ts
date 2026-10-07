@@ -171,7 +171,14 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     );
   }
 
-  function expectFixed401(res: request.Response): void {
+  const clearing = (res: request.Response): string[] =>
+    ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? []).filter((c) =>
+      c.startsWith('cp_refresh='),
+    );
+
+  /** The fixed 401; `clears` says whether the response clears cp_refresh (outcome unknown only). */
+  function expectFixed401(res: request.Response, clears: boolean): void {
+    expect(clearing(res)).toHaveLength(clears ? 1 : 0);
     expect(res.status).toBe(401);
     expect(res.headers['retry-after']).toBeUndefined();
     expect((res.body as { code?: string }).code).toBeUndefined();
@@ -192,7 +199,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
   it('FR-104, TC-005, DL-37, FU-BE-207: P2028 at commit (the commit really landed) is the fixed 401, the family is not revoked, and a later retry with the old token is reuse', async () => {
     const { userId, cookie } = await signedIn();
     failAfterCallback(p2028, true);
-    expectFixed401(await refresh(cookie));
+    expectFixed401(await refresh(cookie), true);
     restoreTransaction();
     // The new token was inserted and the old one flipped; nothing was revoked by the failure.
     expect(await liveCount(userId)).toBe(1);
@@ -204,7 +211,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
   it('FR-104, TC-005, DL-37, FU-BE-207: P2028 after the callback finished with nothing committed is the fixed 401, no state change, and the old token still works', async () => {
     const { userId, cookie } = await signedIn();
     failAfterCallback(p2028, false);
-    expectFixed401(await refresh(cookie));
+    expectFixed401(await refresh(cookie), true);
     restoreTransaction();
     expect(await liveCount(userId)).toBe(1);
     await refresh(cookie).expect(200);
@@ -219,7 +226,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
         () => new Error('Connection terminated unexpectedly secret-marker'),
         commit,
       );
-      expectFixed401(await refresh(cookie));
+      expectFixed401(await refresh(cookie), true);
       restoreTransaction();
       expect(await liveCount(userId)).toBe(1);
       const lines = logged.join('');
@@ -230,17 +237,28 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
 
   it.each([
     ['40001', () => pgError('40001')],
+    ['40P01', () => pgError('40P01')],
     ['P2034', () => prismaError('P2034')],
   ])(
-    'FR-104, DL-37, FU-BE-207: a clean-rollback code (%s) after the callback finished is outcome-unknown: the fixed 401, not 503',
+    'FR-104, DL-37, FU-BE-207: %s at commit (after the callback returned) is a rollback: 503 BUSY, cookie kept, and the old token still works',
     async (_name, make) => {
       const { userId, cookie } = await signedIn();
       failAfterCallback(make, false);
-      expectFixed401(await refresh(cookie));
+      expectBusy(await refresh(cookie));
       restoreTransaction();
       expect(await liveCount(userId)).toBe(1);
+      await refresh(cookie).expect(200);
     },
   );
+
+  it('FR-104, DL-37, FU-BE-207: P2028 thrown from inside the callback (the transaction timing out mid-callback) is a rollback: 503 BUSY', async () => {
+    const { userId, cookie } = await signedIn();
+    failInsideCallback(p2028());
+    expectBusy(await refresh(cookie));
+    restoreTransaction();
+    expect(await liveCount(userId)).toBe(1);
+    await refresh(cookie).expect(200);
+  });
 
   it('FR-104, DL-37, FU-BE-207: P2034 inside the callback is a clean rollback: 503 BUSY', async () => {
     const { cookie } = await signedIn();
@@ -250,24 +268,21 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     await refresh(cookie).expect(200);
   });
 
-  it('FR-104, DL-37, FU-BE-207: a non-database error inside the callback is the fixed 401', async () => {
+  it('FR-104, DL-37, FU-BE-207: a non-database error inside the callback is the ordinary 401: no cookie clearing, no state change, and the old token still works', async () => {
     const { userId, cookie } = await signedIn();
     failInsideCallback(new TypeError('synthetic'));
-    expectFixed401(await refresh(cookie));
+    expectFixed401(await refresh(cookie), false);
     restoreTransaction();
     expect(await liveCount(userId)).toBe(1);
   });
 
-  it('FR-104, TC-005, DL-37, FU-BE-207: the fixed 401 clears cp_refresh, writes no audit row, and a later request without the cookie raises no reuse alert', async () => {
+  it('FR-104, TC-005, DL-37, FU-BE-207: the outcome-unknown 401 clears cp_refresh, writes no audit row, and a later request without the cookie raises no reuse alert', async () => {
     const { userId, cookie } = await signedIn();
     failAfterCallback(p2028, true);
     const res = await refresh(cookie);
     restoreTransaction();
-    expectFixed401(res);
-    const set = ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? []).filter((c) =>
-      c.startsWith('cp_refresh='),
-    );
-    expect(set).toHaveLength(1);
+    expectFixed401(res, true);
+    const set = clearing(res);
     expect(set[0]).toMatch(/^cp_refresh=;/);
     expect(set[0]).toMatch(/Expires=Thu, 01 Jan 1970/);
     expect(set[0]).toContain('Path=/api/v1/auth');
@@ -283,11 +298,35 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     expect(await liveCount(userId)).toBe(1);
   });
 
-  it('FR-104, TC-005, FU-BE-207: a cookieless refresh 401 sets no cp_refresh cookie, and a tampered cookie is still cleared', async () => {
-    const bare = await request(app.getHttpServer()).post(`${API}/refresh`).expect(401);
-    expect(String(bare.headers['set-cookie'] ?? '')).not.toContain('cp_refresh=');
-    const tampered = await refresh('cp_refresh=s%3Anot-a-valid-signature.AAAA').expect(401);
-    expect(String(tampered.headers['set-cookie'] ?? '')).toMatch(/cp_refresh=;/);
+  it('FR-104, TC-005, FU-BE-207: an ordinary 401 (no cookie, tampered cookie, unknown, reuse) never clears cp_refresh', async () => {
+    const bare = await request(app.getHttpServer()).post(`${API}/refresh`);
+    expectFixed401(bare, false);
+    expectFixed401(await refresh('cp_refresh=s%3Anot-a-valid-signature.AAAA'), false);
+    const { cookie } = await signedIn();
+    await refresh(cookie).expect(200);
+    // The rotated-away token coming back is reuse: the 401 is ordinary, so a winning tab's new
+    // cookie is not wiped.
+    expectFixed401(await refresh(cookie), false);
+  });
+
+  it('FR-104, TC-005, DL-37, FU-BE-207: a forced 55P03 on revokeFamily during reuse is the ordinary 401 after bounded retries, never 503, and the error line fires', async () => {
+    const { userId, cookie } = await signedIn();
+    await refresh(cookie).expect(200);
+    const model = svc.client.refreshToken as unknown as {
+      updateMany: (...a: unknown[]) => Promise<unknown>;
+    };
+    const spy = jest.spyOn(model, 'updateMany').mockRejectedValue(pgError('55P03'));
+    logged = [];
+    try {
+      expectFixed401(await refresh(cookie), false);
+      expect(spy).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+    }
+    const lines = logged.join('');
+    expect(lines).toContain('REFRESH_REVOKE_FAILED');
+    expect(lines).not.toContain('synthetic database failure');
+    expect(await liveCount(userId)).toBe(1);
   });
 
   it('FR-104, DL-37, FU-BE-207: a real 55P03 on the FOR SHARE of the user row (lock held elsewhere, short lock_timeout) is 503 BUSY, and the old token works after the lock is released', async () => {
@@ -329,14 +368,6 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
       restoreTransaction();
     }
     await refresh(cookie).expect(200);
-  });
-
-  it('FR-104, DL-37, FU-BE-207: P2028 thrown from inside the callback body is the fixed 401, not 503', async () => {
-    const { userId, cookie } = await signedIn();
-    failInsideCallback(p2028());
-    expectFixed401(await refresh(cookie));
-    restoreTransaction();
-    expect(await liveCount(userId)).toBe(1);
   });
 
   it.each(['55P03', '40001', '40P01'])(
