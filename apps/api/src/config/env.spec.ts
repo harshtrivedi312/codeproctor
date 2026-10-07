@@ -1,6 +1,8 @@
 import { validateEnv } from './env';
 
 const valid = {
+  // APP_ENV has no default (DL-55, FU-BE-224): every fixture sets it.
+  APP_ENV: 'development',
   DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
   REDIS_URL: 'redis://127.0.0.1:6379',
   WEB_ORIGIN: 'http://localhost:3000',
@@ -532,6 +534,240 @@ describe('FU-BE-194 database pool settings', () => {
       ).not.toThrow();
     });
   });
+});
+
+describe('DL-55 FU-BE-224 NFR-04 APP_ENV is required, with no default', () => {
+  const { APP_ENV: _unused, ...withoutAppEnv } = valid;
+  void _unused;
+  const good = {
+    ...withoutAppEnv,
+    JWT_CANDIDATE_SECRET: 'c'.repeat(40),
+    OTP_PEPPER: 'd'.repeat(40),
+    SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
+  };
+
+  it('DL-55 FU-BE-224: an unset APP_ENV refuses to boot and the message names APP_ENV', () => {
+    expect(() => validateEnv(good)).toThrow(/APP_ENV/);
+    expect(() => validateEnv({ ...good, APP_ENV: undefined })).toThrow(/APP_ENV/);
+  });
+
+  it.each(['', 'prod', 'Production', 'dev', 'PRODUCTION', ' production', 'production ', 'live'])(
+    'DL-55 FU-BE-224: APP_ENV %j refuses to boot, names APP_ENV and does not echo the value',
+    (APP_ENV) => {
+      let message = '';
+      try {
+        validateEnv({ ...good, APP_ENV });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message).toMatch(/APP_ENV/);
+      // The fixed list of allowed values is the only place a value may appear; the received one is not.
+      const rest = message.replace('development, test, staging, pilot, production', '');
+      if (APP_ENV !== '') expect(rest).not.toContain(APP_ENV);
+    },
+  );
+
+  it('DL-55 FU-BE-224: the error message echoes no secret value', () => {
+    let message = '';
+    try {
+      validateEnv({ ...good, APP_ENV: 'prod' });
+    } catch (e) {
+      message = String(e);
+    }
+    expect(message).toMatch(/APP_ENV/);
+    for (const v of [
+      good.JWT_ACCESS_SECRET,
+      good.COOKIE_SECRET,
+      good.ENCRYPTION_KEY,
+      good.OTP_PEPPER,
+      good.SESSION_KEY_ENC_KEY_k1,
+      good.DATABASE_URL,
+    ]) {
+      expect(message).not.toContain(v);
+    }
+  });
+
+  it('DL-55 FU-BE-224: an unset, empty or misspelled APP_ENV still reports placeholder secrets (fails closed)', () => {
+    const ph = { OTP_PEPPER: 'change-me-local-otp-pepper-0000000000000' };
+    for (const APP_ENV of [undefined, '', 'prod', 'Production']) {
+      expect(() => validateEnv({ ...good, ...ph, APP_ENV })).toThrow(/APP_ENV/);
+      expect(() =>
+        validateEnv({
+          ...good,
+          APP_ENV,
+          SESSION_KEY_ENC_KEY_k1: Buffer.from('change-me-local-session-key-0001').toString(
+            'base64',
+          ),
+        }),
+      ).toThrow(/SESSION_KEY_ENC_KEY_k1/);
+    }
+  });
+
+  it.each(['development', 'test', 'staging', 'pilot', 'production'])(
+    'DL-55 FU-BE-224: APP_ENV=%s boots with the rest of a valid environment',
+    (APP_ENV) => {
+      expect(validateEnv({ ...good, APP_ENV, ...liveExtras(APP_ENV) }).APP_ENV).toBe(APP_ENV);
+    },
+  );
+
+  it.each(['development', 'test', 'production'])(
+    'DL-55 FU-BE-224: NODE_ENV=%s never relaxes a pilot or production APP_ENV',
+    (NODE_ENV) => {
+      for (const APP_ENV of ['pilot', 'production']) {
+        const base = { ...good, APP_ENV, NODE_ENV, ...liveExtras(APP_ENV) };
+        expect(() => validateEnv(base)).not.toThrow();
+        // The live-only guards still apply: no wrapping key, http origin, API docs on.
+        expect(() => validateEnv({ ...base, SESSION_KEY_ENC_KEY_k1: undefined })).toThrow(
+          /SESSION_KEY_ENC_KEY_k1/,
+        );
+        expect(() => validateEnv({ ...base, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
+          /WEB_ORIGIN/,
+        );
+        expect(() => validateEnv({ ...base, ENABLE_API_DOCS: 'true' })).toThrow(/ENABLE_API_DOCS/);
+      }
+    },
+  );
+
+  it('DL-55 FU-BE-224: NODE_ENV stays optional (APP_ENV is the single authority)', () => {
+    expect(validateEnv({ ...good, APP_ENV: 'development' }).NODE_ENV).toBe('development');
+  });
+});
+
+describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
+  const good = {
+    ...valid,
+    JWT_CANDIDATE_SECRET: 'c'.repeat(40),
+    OTP_PEPPER: 'd'.repeat(40),
+    SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
+  };
+  const bad = 'postgresql://app_user:Change-Me@db.internal:5432/secretdb';
+  const generated = 'postgresql://app_user:x7Kq9ZpL2mVw@db.internal:5432/secretdb';
+
+  it.each(['staging', 'pilot', 'production'])(
+    'DL-55 FU-BE-225: %s refuses a change-me DATABASE_URL password, names only the variable',
+    (APP_ENV) => {
+      const base = { ...good, APP_ENV, ...liveExtras(APP_ENV) };
+      let message = '';
+      try {
+        validateEnv({ ...base, DATABASE_URL: bad });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message).toMatch(/DATABASE_URL/);
+      for (const part of ['Change-Me', 'app_user', 'db.internal', 'secretdb'])
+        expect(message).not.toContain(part);
+      expect(() => validateEnv({ ...base, DATABASE_URL: generated })).not.toThrow();
+      // An encoded placeholder is decoded before the check.
+      expect(() =>
+        validateEnv({ ...base, DATABASE_URL: 'postgresql://u:change%2Dme@db:5432/d' }),
+      ).toThrow(/DATABASE_URL/);
+    },
+  );
+
+  it('DL-55 FU-BE-225: NODE_ENV=production refuses it whatever APP_ENV says', () => {
+    expect(() =>
+      validateEnv({
+        ...good,
+        APP_ENV: 'development',
+        NODE_ENV: 'production',
+        ...liveExtras('pilot'),
+        DATABASE_URL: bad,
+      }),
+    ).toThrow(/DATABASE_URL/);
+  });
+
+  it.each(['development', 'test'])(
+    'DL-55 FU-BE-225: %s accepts the template password',
+    (APP_ENV) => {
+      expect(validateEnv({ ...good, APP_ENV, DATABASE_URL: bad }).APP_ENV).toBe(APP_ENV);
+    },
+  );
+
+  // Each of these is a way the runtime driver (pg) would still end up with a change-me password.
+  const bypasses: Record<string, string> = {
+    'undecodable password refused': 'postgresql://u:change-me%ZZ@db.internal/secretdb',
+    'encoded letter plus an invalid escape (pg restores %63)':
+      'postgresql://u:%63hange-me%ZZ@db.internal/secretdb',
+    'password query parameter, no userinfo password':
+      'postgresql://app_user@db.internal:5432/secretdb?password=change-me',
+    'password query parameter over a strong userinfo password':
+      'postgresql://u:strongpw@db.internal/secretdb?password=change-me',
+    'any password query parameter, even a strong one':
+      'postgresql://u@db.internal/secretdb?password=x7Kq9ZpL2mVw',
+    'unparseable URL (dummy-host fallback in pg)': 'postgresql://u:change-me@/secretdb',
+  };
+  const sharedCases: Array<[string, Record<string, string>]> = [
+    ['staging', { APP_ENV: 'staging' }],
+    ['pilot', { APP_ENV: 'pilot' }],
+    ['production', { APP_ENV: 'production' }],
+    ['NODE_ENV=production', { APP_ENV: 'development', NODE_ENV: 'production' }],
+  ];
+
+  describe.each(sharedCases)('DL-55 FU-BE-225 NFR-04 shared env %s', (_label, envVars) => {
+    const base = { ...good, ...liveExtras('pilot'), ...envVars };
+
+    it.each(Object.entries(bypasses))(
+      'DL-55 FU-BE-225: refuses %s, naming DATABASE_URL and echoing no URL part',
+      (_name, url) => {
+        let message = '';
+        try {
+          validateEnv({ ...base, DATABASE_URL: url });
+        } catch (e) {
+          message = String(e);
+        }
+        expect(message).toMatch(/DATABASE_URL/);
+        for (const part of ['change-me', 'app_user', 'db.internal', 'secretdb', 'strongpw'])
+          expect(message).not.toContain(part);
+      },
+    );
+
+    it('DL-55 FU-BE-225: a generated userinfo password and no password parameter is accepted', () => {
+      expect(() =>
+        validateEnv({ ...base, DATABASE_URL: `${generated}?sslmode=require` }),
+      ).not.toThrow();
+      expect(() =>
+        validateEnv({
+          ...base,
+          DATABASE_URL: `${generated}?sslmode=require&application_name=x`,
+        }),
+      ).not.toThrow();
+      // pg matches the parameter name case-sensitively, so Password=x is not a password override.
+      expect(() => validateEnv({ ...base, DATABASE_URL: `${generated}?Password=x` })).not.toThrow();
+    });
+
+    it('DL-55 FU-BE-225: refuses a change-me PGPASSWORD, naming only the variable', () => {
+      let message = '';
+      try {
+        validateEnv({ ...base, PGPASSWORD: 'Change-Me-pg-secret' });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message).toMatch(/PGPASSWORD/);
+      expect(message).not.toContain('Change-Me');
+      expect(() => validateEnv({ ...base, PGPASSWORD: 'x7Kq9ZpL2mVw' })).not.toThrow();
+    });
+  });
+
+  it('DL-55 FU-BE-225: an invalid APP_ENV (fails closed) also reports a bad DATABASE_URL by name', () => {
+    expect(() =>
+      validateEnv({ ...good, APP_ENV: 'prod', DATABASE_URL: 'postgresql://u:change-me@/d' }),
+    ).toThrow(/DATABASE_URL/);
+  });
+
+  it('DL-55 FU-BE-225: an invalid APP_ENV (fails closed) still refuses a change-me PGPASSWORD by name', () => {
+    expect(() => validateEnv({ ...good, APP_ENV: 'prod', PGPASSWORD: 'change-me' })).toThrow(
+      /PGPASSWORD/,
+    );
+  });
+
+  it.each(['development', 'test'])(
+    'DL-55 FU-BE-225: %s keeps accepting the template URL, a password parameter, an unparseable URL and PGPASSWORD',
+    (APP_ENV) => {
+      for (const DATABASE_URL of Object.values(bypasses))
+        expect(validateEnv({ ...good, APP_ENV, DATABASE_URL }).APP_ENV).toBe(APP_ENV);
+      expect(() => validateEnv({ ...good, APP_ENV, PGPASSWORD: 'change-me' })).not.toThrow();
+    },
+  );
 });
 
 /** Settings pilot and production need besides the secrets, so only the placeholders can fail. */
