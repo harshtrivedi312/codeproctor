@@ -102,9 +102,9 @@ printf '%s' "$counts" | grep -q '^[a-z0-9_=,]*$' || die "unexpected characters i
 # 4. Upload to the one fixed key (a new object version on a versioned bucket) and confirm it.
 if [ "$BACKUP_MODE" = versioned ]; then
   # Before overwriting anything: an existing object without a version id means the bucket is not
-  # versioned, and this upload would replace the only backup ("null" is fine: it is an object from
-  # before versioning was switched on) is NOT fine either: with versioning suspended an upload would replace the
-  # null version in place. This script creates the key, so in a correctly versioned bucket it never has one.
+  # versioned, and this upload would replace the only backup. A "null" version id is refused too: with
+  # versioning suspended an upload would replace the null version in place. This script creates the key,
+  # so in a correctly versioned bucket it never has one.
   # A missing object (first backup) is fine. (A missing bucket or wrong endpoint that answers 404 also lands
   # here, and the upload then fails.)
   # Only "not found" counts as a first backup. Any other failure (403, a network error, throttling, a
