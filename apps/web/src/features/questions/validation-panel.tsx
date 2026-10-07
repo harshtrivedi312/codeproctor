@@ -7,7 +7,7 @@ import { LANGUAGE_LABELS } from './draft';
 type Report = Schemas['ValidationReport'];
 type Failure = Schemas['ValidationFailure'];
 
-const VERDICT_LABEL: Record<string, string> = {
+export const VERDICT_LABEL: Record<string, string> = {
   FAILED: 'Wrong answer',
   COMPILE_ERROR: 'Compile error',
   TIME_LIMIT: 'Time limit exceeded',
@@ -16,6 +16,7 @@ const VERDICT_LABEL: Record<string, string> = {
   RUNTIME_ERROR: 'Runtime error',
   INTERNAL_ERROR: 'Runner error',
   MISSING_REFERENCE: 'No reference solution',
+  LOCAL_STUB: 'local stub, not real execution',
 };
 
 /** What the author can do about a failure; a hidden slot never shows its expected or actual output. */

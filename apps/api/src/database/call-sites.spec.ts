@@ -42,7 +42,7 @@ const SRC = resolve(__dirname, '..');
  * Every file that may use a guarded name. Explicit paths, never folders. BE-07 adds ONE ENTRY PER FILE, with
  * `sites` naming the GRANT_SITES it holds, in the PR that builds it:
  *   'candidate/candidate-scope.ts':   { names: ['setCandidateFacts'], why: 'CandidateScope: the guard path and every asCandidate step (DL-31)' },
- *   'jobs/session-job.processor.ts':                 { names: ['detachForSessionJob'], why: 'SessionJobProcessor base class' },
+ *   'session/session-job.processor.ts':              { names: ['detachForSessionJob'], why: 'SessionJobProcessor base class' },
  *   'candidate/session-state.service.ts':            { names: ['withGrant'], sites: ['SessionStateService'], why: '…' },
  */
 export const CALL_SITES: CallSiteList = {
@@ -60,6 +60,13 @@ export const CALL_SITES: CallSiteList = {
   'candidate/candidate-scope.ts': {
     names: ['setCandidateFacts'],
     why: 'CandidateScope: the guard path and every asCandidate step set the facts first (DL-31)',
+  },
+  // BE-07 session-job layer (ADR 0013 5.7, CS-4.7). The ONE caller of detachForSessionJob: the
+  // SessionJobProcessor base class detaches, enters runAsSessionJob and opens the single write
+  // transaction (guardLive first). Pinned as the only caller by session/session-job-writers.spec.ts.
+  'session/session-job.processor.ts': {
+    names: ['detachForSessionJob'],
+    why: 'SessionJobProcessor base class: the only code that detaches into a session-job scope (withLiveSession, withAnySession)',
   },
 };
 
@@ -150,11 +157,12 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(findStaleEntries(files, CALL_SITES)).toEqual([]);
   });
 
-  it('TC-008 the list holds the two database files that define the private entries and the BE-07 guard path (candidate/candidate-scope.ts), and nothing else', () => {
+  it('TC-008 the list holds the two database files that define the private entries, the BE-07 guard path (candidate/candidate-scope.ts) and the session-job base class (session/session-job.processor.ts), and nothing else', () => {
     expect(Object.keys(CALL_SITES).sort()).toEqual([
       'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
       'database/org-context.ts',
+      'session/session-job.processor.ts',
     ]);
     // The grant sites are not allowed anywhere yet: no entry names one.
     expect(Object.values(CALL_SITES).some((entry) => entry.sites !== undefined)).toBe(false);
