@@ -77,7 +77,7 @@ function workerBlock() {
     '# The signing key is shared with the API once it has a worker client (none on main yet); the origin',
     '# must equal S3_ENDPOINT exactly. Without the model files the worker reports not ready and the',
     '# identity check answers MANUAL_REVIEW.',
-    'WORKER_BASE_URL=http://localhost:8000',
+    'WORKER_BASE_URL=http://127.0.0.1:8000',
     'WORKER_HMAC_KEY_ID=local1',
     `WORKER_HMAC_KEY=${b64(32)}`,
     'WORKER_OBJECT_STORE_BUCKET=codeproctor-media',
