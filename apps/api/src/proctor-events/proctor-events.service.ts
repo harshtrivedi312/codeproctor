@@ -9,13 +9,7 @@
 // The session comes from the CandidateContext only (CS-1); a session id in the body is stripped by
 // the schema. Severity is assigned here from the type (ADR 0005); a client severity never arrives.
 // Never logged: bodies, keystroke text, signatures, keys.
-import {
-  HttpStatus,
-  Inject,
-  Injectable,
-  Logger,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DEFAULT_EVENT_SEVERITY,
@@ -105,7 +99,8 @@ function hasUnstorableText(root: unknown): boolean {
     if (typeof value === 'string') {
       if (bad(value)) return true;
     } else if (Array.isArray(value)) {
-      stack.push(...(value as unknown[]));
+      // A loop, not `push(...array)`: a spread of a huge flat array overflows the call stack.
+      for (const item of value as unknown[]) stack.push(item);
     } else if (typeof value === 'object' && value !== null) {
       for (const [k, v] of Object.entries(value)) {
         if (bad(k)) return true;
@@ -583,7 +578,11 @@ export class ProctorEventsService {
       }
     }
     // The state kept changing under us: the transaction rolls back and the client retries (503).
-    throw new ServiceUnavailableException('The session state is changing. Retry the batch.');
+    throw coded(
+      HttpStatus.SERVICE_UNAVAILABLE,
+      'The session state is changing. Retry the batch.',
+      'SESSION_STATE_CONFLICT',
+    );
   }
 
   /** Re-runs the pause effects for a batch that was already stored (idempotent, see above). */
