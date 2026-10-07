@@ -1686,6 +1686,29 @@ export interface components {
         'application/json': components['schemas']['ProblemDetails'];
       };
     };
+    /** @description Lock contention (docs/api-contract.md section 8): 503 with a Retry-After header of 1 to 2 seconds and the problem code BUSY. The action did NOT happen. The web retries it by itself (up to 3 more times, never on credential or re-auth routes). A 503 without code BUSY (for example Redis down) is a different answer and is not retried. */
+    Busy: {
+      headers: {
+        /** @description Seconds to wait before trying again (1 to 2). */
+        'Retry-After'?: number;
+        [name: string]: unknown;
+      };
+      content: {
+        'application/json': components['schemas']['ProblemDetails'] & {
+          /** @enum {string} */
+          code?: 'BUSY';
+        };
+      };
+    };
+    /** @description A fixed 500 with no useful detail, no code and no Retry-After. On a staff write it can mean the action committed and only its audit row failed afterwards: it is NEVER retried automatically; look at the list or the status before trying again. */
+    ServerError: {
+      headers: {
+        [name: string]: unknown;
+      };
+      content: {
+        'application/json': components['schemas']['ProblemDetails'];
+      };
+    };
   };
   parameters: {
     QuestionId: string;
@@ -2411,6 +2434,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   inviteStaffUser: {
@@ -2458,6 +2482,8 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   updateStaffUser: {
@@ -2506,6 +2532,8 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   getOrgSettings: {
@@ -2527,6 +2555,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   updateOrgSettings: {
@@ -2561,6 +2590,8 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   listConsentTexts: {
@@ -2586,6 +2617,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   createConsentText: {
@@ -2632,6 +2664,8 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   setCurrentConsentText: {
@@ -2664,6 +2698,8 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   listCandidates: {
@@ -2687,6 +2723,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   requestCandidateErasure: {
@@ -2719,6 +2756,8 @@ export interface operations {
           'application/json': components['schemas']['ApiError'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   listQuestions: {
@@ -2756,6 +2795,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   createQuestion: {
@@ -2799,6 +2839,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   getAiPolicy: {
@@ -2820,6 +2862,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   getQuestion: {
@@ -2856,6 +2899,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
   updateQuestion: {
@@ -2910,6 +2954,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   publishQuestion: {
@@ -2964,6 +3010,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   archiveQuestion: {
@@ -2996,6 +3044,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   unarchiveQuestion: {
@@ -3028,6 +3078,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   addTestCase: {
@@ -3092,6 +3144,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   removeTestCase: {
@@ -3137,6 +3191,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   updateTestCase: {
@@ -3193,6 +3249,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   listVariants: {
@@ -3226,6 +3284,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
   createVariant: {
@@ -3290,6 +3349,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   removeVariant: {
@@ -3344,6 +3405,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   updateVariant: {
@@ -3400,6 +3463,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   previewVariant: {
@@ -3443,6 +3508,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
   setVariantOverride: {
@@ -3500,6 +3566,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   removeVariantOverride: {
@@ -3546,6 +3614,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   prefillVariantOutputs: {
@@ -3582,6 +3652,8 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   validateQuestion: {
@@ -3645,6 +3717,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   getValidation: {
@@ -3677,6 +3751,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
   listAiReferences: {
@@ -3710,6 +3785,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
   addAiReference: {
@@ -3774,6 +3850,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   supersedeAiReference: {
@@ -3839,6 +3917,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   listTests: {
@@ -3876,6 +3956,7 @@ export interface operations {
         };
       };
       403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
     };
   };
   createTest: {
@@ -3928,6 +4009,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   getTest: {
@@ -3969,6 +4052,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
   updateTest: {
@@ -4032,6 +4116,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   createInvitation: {
@@ -4104,6 +4190,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   createInvitationsBulk: {
@@ -4167,6 +4255,8 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      500: components['responses']['ServerError'];
+      503: components['responses']['Busy'];
     };
   };
   listCandidateInvitations: {
@@ -4201,6 +4291,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
+      503: components['responses']['Busy'];
     };
   };
 }

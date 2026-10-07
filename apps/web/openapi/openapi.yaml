@@ -41,7 +41,8 @@ paths:
   /v1/candidate/session:
     get:
       operationId: getCandidateSession
-      summary: The candidate's running session with the open section and its questions (FR-301, FR-505)
+      summary: The candidate's running session with the open section and its questions
+        (FR-301, FR-505)
       responses:
         '200':
           description: Session snapshot
@@ -122,7 +123,8 @@ paths:
   /v1/auth/login:
     post:
       operationId: login
-      summary: Staff password login (FR-101). Placeholder path, see fsd.md section 4 (/auth/login).
+      summary: Staff password login (FR-101). Placeholder path, see fsd.md section 4
+        (/auth/login).
       requestBody:
         required: true
         content:
@@ -142,8 +144,9 @@ paths:
                 $ref: '#/components/schemas/LoginResult'
         '401':
           description: >-
-            Sign-in failed. One generic answer for a wrong password, an unknown email and a locked
-            account (15 minutes after 5 failed attempts, FR-101); the API never reveals which.
+            Sign-in failed. One generic answer for a wrong password, an unknown
+            email and a locked account (15 minutes after 5 failed attempts,
+            FR-101); the API never reveals which.
           content:
             application/json:
               schema:
@@ -151,7 +154,8 @@ paths:
   /v1/auth/2fa/enroll/start:
     post:
       operationId: startTwoFactorEnrollment
-      summary: Begin forced TOTP enrollment (FR-102). Needs the challenge token from login.
+      summary: Begin forced TOTP enrollment (FR-102). Needs the challenge token from
+        login.
       requestBody:
         required: true
         content:
@@ -170,7 +174,8 @@ paths:
                   manualKey: { type: string }
                   otpauthUri: { type: string }
         '401':
-          description: The challenge is stale or unknown. detail is "Your sign-in has expired. Sign in again."
+          description: The challenge is stale or unknown. detail is "Your sign-in has
+            expired. Sign in again."
           content:
             application/json:
               schema:
@@ -178,7 +183,8 @@ paths:
   /v1/auth/2fa/enroll/confirm:
     post:
       operationId: confirmTwoFactorEnrollment
-      summary: Confirm enrollment with a first code; returns the one-time recovery codes (ADR 0003 section 1)
+      summary: Confirm enrollment with a first code; returns the one-time recovery
+        codes (ADR 0003 section 1)
       requestBody:
         required: true
         content:
@@ -252,7 +258,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
-          description: Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401).
+          description: Wrong current password or locked account, one identical body with
+            code REAUTH_FAILED. Never a session expiry (that is 401).
           content:
             application/json:
               schema:
@@ -266,7 +273,8 @@ paths:
   /v1/auth/2fa/setup/confirm:
     post:
       operationId: confirmTwoFactorSetup
-      summary: Confirm optional set-up with a first code; returns the one-time recovery codes
+      summary: Confirm optional set-up with a first code; returns the one-time
+        recovery codes
       requestBody:
         required: true
         content:
@@ -297,7 +305,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
-          description: Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401).
+          description: Wrong current password or locked account, one identical body with
+            code REAUTH_FAILED. Never a session expiry (that is 401).
           content:
             application/json:
               schema:
@@ -311,7 +320,8 @@ paths:
   /v1/auth/2fa/disable:
     post:
       operationId: disableTwoFactor
-      summary: Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR #51). Not for Super Admin and Reviewer.
+      summary: Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens
+        and clears the cookie (backend PR #51). Not for Super Admin and Reviewer.
       requestBody:
         required: true
         content:
@@ -330,7 +340,8 @@ paths:
                   }
       responses:
         '204':
-          description: Two-factor is off and every refresh token of the user is revoked (sign in again)
+          description: Two-factor is off and every refresh token of the user is revoked
+            (sign in again)
         '400':
           description: Missing or invalid currentPassword or totpCode
           content:
@@ -344,7 +355,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
-          description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last)
+          description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed
+            code (one identical body with the fixed detail "The password or code
+            is incorrect.", so it never says which factor failed), otherwise
+            TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked
+            last)
           content:
             application/json:
               schema:
@@ -356,7 +371,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '503':
-          description: Temporary outage (for example the code store); no failure is counted, try again
+          description: Temporary outage (for example the code store); no failure is
+            counted, try again
           content:
             application/json:
               schema:
@@ -394,7 +410,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
         '403':
-          description: Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401).
+          description: Wrong current password or locked account, one identical body with
+            code REAUTH_FAILED. Never a session expiry (that is 401).
           content:
             application/json:
               schema:
@@ -408,7 +425,8 @@ paths:
   /v1/auth/2fa/verify:
     post:
       operationId: verifyTwoFactor
-      summary: Complete login with a 6-digit TOTP code or a recovery code (FR-102, ADR 0003 section 1)
+      summary: Complete login with a 6-digit TOTP code or a recovery code (FR-102, ADR
+        0003 section 1)
       requestBody:
         required: true
         content:
@@ -441,7 +459,8 @@ paths:
   /v1/auth/refresh:
     post:
       operationId: refreshSession
-      summary: Rotate the refresh cookie and return a new access token (FR-104). Cookie is httpOnly.
+      summary: Rotate the refresh cookie and return a new access token (FR-104).
+        Cookie is httpOnly.
       responses:
         '200':
           description: New access token
@@ -488,7 +507,8 @@ paths:
   /v1/auth/password/reset:
     post:
       operationId: resetPassword
-      summary: Set a password with a single-use reset or invite token (FR-107, ADR 0003 section 4). Never signs in.
+      summary: Set a password with a single-use reset or invite token (FR-107, ADR
+        0003 section 4). Never signs in.
       requestBody:
         required: true
         content:
@@ -526,9 +546,12 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/StaffUser' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
     post:
       operationId: inviteStaffUser
-      summary: Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4)
+      summary: Invite a staff user by email; they set a password from the emailed link
+        (ADR 0003 section 4)
       requestBody:
         required: true
         content:
@@ -557,10 +580,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/admin/users/{userId}:
     patch:
       operationId: updateStaffUser
-      summary: Change a role or deactivate or reactivate a user (revokes their refresh tokens)
+      summary: Change a role or deactivate or reactivate a user (revokes their refresh
+        tokens)
       parameters:
         - name: userId
           in: path
@@ -592,10 +620,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/admin/settings:
     get:
       operationId: getOrgSettings
-      summary: Organisation settings (retention, erasure hold, risk scoring, decline contact)
+      summary: Organisation settings (retention, erasure hold, risk scoring, decline
+        contact)
       responses:
         '200':
           description: Settings, with defaults for missing keys
@@ -603,6 +636,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OrgSettings' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
     patch:
       operationId: updateOrgSettings
       summary: Change some organisation settings
@@ -623,6 +658,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/admin/consent-texts:
     get:
       operationId: listConsentTexts
@@ -643,9 +682,12 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/ConsentText' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
     post:
       operationId: createConsentText
-      summary: Add a new version. It starts as a placeholder; Legal approval is recorded outside this API (Q-43).
+      summary: Add a new version. It starts as a placeholder; Legal approval is
+        recorded outside this API (Q-43).
       requestBody:
         required: true
         content:
@@ -673,6 +715,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/admin/consent-texts/{consentTextId}/current:
     put:
       operationId: setCurrentConsentText
@@ -690,14 +736,20 @@ paths:
               schema: { $ref: '#/components/schemas/ConsentText' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Refused because the text is not approved by Legal and approval is required
+          description: Refused because the text is not approved by Legal and approval is
+            required
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/admin/candidates:
     get:
       operationId: listCandidates
-      summary: Candidates of the organisation with their erasure state (list view only; the full page is FE-05)
+      summary: Candidates of the organisation with their erasure state (list view
+        only; the full page is FE-05)
       responses:
         '200':
           description: Candidates
@@ -711,10 +763,13 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/CandidateSummary' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
   /v1/admin/candidates/{candidateId}/erasure:
     post:
       operationId: requestCandidateErasure
-      summary: Request erasure of a candidate's data (NFR-05, D-19). Waits while a review or appeal is open if the hold is on.
+      summary: Request erasure of a candidate's data (NFR-05, D-19). Waits while a
+        review or appeal is open if the hold is on.
       parameters:
         - name: candidateId
           in: path
@@ -732,6 +787,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiError' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   # ---------------------------------------------------------------------------------------------
   # Question bank (FR-201..FR-205, FE-04). Routes marked REAL mirror BE-04a (PR #146,
   # apps/api/src/questions). Routes marked WEB-ONLY have no counterpart in the API yet and are
@@ -744,7 +803,8 @@ paths:
   /v1/questions:
     get:
       operationId: listQuestions
-      summary: REAL. List questions (question:read). Readers without question:update see published versions only and never archived questions.
+      summary: REAL. List questions (question:read). Readers without question:update
+        see published versions only and never archived questions.
       parameters:
         - {
             name: page,
@@ -772,6 +832,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
     post:
       operationId: createQuestion
       summary: REAL. Create a question with draft version 1 (question:create).
@@ -797,10 +859,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/ai-policy:
     get:
       operationId: getAiPolicy
-      summary: REAL. The AI reference policy of your organization (permission ai_reference:read, held by Author and Super Admin; recruiters and reviewers get 403). Read-only.
+      summary: REAL. The AI reference policy of your organization (permission
+        ai_reference:read, held by Author and Super Admin; recruiters and
+        reviewers get 403). Read-only.
       responses:
         '200':
           description: The policy
@@ -808,6 +876,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/AiPolicy' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
   /v1/questions/{questionId}:
     parameters:
       - name: questionId
@@ -817,12 +887,14 @@ paths:
     get:
       operationId: getQuestion
       summary: >-
-        REAL. One question with one version (the latest by default, `version` selects another). Callers
-        with question:update get the full QuestionDetail. Every other reader (Recruiter) gets
-        QuestionDetailRedacted: published versions only (a draft, a never-published, a missing and
-        another organization's question are the identical 404), no revision, reference solution,
-        answer key or validation report, and hidden test cases as id, position, isHidden and weight
-        only. A published but archived question is still readable.
+        REAL. One question with one version (the latest by default, `version`
+        selects another). Callers with question:update get the full
+        QuestionDetail. Every other reader (Recruiter) gets
+        QuestionDetailRedacted: published versions only (a draft, a
+        never-published, a missing and another organization's question are the
+        identical 404), no revision, reference solution, answer key or
+        validation report, and hidden test cases as id, position, isHidden and
+        weight only. A published but archived question is still readable.
       parameters:
         - { name: version, in: query, schema: { type: integer, minimum: 1, maximum: 1000000 } }
       responses:
@@ -840,14 +912,17 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
     patch:
       operationId: updateQuestion
       summary: >-
-        REAL. Change fields of the question (question:update). Every field is optional but at least
-        one is needed. A draft is edited in place; if the latest version is published this creates
-        the next version as a draft (createdNewVersion true). Test cases are NOT part of this body:
-        use the test-case routes. expectedRevision (the revision as loaded) makes a concurrent
-        change a 409.
+        REAL. Change fields of the question (question:update). Every field is
+        optional but at least one is needed. A draft is edited in place; if the
+        latest version is published this creates the next version as a draft
+        (createdNewVersion true). Test cases are NOT part of this body: use the
+        test-case routes. expectedRevision (the revision as loaded) makes a
+        concurrent change a 409.
       requestBody:
         required: true
         content:
@@ -871,10 +946,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The question is archived, or it changed since it was loaded (expectedRevision)
+          description: The question is archived, or it changed since it was loaded
+            (expectedRevision)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/publish:
     parameters:
       - name: questionId
@@ -884,10 +964,11 @@ paths:
     post:
       operationId: publishQuestion
       summary: >-
-        REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is
-        incomplete; for a CODING question also until a passing validation run of the current
-        revision exists and every allowed language has enough AI reference solutions. 409 when there is no
-        draft, the question is archived, or expectedRevision no longer matches.
+        REAL. Publish the latest draft (question:update). 422 with errors[]
+        while the draft is incomplete; for a CODING question also until a
+        passing validation run of the current revision exists and every allowed
+        language has enough AI reference solutions. 409 when there is no draft,
+        the question is archived, or expectedRevision no longer matches.
       requestBody:
         required: false
         content:
@@ -906,7 +987,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: No draft to publish, the question is archived, or expectedRevision no longer matches
+          description: No draft to publish, the question is archived, or expectedRevision
+            no longer matches
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -915,6 +997,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/archive:
     parameters:
       - name: questionId
@@ -923,7 +1009,8 @@ paths:
         schema: { type: string }
     post:
       operationId: archiveQuestion
-      summary: REAL. Soft-archive a question (question:update); hidden from lists, never deleted.
+      summary: REAL. Soft-archive a question (question:update); hidden from lists,
+        never deleted.
       responses:
         '200':
           description: Archived
@@ -936,6 +1023,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/unarchive:
     parameters:
       - name: questionId
@@ -957,6 +1048,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/versions/{version}/test-cases:
     parameters:
       - name: questionId
@@ -969,7 +1064,8 @@ paths:
         schema: { type: integer, minimum: 1 }
     post:
       operationId: addTestCase
-      summary: REAL. Add a test case to a draft version of a coding question (question:update).
+      summary: REAL. Add a test case to a draft version of a coding question
+        (question:update).
       requestBody:
         required: true
         content:
@@ -993,7 +1089,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1002,6 +1099,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}:
     parameters:
       - name: questionId
@@ -1042,20 +1143,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
     delete:
       operationId: removeTestCase
-      summary: REAL. Remove a test case from a draft version (question:update). The revision check is a query parameter.
+      summary: REAL. Remove a test case from a draft version (question:update). The
+        revision check is a query parameter.
       parameters:
         - name: expectedRevision
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
         '200':
-          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          description: Removed. Answers the new revision of the version, computed in the
+            same transaction.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RevisionResult' }
@@ -1066,10 +1174,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   # ---- Variants (REAL, BE-04b): question:update except the candidate-shaped preview -------------
   /v1/questions/{questionId}/versions/{version}/variants:
     parameters:
@@ -1083,7 +1196,9 @@ paths:
         schema: { type: integer, minimum: 1 }
     get:
       operationId: listVariants
-      summary: REAL. The variants of a version with params and per-slot overrides, plus the version revision (question:update). The writer detail carries the same variants in version.variants.
+      summary: REAL. The variants of a version with params and per-slot overrides,
+        plus the version revision (question:update). The writer detail carries
+        the same variants in version.variants.
       responses:
         '200':
           description: Variants and the revision to send back as expectedRevision
@@ -1096,9 +1211,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
     post:
       operationId: createVariant
-      summary: REAL. Add a variant to a draft version (question:update). Every {{placeholder}} of the statement, starter code and reference solution of an ACTIVE variant needs a param (400 otherwise). At most 50 per version.
+      summary: REAL. Add a variant to a draft version (question:update). Every
+        {{placeholder}} of the statement, starter code and reference solution of
+        an ACTIVE variant needs a param (400 otherwise). At most 50 per version.
       requestBody:
         required: true
         content:
@@ -1122,7 +1241,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1131,6 +1251,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/versions/{version}/variants/{variantId}:
     parameters:
       - name: questionId
@@ -1147,7 +1271,8 @@ paths:
         schema: { type: string }
     patch:
       operationId: updateVariant
-      summary: REAL. Change the params or the active flag of a variant of a draft (question:update). An empty body is 400.
+      summary: REAL. Change the params or the active flag of a variant of a draft
+        (question:update). An empty body is 400.
       requestBody:
         required: true
         content:
@@ -1171,20 +1296,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
     delete:
       operationId: removeVariant
-      summary: REAL. Remove a variant and its overrides from a draft (question:update). The revision check is a query parameter.
+      summary: REAL. Remove a variant and its overrides from a draft
+        (question:update). The revision check is a query parameter.
       parameters:
         - name: expectedRevision
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
         '200':
-          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          description: Removed. Answers the new revision of the version, computed in the
+            same transaction.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RevisionResult' }
@@ -1200,10 +1332,17 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: 'The version is published (immutable), the question is archived, expectedRevision is stale, or the variant has AI reference rows (code VARIANT_HAS_AI_REFERENCES: they are never deleted, set the variant inactive instead)'
+          description: 'The version is published (immutable), the question is archived,
+            expectedRevision is stale, or the variant has AI reference rows
+            (code VARIANT_HAS_AI_REFERENCES: they are never deleted, set the
+            variant inactive instead)'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/versions/{version}/variants/{variantId}/preview:
     parameters:
       - name: questionId
@@ -1221,11 +1360,12 @@ paths:
     get:
       operationId: previewVariant
       summary: >-
-        REAL. The candidate-shaped view of one variant: rendered statement and starter code, its
-        own sample cases, no params, hidden data, reference solution or answer spec (question:read).
-        Without question:update only published versions and active variants are visible (404
-        otherwise). A variant that does not render is 422 with reasons for a writer and a plain 422
-        for others.
+        REAL. The candidate-shaped view of one variant: rendered statement and
+        starter code, its own sample cases, no params, hidden data, reference
+        solution or answer spec (question:read). Without question:update only
+        published versions and active variants are visible (404 otherwise). A
+        variant that does not render is 422 with reasons for a writer and a
+        plain 422 for others.
       responses:
         '200':
           description: The candidate view
@@ -1243,6 +1383,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
   /v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}:
     parameters:
       - name: questionId
@@ -1263,7 +1405,10 @@ paths:
         schema: { type: string }
     put:
       operationId: setVariantOverride
-      summary: REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Answers the override and the new revision of the version, computed in the same transaction.
+      summary: REAL. Override the input and expected output of one test slot for a
+        variant (question:update). The slot must belong to the same version; its
+        hidden flag and weight stay the slot's. Answers the override and the new
+        revision of the version, computed in the same transaction.
       requestBody:
         required: true
         content:
@@ -1287,20 +1432,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
     delete:
       operationId: removeVariantOverride
-      summary: REAL. Remove an override; the slot's own input and output apply again (question:update).
+      summary: REAL. Remove an override; the slot's own input and output apply again
+        (question:update).
       parameters:
         - name: expectedRevision
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
         '200':
-          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          description: Removed. Answers the new revision of the version, computed in the
+            same transaction.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RevisionResult' }
@@ -1311,10 +1463,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: The version is published (immutable), the question is archived, or expectedRevision is stale
+          description: The version is published (immutable), the question is archived, or
+            expectedRevision is stale
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   # ---- WEB-ONLY placeholders: the API has no such route yet -------------------------------------
   /v1/questions/{questionId}/prefill:
     parameters:
@@ -1324,7 +1481,10 @@ paths:
         schema: { type: string }
     post:
       operationId: prefillVariantOutputs
-      summary: WEB-ONLY placeholder (BE-04b did not add a prefill route; ADR 0007 helper). Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals.
+      summary: WEB-ONLY placeholder (BE-04b did not add a prefill route; ADR 0007
+        helper). Run the reference solution on a variant's inputs and PROPOSE
+        expected outputs (ADR 0007). Nothing is stored; the author must accept
+        the proposals.
       requestBody:
         required: true
         content:
@@ -1342,6 +1502,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   # ---- Validate job (REAL, BE-04c): question:validate ---------------------------------------------
   /v1/questions/{questionId}/validate:
     parameters:
@@ -1352,10 +1516,11 @@ paths:
     post:
       operationId: validateQuestion
       summary: >-
-        REAL. Start validating the latest DRAFT (question:validate, coding questions only): the
-        reference solution of every allowed language runs on every test slot of every active variant
-        with that variant's data. The run happens after the response; poll GET .../validation. The
-        result is bound to the revision returned here. One run per question at a time.
+        REAL. Start validating the latest DRAFT (question:validate, coding
+        questions only): the reference solution of every allowed language runs
+        on every test slot of every active variant with that variant's data. The
+        run happens after the response; poll GET .../validation. The result is
+        bound to the revision returned here. One run per question at a time.
       requestBody:
         required: false
         content:
@@ -1379,15 +1544,21 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: No draft to validate, the question is archived, a run is already in progress, or the draft changed since expectedRevision
+          description: No draft to validate, the question is archived, a run is already in
+            progress, or the draft changed since expectedRevision
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: Not a coding question, or a variant does not render (errors[] says which)
+          description: Not a coding question, or a variant does not render (errors[] says
+            which)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/validation:
     parameters:
       - name: questionId
@@ -1397,9 +1568,10 @@ paths:
     get:
       operationId: getValidation
       summary: >-
-        REAL. The state of the latest validation run of the latest version and its stored report
-        (question:validate). There is no job id in the path: one status per question. A run whose
-        content changed meanwhile is STALE and never opens the publish gate.
+        REAL. The state of the latest validation run of the latest version and
+        its stored report (question:validate). There is no job id in the path:
+        one status per question. A run whose content changed meanwhile is STALE
+        and never opens the publish gate.
       responses:
         '200':
           description: The status
@@ -1412,6 +1584,8 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
   # ---- AI reference solutions (REAL, BE-04c): ai_reference:read, create, supersede ----------------
   /v1/questions/{questionId}/versions/{version}/ai-references:
     parameters:
@@ -1425,7 +1599,10 @@ paths:
         schema: { type: integer, minimum: 1 }
     get:
       operationId: listAiReferences
-      summary: REAL. The AI reference solutions of a version, current and superseded (ai_reference:read). Rows belong to ONE version; a new version starts with none. Never shown to recruiters or candidates, never used for grading.
+      summary: REAL. The AI reference solutions of a version, current and superseded
+        (ai_reference:read). Rows belong to ONE version; a new version starts
+        with none. Never shown to recruiters or candidates, never used for
+        grading.
       responses:
         '200':
           description: Rows, newest first
@@ -1438,9 +1615,12 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
     post:
       operationId: addAiReference
-      summary: REAL. Record an AI reference solution for a language of a version (ai_reference:create, append-only). collectedAt is the server's time.
+      summary: REAL. Record an AI reference solution for a language of a version
+        (ai_reference:create, append-only). collectedAt is the server's time.
       requestBody:
         required: true
         content:
@@ -1469,10 +1649,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: Not a coding question, or the language is not an allowed language of the version
+          description: Not a coding question, or the language is not an allowed language
+            of the version
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/questions/{questionId}/versions/{version}/ai-references/{aiReferenceId}/supersede:
     parameters:
       - name: questionId
@@ -1489,7 +1674,9 @@ paths:
         schema: { type: string }
     post:
       operationId: supersedeAiReference
-      summary: REAL. Retire a row (sets supersededAt; the row stays), optionally inserting its replacement in the same transaction (ai_reference:supersede).
+      summary: REAL. Retire a row (sets supersededAt; the row stays), optionally
+        inserting its replacement in the same transaction
+        (ai_reference:supersede).
       requestBody:
         required: true
         content:
@@ -1508,7 +1695,8 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: No such question, version or AI reference solution in your organization
+          description: No such question, version or AI reference solution in your
+            organization
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1522,6 +1710,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   # ---------------------------------------------------------------------------------------------
   # Tests (FR-301, FR-302; REAL since BE-06a, apps/api/src/tests). Roles: SUPER_ADMIN and RECRUITER
   # (test:read, test:create, test:update); an Author or Reviewer gets 403. No revision and no
@@ -1546,7 +1738,8 @@ paths:
         - { name: profile, in: query, schema: { $ref: '#/components/schemas/TestProfile' } }
         - name: used
           in: query
-          description: true only tests that already have invitations, false only tests that have none
+          description: true only tests that already have invitations, false only tests
+            that have none
           schema: { type: boolean }
       responses:
         '200':
@@ -1560,9 +1753,12 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
     post:
       operationId: createTest
-      summary: REAL. Create a test with ordered sections, fixed or random questions, a STANDARD or STRICT profile and a pass score (test:create).
+      summary: REAL. Create a test with ordered sections, fixed or random questions, a
+        STANDARD or STRICT profile and a pass score (test:create).
       requestBody:
         required: true
         content:
@@ -1575,21 +1771,28 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/TestDetail' }
         '400':
-          description: Validation failed (LOCKDOWN, section limits above the duration, a bad random rule, positions, an unknown field); errors[] says what
+          description: Validation failed (LOCKDOWN, section limits above the duration, a
+            bad random rule, positions, an unknown field); errors[] says what
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: A fixed question version does not exist, is a draft, or is not in your organisation (one answer)
+          description: A fixed question version does not exist, is a draft, or is not in
+            your organisation (one answer)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: A fixed version belongs to an archived question, or a random rule matches too few published questions
+          description: A fixed version belongs to an archived question, or a random rule
+            matches too few published questions
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/tests/{testId}:
     parameters:
       - name: testId
@@ -1616,12 +1819,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
     patch:
       operationId: updateTest
       summary: >-
-        REAL. Edit a test that has no invitation or session yet (test:update). Sections, when sent,
-        replace ALL sections. There is NO revision or If-Match: two editors are last-write-wins.
-        passScore cannot be cleared once set.
+        REAL. Edit a test that has no invitation or session yet (test:update).
+        Sections, when sent, replace ALL sections. There is NO revision or
+        If-Match: two editors are last-write-wins. passScore cannot be cleared
+        once set.
       requestBody:
         required: true
         content:
@@ -1650,10 +1856,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: A fixed version belongs to an archived question, or a random rule is unsatisfiable
+          description: A fixed version belongs to an archived question, or a random rule
+            is unsatisfiable
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   # ---------------------------------------------------------------------------------------------
   # Invitations and candidate status (FR-303, FR-304, FR-305). WEB-ONLY PLACEHOLDERS [BE-06b]: the
   # API has no invitations module yet (BE-06a is the tests module only). Shapes come from fsd.md
@@ -1670,7 +1881,9 @@ paths:
         schema: { type: string }
     post:
       operationId: createInvitation
-      summary: WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create). Creates the invitation and its session in status INVITED, and links or creates the candidate by email.
+      summary: WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create).
+        Creates the invitation and its session in status INVITED, and links or
+        creates the candidate by email.
       requestBody:
         required: true
         content:
@@ -1683,7 +1896,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/InvitationResult' }
         '400':
-          description: Validation failed (email, name, window, accommodations; errors[] says which)
+          description: Validation failed (email, name, window, accommodations; errors[]
+            says which)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1699,7 +1913,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED)
+          description: The window ends in the past, or the waiver reason is not enabled
+            (code REASON_NOT_ENABLED)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1708,6 +1923,10 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/tests/{testId}/invitations/bulk:
     parameters:
       - name: testId
@@ -1716,7 +1935,10 @@ paths:
         schema: { type: string }
     post:
       operationId: createInvitationsBulk
-      summary: WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here.
+      summary: WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at
+        most 200 rows per request). Rows that fail are reported by index and
+        reason, the others are invited (TC-023). A waiver is never accepted
+        here.
       requestBody:
         required: true
         content:
@@ -1745,10 +1967,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '429':
-          description: Too many invitations this hour; nothing was invited; Retry-After says when
+          description: Too many invitations this hour; nothing was invited; Retry-After
+            says when
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/admin/candidates/{candidateId}/invitations:
     parameters:
       - name: candidateId
@@ -1757,7 +1984,9 @@ paths:
         schema: { type: string }
     get:
       operationId: listCandidateInvitations
-      summary: WEB-ONLY [BE-06b]. The invitations of one candidate with their session status and the time each status was reached (invitation:create). Status only, no scores, flags or verdicts.
+      summary: WEB-ONLY [BE-06b]. The invitations of one candidate with their session
+        status and the time each status was reached (invitation:create). Status
+        only, no scores, flags or verdicts.
       responses:
         '200':
           description: Invitations, newest first
@@ -1775,11 +2004,46 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Busy'
 
 components:
   responses:
     Forbidden:
-      description: The role is not allowed to call this route (FR-103). A guard 403 has no code.
+      description: The role is not allowed to call this route (FR-103). A guard 403
+        has no code.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    Busy:
+      description: 'Lock contention (docs/api-contract.md section 8): 503 with a
+        Retry-After header of 1 to 2 seconds and the problem code BUSY. The
+        action did NOT happen. The web retries it by itself (up to 3 more times,
+        never on credential or re-auth routes). A 503 without code BUSY (for
+        example Redis down) is a different answer and is not retried.'
+      headers:
+        Retry-After:
+          description: Seconds to wait before trying again (1 to 2).
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/ProblemDetails'
+              - type: object
+                properties:
+                  code:
+                    type: string
+                    enum:
+                      - BUSY
+    ServerError:
+      description: 'A fixed 500 with no useful detail, no code and no Retry-After. On
+        a staff write it can mean the action committed and only its audit row
+        failed afterwards: it is NEVER retried automatically; look at the list
+        or the status before trying again.'
       content:
         application/json:
           schema:
@@ -1844,8 +2108,9 @@ components:
     TestCase:
       type: object
       description: >-
-        A test slot. For a reader without question:update a HIDDEN case carries only id, position,
-        isHidden and weight: the input and expectedOutput keys are absent, not null.
+        A test slot. For a reader without question:update a HIDDEN case carries
+        only id, position, isHidden and weight: the input and expectedOutput
+        keys are absent, not null.
       required: [id, position, isHidden, weight]
       properties:
         id: { type: string }
@@ -1889,7 +2154,8 @@ components:
         text: { type: string, minLength: 1, maxLength: 1000 }
     McqAnswerSpec:
       type: object
-      description: MCQ answer spec (the question type says which shape applies). 2 to 10 options.
+      description: MCQ answer spec (the question type says which shape applies). 2 to
+        10 options.
       required: [options, correctOptionIds, multiple]
       properties:
         options:
@@ -1940,7 +2206,8 @@ components:
           allOf:
             - $ref: '#/components/schemas/QuestionVersionRef'
         latest:
-          description: Highest version number (maybe a draft); for a reader without question:update the highest PUBLISHED version
+          description: Highest version number (maybe a draft); for a reader without
+            question:update the highest PUBLISHED version
           allOf:
             - $ref: '#/components/schemas/QuestionVersionRef'
     QuestionList:
@@ -1969,9 +2236,10 @@ components:
         verdict:
           type: string
           description: >-
-            A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT,
-            OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with
-            a value it does not know.
+            A string on the API. Known values: FAILED, COMPILE_ERROR,
+            TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR,
+            INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value
+            it does not know.
         actualOutput:
           { type: string, description: 'Only for a visible (sample) slot, never a hidden one' }
         diagnostic: { type: string }
@@ -1991,10 +2259,11 @@ components:
     ValidationReport:
       type: object
       description: >-
-        Stored in the version's validationReport (question:update readers only). `revision` is the
-        content revision the run was bound to, taken under the question lock at start: publish
-        refuses a report of any other revision. `error` is set when the run could not complete; then
-        passed is false and perVariant is empty.
+        Stored in the version's validationReport (question:update readers only).
+        `revision` is the content revision the run was bound to, taken under the
+        question lock at start: publish refuses a report of any other revision.
+        `error` is set when the run could not complete; then passed is false and
+        perVariant is empty.
       required: [passed, revision, startedAt, finishedAt, perVariant]
       properties:
         passed: { type: boolean }
@@ -2040,9 +2309,10 @@ components:
         status:
           type: string
           description: >-
-            NONE never run on this content; RUNNING; PASSED or FAILED finished on the current
-            content; STALE the content changed while it ran, the result was discarded (publish stays
-            closed); ERROR the run could not complete (fail closed).
+            NONE never run on this content; RUNNING; PASSED or FAILED finished
+            on the current content; STALE the content changed while it ran, the
+            result was discarded (publish stays closed); ERROR the run could not
+            complete (fail closed).
           enum: [NONE, RUNNING, PASSED, FAILED, STALE, ERROR]
         jobId: { type: string, nullable: true }
         version: { type: integer, minimum: 1 }
@@ -2100,21 +2370,23 @@ components:
               type: string
               pattern: '^[0-9a-f]{64}$'
               description: >-
-                Opaque SHA-256 of the version content, test cases and variants with their overrides
-                (question:update only). Send it back as expectedRevision; it changes with every
-                content, test-case, variant or override change.
+                Opaque SHA-256 of the version content, test cases and variants
+                with their overrides (question:update only). Send it back as
+                expectedRevision; it changes with every content, test-case,
+                variant or override change.
             testCases: { type: array, items: { $ref: '#/components/schemas/TestCase' } }
             variants:
               type: array
-              description: Variants with params and overrides (writers only; a reader never gets this key).
+              description: Variants with params and overrides (writers only; a reader never
+                gets this key).
               items: { $ref: '#/components/schemas/Variant' }
     QuestionVersionRead:
       type: object
       additionalProperties: false
       description: >-
-        What a reader without question:update gets of a version: an allowlist. No revision,
-        referenceSolution, answerSpec or validationReport, and hidden test cases without input and
-        expectedOutput.
+        What a reader without question:update gets of a version: an allowlist.
+        No revision, referenceSolution, answerSpec or validationReport, and
+        hidden test cases without input and expectedOutput.
       required:
         [
           id,
@@ -2159,11 +2431,13 @@ components:
             version: { $ref: '#/components/schemas/QuestionVersion' }
             createdNewVersion:
               type: boolean
-              description: true when this PATCH created a new version because the latest was published
+              description: true when this PATCH created a new version because the latest was
+                published
     QuestionDetailRedacted:
       type: object
       additionalProperties: false
-      description: The detail a reader without question:update gets (an allowlist, DL-32, BE-04a staff-view.ts)
+      description: The detail a reader without question:update gets (an allowlist,
+        DL-32, BE-04a staff-view.ts)
       required:
         [
           id,
@@ -2219,7 +2493,8 @@ components:
           { type: array, maxItems: 100, items: { $ref: '#/components/schemas/TestCaseInput' } }
     UpdateQuestion:
       type: object
-      description: Every field is optional, at least one is needed. Test cases have their own routes.
+      description: Every field is optional, at least one is needed. Test cases have
+        their own routes.
       properties:
         expectedRevision: { type: string, pattern: '^[0-9a-f]{64}$' }
         title: { type: string, minLength: 1, maxLength: 200 }
@@ -2238,10 +2513,12 @@ components:
     ProblemCode:
       type: string
       description: >-
-        The machine codes of docs/api-contract.md (preamble). Guard 403s carry none. BUSY is the 503
-        with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a
-        client should retry it after Retry-After (the web's automatic retry is a separate change). Candidate-route codes such as
-        SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
+        The machine codes of docs/api-contract.md (preamble). Guard 403s carry
+        none. BUSY is the 503 with Retry-After the problem filter answers on
+        database lock contention (DL-37, D-56); a client should retry it after
+        Retry-After (the web's automatic retry is a separate change).
+        Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1)
+        are not staff codes and are not listed here.
       enum:
         [
           REAUTH_FAILED,
@@ -2256,9 +2533,10 @@ components:
     Problem:
       type: object
       description: >-
-        RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code`
-        is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a
-        variant that has AI reference rows). The UI branches on status and endpoint, and on that code.
+        RFC 7807 problem body of the question routes. 409 and 422 carry detail
+        and errors[]. `code` is present only where a route defines one:
+        VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference
+        rows). The UI branches on status and endpoint, and on that code.
       required: [type, title, status]
       properties:
         type: { type: string }
@@ -2271,7 +2549,8 @@ components:
         code: { $ref: '#/components/schemas/ProblemCode' }
     VariantOverride:
       type: object
-      description: One test slot's input and expected output for a variant. isHidden and position come from the slot.
+      description: One test slot's input and expected output for a variant. isHidden
+        and position come from the slot.
       required: [testCaseId, isHidden, position, input, expectedOutput]
       properties:
         testCaseId: { type: string }
@@ -2282,10 +2561,11 @@ components:
     Variant:
       type: object
       description: >-
-        An explicit variant (ADR 0007). It has NO label or name: the UI names it by its place in the
-        list and its params. renderedStatement is the statement rendered with params, kept for the
-        author. Variants are sorted by id, which is NOT a meaningful order, and a fork gives every
-        variant a new id.
+        An explicit variant (ADR 0007). It has NO label or name: the UI names it
+        by its place in the list and its params. renderedStatement is the
+        statement rendered with params, kept for the author. Variants are sorted
+        by id, which is NOT a meaningful order, and a fork gives every variant a
+        new id.
       required: [id, isActive, params, renderedStatement, testCaseOverrides]
       properties:
         id: { type: string }
@@ -2301,13 +2581,15 @@ components:
         testCaseOverrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
     RevisionResult:
       type: object
-      description: The revision of a version after a writer-only change (never in a recruiter-reachable body).
+      description: The revision of a version after a writer-only change (never in a
+        recruiter-reachable body).
       required: [revision]
       properties:
         revision:
           type: string
           pattern: '^[0-9a-f]{64}$'
-          description: The new revision, computed inside the same transaction as the change; send it as expectedRevision.
+          description: The new revision, computed inside the same transaction as the
+            change; send it as expectedRevision.
     TestCaseMutation:
       allOf:
         - $ref: '#/components/schemas/TestCase'
@@ -2317,7 +2599,8 @@ components:
         - $ref: '#/components/schemas/VariantOverride'
         - $ref: '#/components/schemas/RevisionResult'
     QuestionUpdateResult:
-      description: The edited question plus the revision of the version the edit left (the new version after a fork).
+      description: The edited question plus the revision of the version the edit left
+        (the new version after a fork).
       allOf:
         - $ref: '#/components/schemas/QuestionDetail'
         - $ref: '#/components/schemas/RevisionResult'
@@ -2416,7 +2699,8 @@ components:
         refreshIntervalDays:
           type: integer
           nullable: true
-          description: AI-4 refresh interval in days; null until the API implements the setting.
+          description: AI-4 refresh interval in days; null until the API implements the
+            setting.
     CreateAiReference:
       type: object
       additionalProperties: false
@@ -2489,7 +2773,8 @@ components:
           {
             type: string,
             maxLength: 100000,
-            description: The template as edited (may be unsaved); the API renders it with params,
+            description: The template as edited (may be unsaved); the API renders it with
+              params,
           }
         slots:
           type: array
@@ -2522,15 +2807,17 @@ components:
                 }
     TestProfile:
       type: string
-      description: STANDARD records the web session; STRICT adds a second camera. LOCKDOWN is not offered in this build.
+      description: STANDARD records the web session; STRICT adds a second camera.
+        LOCKDOWN is not offered in this build.
       enum: [STANDARD, STRICT]
     RandomRule:
       type: object
       additionalProperties: false
       description: >-
-        Exactly { tags?, difficulty?, type? }; unknown keys are refused. There is NO count: one
-        question slot picks one question, and N slots with the same rule need N different matching
-        published questions. Tags are lower-cased, 1 to 20, all must match.
+        Exactly { tags?, difficulty?, type? }; unknown keys are refused. There
+        is NO count: one question slot picks one question, and N slots with the
+        same rule need N different matching published questions. Tags are
+        lower-cased, 1 to 20, all must match.
       properties:
         tags: { type: array, minItems: 1, maxItems: 20, items: { type: string } }
         difficulty: { $ref: '#/components/schemas/Difficulty' }
@@ -2653,7 +2940,8 @@ components:
         used:
           type: boolean
           description: >-
-            The test has an invitation or a session, so it can no longer be edited.
+            The test has an invitation or a session, so it can no longer be
+            edited.
     TestDetail:
       allOf:
         - $ref: '#/components/schemas/TestSummary'
@@ -2672,8 +2960,9 @@ components:
     SessionStatus:
       type: string
       description: >-
-        The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the
-        candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
+        The session state machine of ADR 0002 with ERASED (D-54, ADR 0004
+        section 9): the candidate's data was erased after an erasure request.
+        Terminal; set only by the erasure fence.
       enum:
         [
           INVITED,
@@ -2698,8 +2987,9 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500
-        characters) is required and allowed only with OTHER. Never put health details in it.
+        ADR 0015, owner decisions C-02 and C-19. reasonCode is required;
+        reasonNote (1 to 500 characters) is required and allowed only with
+        OTHER. Never put health details in it.
       required: [reasonCode]
       properties:
         reasonCode: { $ref: '#/components/schemas/IdentityWaiverReason' }
@@ -2707,7 +2997,8 @@ components:
     InvitationAccommodations:
       type: object
       additionalProperties: false
-      description: Per-candidate accommodations (FR-305, ADR 0015). Only on a single invitation.
+      description: Per-candidate accommodations (FR-305, ADR 0015). Only on a single
+        invitation.
       properties:
         extraTimePct:
           {
@@ -2776,7 +3067,8 @@ components:
         created: { type: integer }
         errors:
           type: array
-          description: By row index (1 is the first row of THIS request) and reason; no email is echoed
+          description: By row index (1 is the first row of THIS request) and reason; no
+            email is echoed
           items:
             type: object
             required: [row, message]
