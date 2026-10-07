@@ -1072,6 +1072,103 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       }
     });
 
+    it('DL-37, FR-103: an invite that hits lock contention is 503 with Retry-After and gives its slot back', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Invite Refund Org' } })).id;
+      const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+      const { UsersService } =
+        jest.requireActual<typeof import('./users.service')>('./users.service');
+      const svc = app.get(UsersService);
+      const before = Reflect.get(svc, 'inviteLimit') as number;
+      Reflect.set(svc, 'inviteLimit', 1);
+      const busy = jest
+        .spyOn(svc as unknown as { requireSameAdmin: () => Promise<void> }, 'requireSameAdmin')
+        .mockRejectedValueOnce(Object.assign(new Error('lock wait'), { code: '55P03' }));
+      try {
+        const send = (n: number): request.Test =>
+          http()
+            .post(`${API}/admin/users`)
+            .set(admin.auth)
+            .send({
+              currentPassword: PASSWORD,
+              email: `refund${n}@example.com`,
+              name: 'R',
+              role: 'AUTHOR',
+            });
+        const res = await send(1).expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        // Limit is 1: the retry only succeeds because the failed attempt gave its slot back.
+        await send(1).expect(201);
+        await send(2).expect(429);
+      } finally {
+        busy.mockRestore();
+        Reflect.set(svc, 'inviteLimit', before);
+      }
+    });
+
+    it('DL-37, FR-103: a duplicate-email invite whose conflict audit write hits contention is 503 and gives its slot back', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Invite Conflict Refund' } }))
+        .id;
+      const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+      const { UsersService } =
+        jest.requireActual<typeof import('./users.service')>('./users.service');
+      const svc = app.get(UsersService);
+      const before = Reflect.get(svc, 'inviteLimit') as number;
+      Reflect.set(svc, 'inviteLimit', 2);
+      const client = (svc as unknown as { prisma: { client: { auditLog: { create: unknown } } } })
+        .prisma.client;
+      const realCreate = (
+        client.auditLog.create as (a: { data: { action?: string } }) => Promise<unknown>
+      ).bind(client.auditLog);
+      const spy = jest
+        .spyOn(client.auditLog as { create: typeof realCreate }, 'create')
+        .mockImplementation((args) =>
+          args.data.action === 'USER_INVITE_CONFLICT'
+            ? Promise.reject(Object.assign(new Error('lock wait'), { code: '55P03' }))
+            : realCreate(args),
+        );
+      try {
+        const dup = (): request.Test =>
+          http()
+            .post(`${API}/admin/users`)
+            .set(admin.auth)
+            .send({ currentPassword: PASSWORD, email: admin.email, name: 'D', role: 'AUTHOR' });
+        const res = await dup().expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        spy.mockRestore();
+        // Limit 2: the first attempt's slot came back, so two more attempts fit (409, 409).
+        await dup().expect(409);
+        await dup().expect(409);
+        await dup().expect(429);
+      } finally {
+        spy.mockRestore();
+        Reflect.set(svc, 'inviteLimit', before);
+      }
+    });
+
+    it('DL-37, FR-103: a refused invite (409) that is not contention keeps its slot', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Invite Keep Org' } })).id;
+      const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+      const { UsersService } =
+        jest.requireActual<typeof import('./users.service')>('./users.service');
+      const svc = app.get(UsersService);
+      const before = Reflect.get(svc, 'inviteLimit') as number;
+      Reflect.set(svc, 'inviteLimit', 1);
+      try {
+        await http()
+          .post(`${API}/admin/users`)
+          .set(admin.auth)
+          .send({ currentPassword: PASSWORD, email: admin.email, name: 'D', role: 'AUTHOR' })
+          .expect(409);
+        await http()
+          .post(`${API}/admin/users`)
+          .set(admin.auth)
+          .send({ currentPassword: PASSWORD, email: 'keep@example.com', name: 'D', role: 'AUTHOR' })
+          .expect(429);
+      } finally {
+        Reflect.set(svc, 'inviteLimit', before);
+      }
+    });
+
     it('FR-103: the limit comes from INVITE_RATE_LIMIT_PER_ORG_HOUR, default 20', () => {
       const { validateEnv } = jest.requireActual<typeof import('../config/env')>('../config/env');
       const saved = process.env.INVITE_RATE_LIMIT_PER_ORG_HOUR;

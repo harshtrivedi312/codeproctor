@@ -48,7 +48,7 @@ export function setup() {
 export default function () {
   const entry = SESSIONS[(__VU - 1) % SESSIONS.length];
   const res = http.post(
-    `${API_BASE}/candidate/answers/${entry.questionId}/run`,
+    `${API_BASE}/candidate/answers/${entry.sessionQuestionId}/run`,
     JSON.stringify({ language: 'python', code: CODE }),
     {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${entry.token}` },
