@@ -1595,6 +1595,25 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       expect(rows.every((r) => r.revokedAt !== null)).toBe(true);
     });
 
+    it('FR-104, TC-005, FU-BE-207: a cookieless POST /logout is 204 and sets no cp_refresh cookie', async () => {
+      const res = await request(app.getHttpServer()).post(`${API}/logout`).expect(204);
+      expect(String(res.headers['set-cookie'] ?? '')).not.toContain('cp_refresh=');
+    });
+
+    it('FR-104, TC-005, FU-BE-207: logout with a tampered signed cookie is 204, still clears cp_refresh, and revokes nothing', async () => {
+      const u = await createUser();
+      await login(u.email).expect(200);
+      const live = (): Promise<number> =>
+        prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } });
+      expect(await live()).toBe(1);
+      const res = await request(app.getHttpServer())
+        .post(`${API}/logout`)
+        .set('Cookie', 'cp_refresh=s%3Anot-a-valid-signature.AAAA')
+        .expect(204);
+      expect(String(res.headers['set-cookie'])).toMatch(/cp_refresh=;/);
+      expect(await live()).toBe(1);
+    });
+
     it('FR-104: a deactivated user cannot refresh', async () => {
       const u = await createUser();
       const cookie = refreshCookie(await login(u.email).expect(200));
