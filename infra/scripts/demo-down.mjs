@@ -19,7 +19,7 @@ export function parsePids(text) {
     return {};
   }
   const out = {};
-  for (const name of ['api', 'web']) {
+  for (const name of ['api', 'web', 'worker']) {
     const pid = data?.[name];
     if (Number.isInteger(pid) && pid > 1) out[name] = pid;
   }
@@ -33,7 +33,11 @@ export function parsePids(text) {
 export function looksLikeOurs(psOutput, pid) {
   const m = /^\s*(\d+)\s+(.*)$/.exec(psOutput.trim());
   if (m === null) return false;
-  return Number(m[1]) === pid && /\bpnpm\b/.test(m[2]) && /\bdev:(api|web)\b|\bdev\b/.test(m[2]);
+  if (Number(m[1]) !== pid) return false;
+  const command = m[2];
+  // The API and the web app start through pnpm; the worker through its run-local.sh or uvicorn.
+  if (/\bpnpm\b/.test(command) && /\bdev(:api|:web)?\b/.test(command)) return true;
+  return /run-local\.sh|\buvicorn\b.*\bworker\.app:app\b/.test(command);
 }
 
 function ownsPid(pid) {

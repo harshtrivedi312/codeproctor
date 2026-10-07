@@ -55,6 +55,7 @@ export function buildLocalEnv(example, supports = { smtpDev: false, execStub: fa
     return `${m[1]}=${values[m[1]]}`;
   });
   let text = lines.join('\n');
+  if (!/^WORKER_HMAC_KEY=/m.test(text)) text += workerBlock();
   if (supports.smtpDev) {
     text = text
       .replace(/^EMAIL_PROVIDER=noop$/m, 'EMAIL_PROVIDER=smtp-dev')
@@ -66,6 +67,23 @@ export function buildLocalEnv(example, supports = { smtpDev: false, execStub: fa
   const left = [...text.matchAll(/^([A-Za-z0-9_]+)=.*change-me/gm)].map((m) => m[1]);
   if (left.length > 0) throw new Error(`no local value is known for: ${left.join(', ')}`);
   return text;
+}
+
+/** The face-match worker's local settings (apps/worker/tools/be08/run-local.sh): a fresh signing key per machine. */
+function workerBlock() {
+  return [
+    '',
+    '# --- Face-match worker, local demo (apps/worker/tools/be08/run-local.sh; ADR 0014) ---',
+    '# The signing key is shared with the API once it has a worker client (none on main yet); the origin',
+    '# must equal S3_ENDPOINT exactly. Without the model files the worker reports not ready and the',
+    '# identity check answers MANUAL_REVIEW.',
+    'WORKER_BASE_URL=http://127.0.0.1:8000',
+    'WORKER_HMAC_KEY_ID=local1',
+    `WORKER_HMAC_KEY=${b64(32)}`,
+    'WORKER_OBJECT_STORE_BUCKET=codeproctor-media',
+    'WORKER_OBJECT_STORE_ORIGINS=http://127.0.0.1:9000',
+    '',
+  ].join('\n');
 }
 
 /** Which local-only API features this checkout has: read from the API's environment schema. */

@@ -71,6 +71,12 @@ export interface TransitionRequest {
   readonly alsoWhere?: Pick<Prisma.SessionWhereInput, 'pauseReasons' | 'proctorPausedAt'>;
   /** The transaction client, when the status change belongs to a larger unit of work. */
   readonly db?: SessionDb;
+  /**
+   * Compare-and-set on the pause reasons the caller read: the update matches only while
+   * `pause_reasons` still equals this list, so a reason added meanwhile (a proctor pause) is never
+   * overwritten. A miss is SessionStateConflictError, like a lost status race.
+   */
+  readonly ifPauseReasons?: readonly PauseReason[];
 }
 
 @Injectable()
@@ -136,9 +142,15 @@ export class SessionStateService {
     const anchors = stampsRetentionAnchor(change.to) && !froms.includes('APPEALED');
 
     const updated = await db.session.updateMany({
-      // AND of two objects: a smuggled `id` or `status` in alsoWhere can only narrow the update.
+      // AND of the objects: a smuggled `id` or `status` in alsoWhere can only narrow the update.
       where: {
-        AND: [{ id: change.sessionId, status: { in: [...froms] } }, change.alsoWhere ?? {}],
+        AND: [
+          { id: change.sessionId, status: { in: [...froms] } },
+          change.alsoWhere ?? {},
+          change.ifPauseReasons !== undefined
+            ? { pauseReasons: { equals: [...change.ifPauseReasons] } }
+            : {},
+        ],
       },
       data: {
         status: change.to,
