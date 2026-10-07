@@ -16,6 +16,8 @@ describe('candidateVisibleStatus (hub decision Q17, FR-401)', () => {
     APPEALED: 'SUBMITTED',
     EXPIRED: 'EXPIRED',
     DECLINED: 'DECLINED',
+    // After SUBMITTED, so shown as SUBMITTED until the hub's contract PR decides ERASED handling (FU-BEB-133).
+    ERASED: 'SUBMITTED',
   };
 
   it('Q17: every status maps as decided; review and outcome statuses all read SUBMITTED', () => {
@@ -25,7 +27,7 @@ describe('candidateVisibleStatus (hub decision Q17, FR-401)', () => {
     expect(Object.keys(EXPECTED).sort()).toEqual(Object.values(SessionStatus).sort());
   });
 
-  it('Q17: a status added later (ERASED) is after SUBMITTED, so it is hidden too', () => {
-    expect(candidateVisibleStatus('ERASED' as SessionStatus)).toBe('SUBMITTED');
+  it('Q17: a status added later is after SUBMITTED, so it is hidden too', () => {
+    expect(candidateVisibleStatus('SOMETHING_NEW' as SessionStatus)).toBe('SUBMITTED');
   });
 });

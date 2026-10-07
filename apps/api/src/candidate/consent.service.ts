@@ -7,9 +7,9 @@
 // passes sessionId and consentTextId itself, for the CS-4.4 create-only grant to verify later.
 // The server decides which document is signed: `consentTextId` in the body must equal the org's
 // current text, otherwise 409 CONSENT_TEXT_CHANGED, so a stale page cannot sign an old version. The
-// time is the server's. The 18+ confirmation (C-30) is required to sign; the consents table has no
-// column for it yet, so it is recorded in the audit row and printed in the signed PDF (see the
-// follow-up FU-BEB-17 for the schema question).
+// time is the server's. The 18+ confirmation (C-30) is required to sign and is stored as
+// consents.age_confirmed_at (D-55), the server time of the signature, in the same create; a decline
+// create carries none. The audit row keeps only the ids and the flag, and the signed PDF states it.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '../generated/prisma/client.js';
@@ -221,6 +221,7 @@ export class ConsentService {
             consentTextId: currentId,
             signedName,
             signedAt: now,
+            ageConfirmedAt: now,
             ip: inet(info.ip),
             userAgent: info.userAgent?.slice(0, MAX_USER_AGENT) ?? null,
           },

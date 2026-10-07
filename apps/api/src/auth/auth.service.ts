@@ -10,6 +10,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BeforeApplicationShutdown,
   OnApplicationShutdown,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -92,8 +93,13 @@ function isRetryable(e: unknown): boolean {
   return e instanceof BadRequestException || e instanceof ServiceUnavailableException;
 }
 
+/** How long shutdown waits for deferred reset and lock mail. */
+const SHUTDOWN_SETTLE_MS = 5_000;
+/** Second, catch-all settle in onApplicationShutdown. */
+const SHUTDOWN_CATCH_ALL_MS = 1_000;
+
 @Injectable()
-export class AuthService implements OnApplicationShutdown {
+export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
@@ -932,7 +938,9 @@ export class AuthService implements OnApplicationShutdown {
 
     // Everything that depends on the account happens after this method has returned, so the
     // response is the same for a real, pending, deactivated or unknown account (FU-BE-31).
-    this.defer(() => this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)));
+    this.defer('password-reset', () =>
+      this.orgContext.runSystem('AUTH_BOOTSTRAP', () => this.deliverReset(email)),
+    );
   }
 
   /** Waits for deferred work (tests and graceful shutdown). */
@@ -940,18 +948,51 @@ export class AuthService implements OnApplicationShutdown {
     while (this.deferred.size > 0) await Promise.allSettled([...this.deferred]);
   }
 
-  async onApplicationShutdown(): Promise<void> {
-    await this.settleDeferred();
+  /**
+   * Nest 11 order: onModuleDestroy, beforeApplicationShutdown, dispose() (the HTTP server closes),
+   * onApplicationShutdown. This hook gives deferred reset and lock mail up to 5 s to reach the
+   * email queue, which is still accepting at this point. Bounded so a stuck query cannot stall
+   * shutdown until SIGKILL; the deferred work is only mail, so giving up loses at most a reset or
+   * lock email.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.settleDeferredBounded(SHUTDOWN_SETTLE_MS);
   }
 
-  private defer(work: () => Promise<void>): void {
+  /**
+   * Catch-all for work deferred after the hook above but before dispose() closed the server. Short
+   * bound. It is not guaranteed to run before the email queue stops (hook order between providers
+   * is not defined), so such a mail can still be dropped; the queue logs the count then.
+   */
+  async onApplicationShutdown(): Promise<void> {
+    await this.settleDeferredBounded(SHUTDOWN_CATCH_ALL_MS);
+  }
+
+  /** Like settleDeferred, but gives up after timeoutMs and logs a fixed line (no payload). */
+  async settleDeferredBounded(timeoutMs: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      this.settleDeferred().then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      this.logger.warn(
+        `Shutdown gave up waiting for ${this.deferred.size} deferred tasks after ${timeoutMs} ms`,
+      );
+    }
+  }
+
+  private defer(label: string, work: () => Promise<void>): void {
     const task: Promise<void> = new Promise<void>((resolve) => {
       setImmediate(() => {
         Promise.resolve()
           .then(work)
           .catch((e: unknown) => {
             // Name only: the error may carry an address, a token or a query value.
-            this.logger.error(`Deferred password-reset work failed (${errorName(e)})`);
+            this.logger.error(`Deferred ${label} work failed (${errorName(e)})`);
           })
           .finally(resolve);
       });
@@ -975,6 +1016,8 @@ export class AuthService implements OnApplicationShutdown {
       }),
     );
     const url = `${this.webOrigin}/admin/reset-password#token=${token}`;
+    // If the enqueue fails this throws (caught and logged by defer). The new token hash stays and
+    // has overwritten any earlier valid reset link: the user must ask again. No security impact.
     await this.mail.sendPasswordReset(user.email, url);
   }
 
@@ -1180,7 +1223,7 @@ export class AuthService implements OnApplicationShutdown {
   private async recordLock(user: User, ctx: RequestContext): Promise<void> {
     await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
     const { orgId, email, fullName } = user;
-    this.defer(() => this.alertAdmins(orgId, email, fullName));
+    this.defer('lock-alert', () => this.alertAdmins(orgId, email, fullName));
   }
 
   private alertAdmins(orgId: string, email: string, name: string): Promise<void> {

@@ -31,6 +31,11 @@ function isBareOrigin(value: string): boolean {
   }
 }
 
+/** Optional setting where '' means "not set". */
+function emptyAsUnset<T extends z.ZodType>(schema: T) {
+  return z.preprocess((v) => (v === '' ? undefined : v), schema.optional());
+}
+
 export const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -121,6 +126,35 @@ export const envSchema = z
       .enum(['true', 'false'])
       .default('false')
       .transform((v) => v === 'true'),
+    // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
+    // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
+    // role). SES_ENDPOINT is for tests only and is refused outside development and test.
+    EMAIL_PROVIDER: z.enum(['ses', 'noop']).default('noop'),
+    AWS_REGION: z
+      .string()
+      .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/, 'must look like us-east-1')
+      .default('us-east-1'),
+    // Static AWS credentials are refused in pilot and production (instance role only). Declared
+    // here only so the guard below can see them; nothing reads their values.
+    AWS_ACCESS_KEY_ID: z.string().optional(),
+    AWS_SECRET_ACCESS_KEY: z.string().optional(),
+    AWS_SESSION_TOKEN: z.string().optional(),
+    // Profile and credential-file settings would also bypass the instance role.
+    AWS_PROFILE: z.string().optional(),
+    AWS_SHARED_CREDENTIALS_FILE: z.string().optional(),
+    AWS_CONFIG_FILE: z.string().optional(),
+    // Container and web-identity credential sources (ECS, EKS). C-31 says instance role only (EC2
+    // instance profile), so pilot and production refuse them; relax if the hub moves to ECS.
+    AWS_CONTAINER_CREDENTIALS_FULL_URI: z.string().optional(),
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: z.string().optional(),
+    AWS_CONTAINER_AUTHORIZATION_TOKEN: z.string().optional(),
+    AWS_WEB_IDENTITY_TOKEN_FILE: z.string().optional(),
+    AWS_ROLE_ARN: z.string().optional(),
+    // An empty value (a copied .env template line such as `SES_FROM_ADDRESS=`) counts as unset;
+    // the checks below still require a non-empty valid SES_FROM_ADDRESS when the provider is ses.
+    SES_FROM_ADDRESS: emptyAsUnset(z.email()),
+    SES_CONFIGURATION_SET: emptyAsUnset(z.string().min(1)),
+    SES_ENDPOINT: emptyAsUnset(z.url()),
     // Object storage (BE-09, ADR 0001 section 2.1, ADR 0013 section 5.7): one S3-compatible
     // interface. Cloudflare R2 on staging (synthetic data only), AWS S3 on pilot and production;
     // only these values differ. Unset locally and on a fresh staging: the media routes then answer
@@ -204,6 +238,60 @@ export const envSchema = z
           message: 'is required in pilot and production, at least 32 characters',
         });
       }
+    }
+    if (live && env.EMAIL_PROVIDER !== 'ses') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['EMAIL_PROVIDER'],
+        message: 'must be ses in pilot and production',
+      });
+    }
+    if (live && env.AWS_REGION !== 'us-east-1') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['AWS_REGION'],
+        message: 'must be us-east-1 in pilot and production (C-31)',
+      });
+    }
+    if (live) {
+      for (const name of [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+        'AWS_SHARED_CREDENTIALS_FILE',
+        'AWS_CONFIG_FILE',
+        'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+        'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+        'AWS_CONTAINER_AUTHORIZATION_TOKEN',
+        'AWS_WEB_IDENTITY_TOKEN_FILE',
+        'AWS_ROLE_ARN',
+      ] as const) {
+        // `!== ''` mirrors the AWS SDK's own truthiness checks: an empty value is ignored by the
+        // SDK, a whitespace one is not. Do not turn this into a trim.
+        if (env[name] !== undefined && env[name] !== '') {
+          ctx.addIssue({
+            code: 'custom',
+            path: [name],
+            message:
+              'must not be set in pilot or production (C-31: EC2 instance role only; container and web-identity credentials are refused until the hub allows ECS)',
+          });
+        }
+      }
+    }
+    if (env.EMAIL_PROVIDER === 'ses' && !env.SES_FROM_ADDRESS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_FROM_ADDRESS'],
+        message: 'is required when EMAIL_PROVIDER is ses',
+      });
+    }
+    if (env.SES_ENDPOINT && (live || env.APP_ENV === 'staging')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SES_ENDPOINT'],
+        message: 'is for tests only and must not be set in staging, pilot or production',
+      });
     }
     if (live && !env.WEB_ORIGIN.startsWith('https://')) {
       ctx.addIssue({

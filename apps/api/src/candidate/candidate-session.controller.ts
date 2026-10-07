@@ -105,11 +105,9 @@ export class CandidateSessionController {
     @Body() dto: SignConsentDto,
     @Req() req: Request,
   ): Promise<ConsentSignedDto> {
-    await this.limiter.hit('consent-sign', ctx.sessionId, 10, 60);
-    const result = await this.consent.sign(ctx, dto, {
-      ip: req.ip,
-      userAgent: req.headers['user-agent'],
-    });
+    const result = await this.limiter.guarded('consent-sign', ctx.sessionId, 10, 60, () =>
+      this.consent.sign(ctx, dto, { ip: req.ip, userAgent: req.headers['user-agent'] }),
+    );
     return { status: result.status, signedAt: result.signedAt.toISOString() };
   }
 
@@ -126,8 +124,9 @@ export class CandidateSessionController {
     @Candidate() ctx: CandidateContext,
     @Req() req: Request,
   ): Promise<ConsentDeclinedDto> {
-    await this.limiter.hit('consent-decline', ctx.sessionId, 10, 60);
-    return this.consent.decline(ctx, { ip: req.ip, userAgent: req.headers['user-agent'] });
+    return this.limiter.guarded('consent-decline', ctx.sessionId, 10, 60, () =>
+      this.consent.decline(ctx, { ip: req.ip, userAgent: req.headers['user-agent'] }),
+    );
   }
 
   @CandidateRoute('candidate_session:start')
@@ -145,8 +144,9 @@ export class CandidateSessionController {
       'SYSTEM_CHECK_BLOCKED, LINK_EXPIRED, SESSION_STATE_CONFLICT, RANDOM_RULE_UNSATISFIABLE',
   })
   async startTest(@Candidate() ctx: CandidateContext): Promise<TestStartedDto> {
-    await this.limiter.hit('test-start', ctx.sessionId, 6, 60);
-    const view = await this.testStart.start(ctx);
+    const view = await this.limiter.guarded('test-start', ctx.sessionId, 6, 60, () =>
+      this.testStart.start(ctx),
+    );
     return {
       status: view.status,
       serverTime: view.serverTime.toISOString(),
@@ -177,6 +177,7 @@ export class CandidateSessionController {
     @Candidate() ctx: CandidateContext,
     @Body() dto: HeartbeatDto,
   ): Promise<HeartbeatResultDto> {
+    // No slot is given back on a busy error: the next beat is the retry (DL-37).
     await this.limiter.hit('heartbeat', ctx.sessionId, HEARTBEAT_LIMIT_PER_MINUTE, 60);
     const view = await this.session.heartbeat(ctx, dto);
     return {

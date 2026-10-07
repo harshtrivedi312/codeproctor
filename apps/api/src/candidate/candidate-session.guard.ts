@@ -52,6 +52,10 @@ export class CandidateSessionGuard implements CanActivate {
     if (session === null) unauthorized();
     if (claims.epoch < session.authEpoch) unauthorized('SESSION_TAKEN_OVER');
     if (claims.epoch !== session.authEpoch) unauthorized();
+    // An erased session (ADR 0004 section 9.5, ADR 0013 section 5.7): the SAME 401 the fence's epoch
+    // bump gives (code SESSION_TAKEN_OVER), so nothing tells whether the bump happened or not. No
+    // route runs, so no session data of an erased session is read or returned.
+    if (session.status === 'ERASED') unauthorized('SESSION_TAKEN_OVER');
 
     req.candidate = {
       sessionId: claims.sid,

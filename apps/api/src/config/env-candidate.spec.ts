@@ -10,6 +10,8 @@ const valid = {
 };
 // Settings pilot and production need besides the candidate ones (FR-503, FU-BE-97).
 const judge0 = {
+  EMAIL_PROVIDER: 'ses',
+  SES_FROM_ADDRESS: 'no-reply@example.com',
   WEB_ORIGIN: 'https://app.example.com',
   TRUST_PROXY_HOPS: '1',
   JUDGE0_URL: 'https://judge0.example.com',

@@ -858,7 +858,7 @@ paths:
           description: Saved
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/QuestionDetail' }
+              schema: { $ref: '#/components/schemas/QuestionUpdateResult' }
         '400':
           description: Validation failed, or no field sent
           content:
@@ -980,7 +980,7 @@ paths:
           description: Created
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TestCase' }
+              schema: { $ref: '#/components/schemas/TestCaseMutation' }
         '400':
           description: Validation failed
           content:
@@ -1029,7 +1029,7 @@ paths:
           description: Changed
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TestCase' }
+              schema: { $ref: '#/components/schemas/TestCaseMutation' }
         '400':
           description: Validation failed, or no field sent
           content:
@@ -1054,8 +1054,11 @@ paths:
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
-        '204':
-          description: Removed
+        '200':
+          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionResult' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such question, version or test case in your organization
@@ -1180,8 +1183,11 @@ paths:
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
-        '204':
-          description: Removed
+        '200':
+          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionResult' }
         '400':
           description: Invalid expectedRevision
           content:
@@ -1257,7 +1263,7 @@ paths:
         schema: { type: string }
     put:
       operationId: setVariantOverride
-      summary: REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Returns the override only, not a revision.
+      summary: REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Answers the override and the new revision of the version, computed in the same transaction.
       requestBody:
         required: true
         content:
@@ -1268,7 +1274,7 @@ paths:
           description: The override
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/VariantOverride' }
+              schema: { $ref: '#/components/schemas/VariantOverrideMutation' }
         '400':
           description: Validation failed
           content:
@@ -1293,8 +1299,11 @@ paths:
           in: query
           schema: { type: string, pattern: '^[0-9a-f]{64}$' }
       responses:
-        '204':
-          description: Removed
+        '200':
+          description: Removed. Answers the new revision of the version, computed in the same transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevisionResult' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such question, version, variant or override in your organization
@@ -1510,6 +1519,259 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
           description: The replacement language is not allowed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  # ---------------------------------------------------------------------------------------------
+  # Tests (FR-301, FR-302; REAL since BE-06a, apps/api/src/tests). Roles: SUPER_ADMIN and RECRUITER
+  # (test:read, test:create, test:update); an Author or Reviewer gets 403. No revision and no
+  # delete or archive route exists. 404 is identical for a missing and a cross-organisation id.
+  # ---------------------------------------------------------------------------------------------
+  /v1/tests:
+    get:
+      operationId: listTests
+      summary: REAL. Test templates of your organisation (test:read), newest first.
+      parameters:
+        - {
+            name: page,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100000, default: 1 },
+          }
+        - {
+            name: pageSize,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - { name: search, in: query, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: profile, in: query, schema: { $ref: '#/components/schemas/TestProfile' } }
+        - name: used
+          in: query
+          description: true only tests that already have invitations, false only tests that have none
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestList' }
+        '400':
+          description: Invalid query, or a page deeper than 10 000 rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      operationId: createTest
+      summary: REAL. Create a test with ordered sections, fixed or random questions, a STANDARD or STRICT profile and a pass score (test:create).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestDetail' }
+        '400':
+          description: Validation failed (LOCKDOWN, section limits above the duration, a bad random rule, positions, an unknown field); errors[] says what
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: A fixed question version does not exist, is a draft, or is not in your organisation (one answer)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: A fixed version belongs to an archived question, or a random rule matches too few published questions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/tests/{testId}:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTest
+      summary: REAL. One test with its sections and questions (test:read).
+      responses:
+        '200':
+          description: The test
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestDetail' }
+        '400':
+          description: Not a UUID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    patch:
+      operationId: updateTest
+      summary: >-
+        REAL. Edit a test that has no invitation or session yet (test:update). Sections, when sent,
+        replace ALL sections. There is NO revision or If-Match: two editors are last-write-wins.
+        passScore cannot be cleared once set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTest' }
+      responses:
+        '200':
+          description: The test after the edit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestDetail' }
+        '400':
+          description: Validation failed, or nothing to change
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test (or question version) in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: The test already has an invitation or a session and cannot be edited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: A fixed version belongs to an archived question, or a random rule is unsatisfiable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  # ---------------------------------------------------------------------------------------------
+  # Invitations and candidate status (FR-303, FR-304, FR-305). WEB-ONLY PLACEHOLDERS [BE-06b]: the
+  # API has no invitations module yet (BE-06a is the tests module only). Shapes come from fsd.md
+  # FR-302..305, ADR 0002 (state machine), ADR 0015 (waiver) and backend.md Step 6; paths, bodies,
+  # limits and error words are the web's proposal, listed in docs/followups/frontend.md. Roles:
+  # SUPER_ADMIN and RECRUITER (invitation:create). Nothing here carries a score, a flag or a
+  # verdict: recruiters see results only after the verdict (C-28).
+  # ---------------------------------------------------------------------------------------------
+  /v1/tests/{testId}/invitations:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: createInvitation
+      summary: WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create). Creates the invitation and its session in status INVITED, and links or creates the candidate by email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateInvitation' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvitationResult' }
+        '400':
+          description: Validation failed (email, name, window, accommodations; errors[] says which)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: This candidate already has an open invitation to this test
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Too many invitations this hour; Retry-After says when
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/tests/{testId}/invitations/bulk:
+    parameters:
+      - name: testId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: createInvitationsBulk
+      summary: WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkInvitations' }
+      responses:
+        '200':
+          description: How many were invited and which rows were not
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkInvitationResult' }
+        '400':
+          description: Validation failed (too many rows, window, an unknown field)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such test in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: The window ends in the past
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          description: Too many invitations this hour; nothing was invited; Retry-After says when
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /v1/admin/candidates/{candidateId}/invitations:
+    parameters:
+      - name: candidateId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: listCandidateInvitations
+      summary: WEB-ONLY [BE-06b]. The invitations of one candidate with their session status and the time each status was reached (invitation:create). Status only, no scores, flags or verdicts.
+      responses:
+        '200':
+          description: Invitations, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    { type: array, items: { $ref: '#/components/schemas/CandidateInvitation' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such candidate in your organisation
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -2024,6 +2286,28 @@ components:
               - { type: boolean }
         renderedStatement: { type: string }
         testCaseOverrides: { type: array, items: { $ref: '#/components/schemas/VariantOverride' } }
+    RevisionResult:
+      type: object
+      description: The revision of a version after a writer-only change (never in a recruiter-reachable body).
+      required: [revision]
+      properties:
+        revision:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: The new revision, computed inside the same transaction as the change; send it as expectedRevision.
+    TestCaseMutation:
+      allOf:
+        - $ref: '#/components/schemas/TestCase'
+        - $ref: '#/components/schemas/RevisionResult'
+    VariantOverrideMutation:
+      allOf:
+        - $ref: '#/components/schemas/VariantOverride'
+        - $ref: '#/components/schemas/RevisionResult'
+    QuestionUpdateResult:
+      description: The edited question plus the revision of the version the edit left (the new version after a fork).
+      allOf:
+        - $ref: '#/components/schemas/QuestionDetail'
+        - $ref: '#/components/schemas/RevisionResult'
     VariantList:
       type: object
       required: [items, revision]
@@ -2223,6 +2507,288 @@ components:
                   type: string,
                   description: 'Why no output could be produced (runtime error, limit)',
                 }
+    TestProfile:
+      type: string
+      description: STANDARD records the web session; STRICT adds a second camera. LOCKDOWN is not offered in this build.
+      enum: [STANDARD, STRICT]
+    RandomRule:
+      type: object
+      additionalProperties: false
+      description: >-
+        Exactly { tags?, difficulty?, type? }; unknown keys are refused. There is NO count: one
+        question slot picks one question, and N slots with the same rule need N different matching
+        published questions. Tags are lower-cased, 1 to 20, all must match.
+      properties:
+        tags: { type: array, minItems: 1, maxItems: 20, items: { type: string } }
+        difficulty: { $ref: '#/components/schemas/Difficulty' }
+        type: { $ref: '#/components/schemas/QuestionType' }
+    TestQuestionInput:
+      type: object
+      additionalProperties: false
+      description: Exactly one of questionVersionId and randomRule.
+      properties:
+        questionVersionId:
+          { type: string, description: A PUBLISHED version of a non-archived question }
+        randomRule: { $ref: '#/components/schemas/RandomRule' }
+        points: { type: number, minimum: 0.01, maximum: 9999.99, default: 100 }
+        position: { type: integer, minimum: 1, maximum: 50 }
+    TestSectionInput:
+      type: object
+      additionalProperties: false
+      required: [title, questions]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 200 }
+        position: { type: integer, minimum: 1, maximum: 20 }
+        timeLimitMin:
+          type: integer
+          minimum: 1
+          maximum: 480
+          description: Section limits together may not exceed durationMinutes (ADR 0002)
+        questions:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 50,
+            items: { $ref: '#/components/schemas/TestQuestionInput' },
+          }
+    CreateTest:
+      type: object
+      additionalProperties: false
+      required: [name, durationMinutes, sections]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 5000 }
+        durationMinutes: { type: integer, minimum: 5, maximum: 480 }
+        profile: { $ref: '#/components/schemas/TestProfile' }
+        passScore:
+          {
+            type: number,
+            minimum: 0,
+            maximum: 9999.99,
+            description: From 0 to the points of all questions together,
+          }
+        sections:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 20,
+            items: { $ref: '#/components/schemas/TestSectionInput' },
+          }
+    UpdateTest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, maxLength: 5000 }
+        durationMinutes: { type: integer, minimum: 5, maximum: 480 }
+        profile: { $ref: '#/components/schemas/TestProfile' }
+        passScore: { type: number, minimum: 0, maximum: 9999.99 }
+        sections:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 20,
+            items: { $ref: '#/components/schemas/TestSectionInput' },
+          }
+    TestQuestion:
+      type: object
+      required: [id, position, points, questionVersionId, title, difficulty, randomRule]
+      properties:
+        id: { type: string }
+        position: { type: integer }
+        points: { type: number }
+        questionVersionId: { type: string, nullable: true }
+        title: { type: string, nullable: true }
+        difficulty: { type: string, nullable: true, enum: [EASY, MEDIUM, HARD] }
+        randomRule: { type: object, nullable: true, additionalProperties: true }
+    TestSection:
+      type: object
+      required: [id, title, position, timeLimitMin, questions]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        position: { type: integer }
+        timeLimitMin: { type: integer, nullable: true }
+        questions: { type: array, items: { $ref: '#/components/schemas/TestQuestion' } }
+    TestSummary:
+      type: object
+      required:
+        [
+          id,
+          name,
+          description,
+          durationMinutes,
+          profile,
+          passScore,
+          createdById,
+          createdAt,
+          sectionCount,
+          questionCount,
+          used,
+        ]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        durationMinutes: { type: integer }
+        profile: { $ref: '#/components/schemas/TestProfile' }
+        passScore: { type: number, nullable: true }
+        createdById: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        sectionCount: { type: integer }
+        questionCount: { type: integer }
+        used:
+          type: boolean
+          description: >-
+            The test has an invitation or a session, so it can no longer be edited.
+    TestDetail:
+      allOf:
+        - $ref: '#/components/schemas/TestSummary'
+        - type: object
+          required: [sections]
+          properties:
+            sections: { type: array, items: { $ref: '#/components/schemas/TestSection' } }
+    TestList:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/TestSummary' } }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+    SessionStatus:
+      type: string
+      description: The session state machine of ADR 0002 (ERASED is not shown to recruiters).
+      enum:
+        [
+          INVITED,
+          OPENED,
+          CONSENTED,
+          VERIFIED,
+          IN_PROGRESS,
+          PAUSED,
+          SUBMITTED,
+          GRADED,
+          UNDER_REVIEW,
+          COMPLETED,
+          EXPIRED,
+          APPEALED,
+          DECLINED,
+        ]
+    IdentityWaiverReason:
+      type: string
+      enum: [REFUSED_BIOMETRIC_PROCESSING, CANNOT_COMPLETE_ID_CHECK, OTHER]
+    IdentityCheckWaiver:
+      type: object
+      additionalProperties: false
+      description: >-
+        ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500
+        characters) is required and allowed only with OTHER. Never put health details in it.
+      required: [reasonCode]
+      properties:
+        reasonCode: { $ref: '#/components/schemas/IdentityWaiverReason' }
+        reasonNote: { type: string, minLength: 1, maxLength: 500 }
+    InvitationAccommodations:
+      type: object
+      additionalProperties: false
+      description: Per-candidate accommodations (FR-305, ADR 0015). Only on a single invitation.
+      properties:
+        extraTimePct:
+          {
+            type: integer,
+            minimum: 0,
+            maximum: 200,
+            description: Scales the total and every section limit by the same percentage,
+          }
+        disabledDetectors:
+          type: array
+          maxItems: 8
+          items:
+            {
+              type: string,
+              enum: [FACE, GAZE, OBJECT, VOICE, MULTI_MONITOR, DEVTOOLS, VIRTUAL_CAMERA, EXTENSION],
+            }
+        allowedAssistiveTools:
+          { type: array, maxItems: 10, items: { type: string, minLength: 1, maxLength: 80 } }
+        notes: { type: string, maxLength: 1000 }
+        identityCheckWaiver: { $ref: '#/components/schemas/IdentityCheckWaiver' }
+    InviteCandidate:
+      type: object
+      additionalProperties: false
+      required: [email, name]
+      properties:
+        email: { type: string, maxLength: 254 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        externalRef: { type: string, maxLength: 200 }
+    CreateInvitation:
+      type: object
+      additionalProperties: false
+      required: [candidate, windowStart, windowEnd]
+      properties:
+        candidate: { $ref: '#/components/schemas/InviteCandidate' }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+        accommodations: { $ref: '#/components/schemas/InvitationAccommodations' }
+    InvitationResult:
+      type: object
+      required: [id, testId, candidateId, status, windowStart, windowEnd]
+      properties:
+        id: { type: string }
+        testId: { type: string }
+        candidateId: { type: string }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+    BulkInvitations:
+      type: object
+      additionalProperties: false
+      required: [rows, windowStart, windowEnd]
+      properties:
+        rows:
+          {
+            type: array,
+            minItems: 1,
+            maxItems: 200,
+            items: { $ref: '#/components/schemas/InviteCandidate' },
+          }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+    BulkInvitationResult:
+      type: object
+      required: [created, errors]
+      properties:
+        created: { type: integer }
+        errors:
+          type: array
+          description: By row index (1 is the first row of THIS request) and reason; no email is echoed
+          items:
+            type: object
+            required: [row, message]
+            properties:
+              row: { type: integer, minimum: 1 }
+              message: { type: string }
+    StatusStep:
+      type: object
+      required: [status, at]
+      properties:
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        at: { type: string, format: date-time }
+    CandidateInvitation:
+      type: object
+      required: [id, testId, testName, status, windowStart, windowEnd, history]
+      properties:
+        id: { type: string }
+        testId: { type: string }
+        testName: { type: string }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        windowStart: { type: string, format: date-time }
+        windowEnd: { type: string, format: date-time }
+        history:
+          {
+            type: array,
+            description: 'The statuses reached so far, oldest first',
+            items: { $ref: '#/components/schemas/StatusStep' },
+          }
     ApiError:
       type: object
       required: [code, message]
@@ -2421,6 +2987,13 @@ components:
         name: { type: string }
         email: { type: string }
         lastSessionAt: { type: string, format: date-time, nullable: true }
+        invitationCount: { type: integer, description: 'WEB-ONLY [BE-06b]' }
+        latestStatus:
+          {
+            allOf: [{ $ref: '#/components/schemas/SessionStatus' }],
+            nullable: true,
+            description: 'WEB-ONLY [BE-06b] status of the newest invitation',
+          }
         erasure:
           type: object
           required: [state]

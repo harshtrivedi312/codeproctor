@@ -23,12 +23,16 @@
 // checked here BEFORE those are added, so they never trip this check. Nested relation WRITES are
 // refused for every scope by org-scope-nested.ts (ADR 0006 section 8.2), not here.
 //
-// A relation is any field in the relation table of org-scope-relations.ts (both sides of all 58
+// A relation is any field in the relation table of org-scope-relations.ts (both sides of all 59
 // foreign keys, checked against schema.prisma), whatever its value: `false`, `null` and `{}` are
-// refused too. Messages name the model, the field and the vector, never a value.
+// refused too. Messages name the model, the field and the vector, never a value. The table is the
+// one list: a new foreign key (ADR 0015 added `identity_checks.video_check_by`, so
+// `IdentityCheck.videoCheckBy` and `User.videoCheckedIdentityChecks`) is refused here as soon as
+// org-scope-relations.ts classifies it, and its spec fails until it does.
 import { OrgScopeViolationError } from './errors';
 import type { ModelName } from './org-scope-map';
 import { relationOf } from './org-scope-relations';
+import { ownValue } from './plain-args';
 
 type PlainObject = Record<string, unknown>;
 
@@ -120,9 +124,9 @@ function assertOrderBy(model: ModelName, operation: string, orderBy: unknown, de
  */
 export function assertNoRelationVectors(model: ModelName, operation: string, args: unknown): void {
   if (!isPlainObject(args)) return;
-  assertSelection(model, operation, 'include', args.include);
-  assertSelection(model, operation, 'select', args.select);
-  assertWhere(model, operation, args.where, 0);
-  assertWhere(model, operation, args.having, 0);
-  assertOrderBy(model, operation, args.orderBy, 0);
+  assertSelection(model, operation, 'include', ownValue(args, 'include'));
+  assertSelection(model, operation, 'select', ownValue(args, 'select'));
+  assertWhere(model, operation, ownValue(args, 'where'), 0);
+  assertWhere(model, operation, ownValue(args, 'having'), 0);
+  assertOrderBy(model, operation, ownValue(args, 'orderBy'), 0);
 }

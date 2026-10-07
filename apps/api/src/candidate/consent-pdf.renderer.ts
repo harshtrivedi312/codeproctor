@@ -56,8 +56,15 @@ export function toBlocks(md: string): Block[] {
 function clean(text: string): string {
   return text
     .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/[*_`]/g, '')
+    .replace(/[*_\u0060]/g, '')
     .replace(/\[(.+?)\]\(.+?\)/g, '$1');
+}
+
+/** The 18+ line of the signature record (C-30): the claim is made only when the column says so. */
+export function ageStatement(ageConfirmed: boolean): string {
+  return ageConfirmed
+    ? 'The signer confirmed being 18 years of age or older.'
+    : 'Age confirmation: not recorded.';
 }
 
 export function renderConsentPdf(input: ConsentPdfInput): Promise<Buffer> {
@@ -104,11 +111,7 @@ export function renderConsentPdf(input: ConsentPdfInput): Promise<Buffer> {
     doc.text(`Signed by typing the full legal name: ${input.signedName}`);
     doc.text(`Signed at (server time, UTC): ${input.signedAt.toISOString()}`);
     doc.text(`Document version: ${input.documentVersion}`);
-    doc.text(
-      input.ageConfirmed
-        ? 'The signer confirmed being 18 years of age or older.'
-        : 'Age confirmation: not recorded.',
-    );
+    doc.text(ageStatement(input.ageConfirmed));
     doc.moveDown().fontSize(9).fillColor('#444444');
     doc.text(`Record: ${input.consentId}`);
     doc.text(`Session: ${input.sessionId}`);

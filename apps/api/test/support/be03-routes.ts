@@ -41,7 +41,12 @@
 // Switches: the BE-03, BE-04 and BE-06 tests run by default (BE03_DEFAULT, BE04_DEFAULT, BE06_DEFAULT = true). The
 // review routes (BE-13) stay off until BE13_DEFAULT is flipped, or `BE13_READY=1` in the environment for a trial run. The BE-13
 // entries are still ASSUMED.
-import { hasPermission, PRINCIPALS, USER_ROLES } from '../../../../packages/shared/src/permissions';
+import {
+  hasPermission,
+  PERMISSIONS,
+  PRINCIPALS,
+  USER_ROLES,
+} from '../../../../packages/shared/src/permissions';
 import type { Permission, Principal } from '../../../../packages/shared/src/permissions';
 import { UserRole } from '../../src/generated/prisma/client';
 import { computeRevision } from '../../src/questions/revision';
@@ -83,19 +88,45 @@ export interface MatrixEntry {
   audited?: true;
   candidateData?: true;
 }
-export interface RegistryApi {
-  ROUTE_PERMISSIONS: Readonly<Record<string, 'public' | MatrixEntry>>;
-  listRoutes: (modules: unknown) => { key: string; handler: string }[];
-  matrixProblems: (routes: { key: string; handler: string }[]) => string[];
+/** A candidate-session route (FU-BE-91): no roles, never audited; the permission is candidate_*. */
+export interface CandidateMatrixEntry {
+  principal: 'CANDIDATE';
+  permission: string;
 }
+export type AnyMatrixEntry = 'public' | MatrixEntry | CandidateMatrixEntry;
+/** The route facts the registry exposes (RegisteredRoute in route-registry.ts), as far as QA reads them. */
+export interface ListedRoute {
+  key: string;
+  handler: string;
+  isPublic?: boolean;
+  roles?: readonly string[];
+  audited?: boolean;
+  candidatePermission?: string | null;
+}
+export interface RegistryApi {
+  ROUTE_PERMISSIONS: Readonly<Record<string, AnyMatrixEntry>>;
+  CANDIDATE_BOOTSTRAP_ROUTES?: readonly string[];
+  listRoutes: (modules: unknown) => ListedRoute[];
+  matrixProblems: (routes: ListedRoute[]) => string[];
+}
+// Order matters for readers: a candidate entry has `principal` and no `roles`, a staff entry has
+// `roles`; an entry with both is reported by candidateRegistryProblems as an extra key.
+export const isCandidateEntry = (e: AnyMatrixEntry | undefined): e is CandidateMatrixEntry =>
+  typeof e === 'object' && 'principal' in e;
+export const isStaffEntry = (e: AnyMatrixEntry | undefined): e is MatrixEntry =>
+  typeof e === 'object' && 'roles' in e;
 export function loadBackendRegistry(): RegistryApi {
-  const perms = jest.requireActual<Pick<RegistryApi, 'ROUTE_PERMISSIONS'>>(
-    '../../src/common/auth/route-permissions',
-  );
+  const perms = jest.requireActual<
+    Pick<RegistryApi, 'ROUTE_PERMISSIONS' | 'CANDIDATE_BOOTSTRAP_ROUTES'>
+  >('../../src/common/auth/route-permissions');
   const reg = jest.requireActual<Pick<RegistryApi, 'listRoutes' | 'matrixProblems'>>(
     '../../src/common/auth/route-registry',
   );
-  return { ROUTE_PERMISSIONS: perms.ROUTE_PERMISSIONS, ...reg };
+  return {
+    ROUTE_PERMISSIONS: perms.ROUTE_PERMISSIONS,
+    CANDIDATE_BOOTSTRAP_ROUTES: perms.CANDIDATE_BOOTSTRAP_ROUTES,
+    ...reg,
+  };
 }
 
 /**
@@ -1545,6 +1576,114 @@ export function withReplacedId(path: string, id: string, replacement: string): s
   const [pathname = '', query] = path.split('?');
   const segments = pathname.split('/').map((seg) => (seg === id ? replacement : seg));
   return query === undefined ? segments.join('/') : `${segments.join('/')}?${query}`;
+}
+
+/**
+ * Candidate-session routes (BE-07, FR-106, FR-401; ADR 0013 5.10), for REGISTRY AGREEMENT ONLY
+ * (tc-004 "route registry"): they use candidate tokens, so the staff 401/403/404/audit loops
+ * (BE03_ROUTES) never see them. Each is included only when the backend's ROUTE_PERMISSIONS has the
+ * key, so this is green before and after BE-07 (#98) merges. `permission: 'public'` = a pre-JWT
+ * bootstrap route; otherwise the candidate_* permission the matrix must carry.
+ */
+export interface CandidateRoute {
+  key: string;
+  permission: 'public' | Permission;
+}
+const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
+  { key: 'POST /candidate/session/link', permission: 'public' },
+  { key: 'POST /candidate/session/otp', permission: 'public' },
+  { key: 'POST /candidate/session/start', permission: 'public' },
+  { key: 'GET /candidate/session/consent', permission: 'candidate_consent:read' },
+  { key: 'POST /candidate/session/consent/sign', permission: 'candidate_consent:sign' },
+  { key: 'POST /candidate/session/consent/decline', permission: 'candidate_consent:decline' },
+  { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+  { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
+  { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
+  { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
+  // BE-09 media (Backend B, PR #119): confirm reuses the presign permission.
+  { key: 'POST /candidate/session/media/presign', permission: 'candidate_media:presign' },
+  { key: 'POST /candidate/session/media/confirm', permission: 'candidate_media:presign' },
+  // BE-08b identity check (Integrity B, PR #129): the status read reuses the upload permission
+  // (shared has no candidate_identity:read yet). BE-08c POST .../identity/recheck is not built: not listed.
+  { key: 'POST /candidate/session/identity/presign', permission: 'candidate_identity:upload' },
+  { key: 'POST /candidate/session/identity', permission: 'candidate_identity:upload' },
+  { key: 'GET /candidate/session/identity', permission: 'candidate_identity:upload' },
+  // BE-11 answers and finish (Backend B, PR #187, gated): keys and permissions as registered on that branch.
+  { key: 'POST /candidate/answers/:questionId/run', permission: 'candidate_answer:run' },
+  { key: 'POST /candidate/answers/:questionId/submit', permission: 'candidate_answer:submit' },
+  { key: 'PUT /candidate/answers/:questionId/draft', permission: 'candidate_answer:draft' },
+  { key: 'POST /candidate/session/finish', permission: 'candidate_session:finish' },
+  { key: 'POST /candidate/session/section/finish', permission: 'candidate_section:finish' },
+];
+export const CANDIDATE_ROUTES: readonly CandidateRoute[] = KNOWN_CANDIDATE_ROUTES.filter((r) =>
+  backendHasRoute(r.key),
+);
+
+const STAFF_ROLE_NAMES: readonly string[] = USER_ROLES;
+export const isCandidatePath = (key: string): boolean => /^\S+ \/candidate(\/|$)/i.test(key);
+
+/**
+ * Pure registry check for the CANDIDATE route variant (FU-BE-91), so it can be unit tested with
+ * synthetic matrices (tc-004 always-run block) and run over the real matrix (registry test).
+ * `routes` is what the backend registry reports per key, `bootstrap` is CANDIDATE_BOOTSTRAP_ROUTES,
+ * `listed` is CANDIDATE_ROUTES. Returns one message per problem; [] means agreement.
+ */
+export function candidateRegistryProblems(input: {
+  matrix: Readonly<Record<string, AnyMatrixEntry>>;
+  routes: ReadonlyMap<string, ListedRoute>;
+  bootstrap: readonly string[];
+  listed: readonly CandidateRoute[];
+}): string[] {
+  const { matrix, routes, bootstrap, listed } = input;
+  const problems: string[] = [];
+  const known = new Set<string>(PERMISSIONS);
+  for (const [key, access] of Object.entries(matrix)) {
+    if (isCandidateEntry(access)) {
+      const extra = Object.keys(access).filter((k) => k !== 'principal' && k !== 'permission');
+      if (extra.length > 0)
+        problems.push(`${key}: CANDIDATE entry has extra keys ${extra.join(',')}`);
+      if (access.principal !== 'CANDIDATE') problems.push(`${key}: principal is not CANDIDATE`);
+      if (!access.permission.startsWith('candidate_') || !known.has(access.permission))
+        problems.push(`${key}: permission ${access.permission} is not a candidate_* permission`);
+      const r = routes.get(key);
+      if (r === undefined) problems.push(`${key}: not served by the backend`);
+      else {
+        if ((r.roles ?? []).length > 0) problems.push(`${key}: candidate route carries roles`);
+        if (r.audited === true) problems.push(`${key}: candidate route is @Audited`);
+        if (r.candidatePermission !== access.permission)
+          problems.push(`${key}: @CandidateRoute permission differs from the matrix`);
+      }
+    } else if (isStaffEntry(access)) {
+      if (access.permission.startsWith('candidate_'))
+        problems.push(`${key}: staff entry carries candidate permission ${access.permission}`);
+      const odd = access.roles.filter((x) => !STAFF_ROLE_NAMES.includes(x));
+      if (odd.length > 0)
+        problems.push(`${key}: staff entry lists non-staff roles ${odd.join(',')}`);
+      if ((routes.get(key)?.candidatePermission ?? null) !== null)
+        problems.push(`${key}: staff route carries @CandidateRoute`);
+    } else if (access === 'public' && isCandidatePath(key) && !bootstrap.includes(key)) {
+      problems.push(`${key}: /candidate/ route listed public but not a bootstrap route`);
+    }
+  }
+  for (const key of bootstrap) {
+    if (!isCandidatePath(key) || matrix[key] !== 'public')
+      problems.push(`${key}: bootstrap route must be a /candidate/ route listed public`);
+  }
+  for (const c of listed) {
+    const entry = matrix[c.key];
+    const ok =
+      c.permission === 'public'
+        ? entry === 'public' && bootstrap.includes(c.key)
+        : isCandidateEntry(entry) && entry.permission === c.permission;
+    if (!ok) problems.push(`${c.key}: QA list says ${c.permission}, matrix disagrees`);
+  }
+  const listedKeys = new Set(listed.map((c) => c.key));
+  for (const [key, access] of Object.entries(matrix)) {
+    const candidateKey = isCandidateEntry(access) || (isCandidatePath(key) && access === 'public');
+    if (candidateKey && !listedKeys.has(key))
+      problems.push(`${key}: candidate route not in CANDIDATE_ROUTES (be03-routes.ts)`);
+  }
+  return problems;
 }
 
 export const routesFor = (step: Be03Route['step']): Be03Route[] =>

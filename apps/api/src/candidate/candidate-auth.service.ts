@@ -21,6 +21,8 @@ import { SessionStateService } from '../session/session-state.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { LIVE_STATUSES, PRE_START_STATUSES, USED_STATUSES } from '../session/session-transitions';
 import { CandidateMailPort } from './candidate-mail.port';
+import { isBusyLockError } from './busy-lock-error';
+import { sessionNotActive } from '../session/session-write-gate';
 import { CandidateTokenService } from './candidate-token.service';
 import {
   OTP_BLOCK_SECONDS,
@@ -60,11 +62,19 @@ interface ResolvedLink {
     windowEnd: Date;
   };
   readonly session: { id: string; status: SessionStatus };
-  readonly candidate: { fullName: string; email: string };
+  /**
+   * The candidate's name and address, loaded on demand and only where they are used (sending a
+   * code, the lockout notice). The link and the refusal paths never read them: a used or erased
+   * link must answer from the session status alone (L-3), and read no personal data.
+   */
+  readonly candidate: () => Promise<{ fullName: string; email: string }>;
   readonly testName: string;
   readonly orgName: string;
   readonly orgSettings: unknown;
 }
+
+/** The statuses a sign-in may raise the epoch of: after the first transition, never a terminal one. */
+const SIGN_IN_STATUSES = ['OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'] as const;
 
 const MAX_CONTACT_LENGTH = 500;
 const INVALID_LINK = 'This invitation link is not valid.';
@@ -129,14 +139,10 @@ export class CandidateAuthService {
       if (invitation === null) return invalidLink();
       // Narrow to the invitation's org before any other read (system scope is only for the lookup).
       return this.orgContext.runInOrg(invitation.orgId, async () => {
-        const [session, candidate, test, org] = await Promise.all([
+        const [session, test, org] = await Promise.all([
           this.prisma.client.session.findUnique({
             where: { invitationId: invitation.id },
             select: { id: true, status: true },
-          }),
-          this.prisma.client.candidate.findUnique({
-            where: { id: invitation.candidateId },
-            select: { fullName: true, email: true },
           }),
           this.prisma.client.test.findUnique({
             where: { id: invitation.testId },
@@ -147,11 +153,20 @@ export class CandidateAuthService {
             select: { name: true, settings: true },
           }),
         ]);
-        if (!session || !candidate || !test || !org) return invalidLink();
+        if (!session || !test || !org) return invalidLink();
+        let loaded: { fullName: string; email: string } | undefined;
         return then({
           invitation,
           session,
-          candidate,
+          candidate: async () => {
+            loaded ??=
+              (await this.prisma.client.candidate.findUnique({
+                where: { id: invitation.candidateId },
+                select: { fullName: true, email: true },
+              })) ?? undefined;
+            if (loaded === undefined) return invalidLink();
+            return loaded;
+          },
           testName: test.name,
           orgName: org.name,
           orgSettings: org.settings,
@@ -237,8 +252,10 @@ export class CandidateAuthService {
           { retryAfterSeconds: issued.retryAfterSeconds },
         );
       }
+      // The candidate is read only now that a code really goes out.
+      const candidate = await link.candidate();
       try {
-        await this.mail.sendOtp(link.candidate.email, {
+        await this.mail.sendOtp(candidate.email, {
           code: issued.code,
           testName: link.testName,
           expiresInMinutes: OTP_TTL_SECONDS / 60,
@@ -254,7 +271,7 @@ export class CandidateAuthService {
           'MAIL_UNAVAILABLE',
         );
       }
-      return { view, sent: true, maskedEmail: maskEmail(link.candidate.email) };
+      return { view, sent: true, maskedEmail: maskEmail(candidate.email) };
     });
   }
 
@@ -285,6 +302,7 @@ export class CandidateAuthService {
             'LINK_BLOCKED',
             { retryAfterSeconds: result.retryAfterSeconds },
           );
+        case 'busy':
         case 'cooldown':
           throw coded(
             HttpStatus.TOO_MANY_REQUESTS,
@@ -317,34 +335,62 @@ export class CandidateAuthService {
           break;
       }
 
-      // The code is spent. Read the status again: it may have moved since the first read (the test
-      // was submitted, expired or declined on another device), and no token is issued for that.
+      // The code is spent. If a write below is busy (lock timeout, deadlock), the client retries
+      // with the same code (503), so the code and the guess it used are put back first (DL-37).
       const sessionId = link.session.id;
-      const fresh = await this.prisma.client.session.findUnique({
-        where: { id: sessionId },
-        select: { status: true },
-      });
-      if (fresh === null) return invalidLink();
-      this.refuseUnlessOpen(
-        await this.stateOf({ ...link, session: { id: sessionId, status: fresh.status } }, now),
-      );
-      // Raise the epoch first: it ends every older token at once.
-      const updated = await this.prisma.client.session.update({
-        where: { id: sessionId },
-        data: { authEpoch: { increment: 1 } },
-        select: { authEpoch: true },
-      });
-      if (link.session.status === 'INVITED') {
-        try {
-          await this.states.transition({ sessionId, from: 'INVITED', to: 'OPENED', now });
-        } catch (e) {
-          if (!(e instanceof SessionStateConflictError)) throw e;
+      let updated: { authEpoch: number; status: SessionStatus };
+      try {
+        // Read the status again: it may have moved since the first read (the test was submitted,
+        // expired or declined on another device), and no token is issued for that.
+        const fresh = await this.prisma.client.session.findUnique({
+          where: { id: sessionId },
+          select: { status: true },
+        });
+        if (fresh === null) return invalidLink();
+        this.refuseUnlessOpen(
+          await this.stateOf({ ...link, session: { id: sessionId, status: fresh.status } }, now),
+        );
+        if (link.session.status === 'INVITED') {
+          try {
+            await this.states.transition({ sessionId, from: 'INVITED', to: 'OPENED', now });
+          } catch (e) {
+            if (!(e instanceof SessionStateConflictError)) throw e;
+          }
         }
+        // The epoch last: it ends every older token at once, so a busy failure before it leaves
+        // the other device signed in and only an idempotent OPENED behind.
+        // Atomic with the status: a session that became terminal since the read above (submitted,
+        // expired, declined) is not touched, so no epoch bump and no token for it.
+        const bumped = await this.prisma.client.session.updateManyAndReturn({
+          where: { id: sessionId, status: { in: [...SIGN_IN_STATUSES] } },
+          data: { authEpoch: { increment: 1 } },
+          select: { authEpoch: true, status: true },
+        });
+        const row = bumped[0];
+        if (row === undefined) {
+          const now2 = await this.prisma.client.session.findUnique({
+            where: { id: sessionId },
+            select: { status: true },
+          });
+          if (now2 === null) return invalidLink();
+          this.refuseUnlessOpen(
+            await this.stateOf({ ...link, session: { id: sessionId, status: now2.status } }, now),
+          );
+          throw sessionNotActive(now2.status);
+        }
+        updated = row;
+      } catch (e) {
+        if (isBusyLockError(e)) {
+          // Ids only in the log: never the hash.
+          const back = await this.otp.restore(link.invitation.id, result, phase).catch(() => false);
+          if (!back) {
+            this.logger.warn(
+              `OTP not restored after a busy write for invitation ${link.invitation.id}`,
+            );
+          }
+        }
+        throw e;
       }
-      const current = await this.prisma.client.session.findUnique({
-        where: { id: sessionId },
-        select: { status: true },
-      });
       const issued = this.tokens.sign(
         { sid: sessionId, oid: link.invitation.orgId, epoch: updated.authEpoch },
         now,
@@ -352,7 +398,7 @@ export class CandidateAuthService {
       return {
         token: issued.token,
         expiresAt: issued.expiresAt,
-        status: current?.status ?? link.session.status,
+        status: updated.status,
         epoch: updated.authEpoch,
       };
     });
@@ -403,10 +449,12 @@ export class CandidateAuthService {
       select: { email: true, isActive: true },
     });
     if (!recruiter?.isActive) return;
+    // The candidate's name and address are read only here, for the notice.
+    const candidate = await link.candidate();
     try {
       await this.mail.sendOtpLockout(recruiter.email, {
-        candidateName: link.candidate.fullName,
-        candidateEmail: link.candidate.email,
+        candidateName: candidate.fullName,
+        candidateEmail: candidate.email,
         testName: link.testName,
         blockedMinutes: OTP_BLOCK_SECONDS / 60,
       });

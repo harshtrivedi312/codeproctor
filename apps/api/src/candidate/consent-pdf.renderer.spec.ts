@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { renderConsentPdf, toBlocks } from './consent-pdf.renderer';
+import PDFDocument from 'pdfkit';
+import { ageStatement, renderConsentPdf, toBlocks } from './consent-pdf.renderer';
 
 const base = {
   orgName: 'Acme Hiring',
@@ -45,4 +46,43 @@ describe('Signed consent PDF (FR-401, C-07, C-30, TC-095)', () => {
       { kind: 'p', text: 'link and code' },
     ]);
   });
+
+  it('FR-401 C-30 TC-095: the 18+ statement is made only for a confirmed signature', () => {
+    expect(ageStatement(true)).toBe('The signer confirmed being 18 years of age or older.');
+    expect(ageStatement(false)).toBe('Age confirmation: not recorded.');
+  });
+
+  it.each([
+    [
+      true,
+      'The signer confirmed being 18 years of age or older.',
+      'Age confirmation: not recorded.',
+    ],
+    [
+      false,
+      'Age confirmation: not recorded.',
+      'The signer confirmed being 18 years of age or older.',
+    ],
+  ])(
+    'FR-401 C-30 TC-095: the rendered text for ageConfirmed=%s has the right statement and not the other',
+    async (ageConfirmed, present, absent) => {
+      const lines: string[] = [];
+      const proto = PDFDocument.prototype as { text: (this: unknown, t: unknown) => unknown };
+      const real = proto.text;
+      const spy = jest.spyOn(proto, 'text').mockImplementation(function (
+        this: unknown,
+        t: unknown,
+      ) {
+        lines.push(String(t));
+        return real.call(this, t);
+      });
+      try {
+        await renderConsentPdf({ ...base, ageConfirmed });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(lines).toContain(present);
+      expect(lines).not.toContain(absent);
+    },
+  );
 });

@@ -71,7 +71,7 @@ export function parseReferenceDdl() {
     .map((m) => m[1])
     .join('\n')
     .replace(/--[^\n]*/g, '');
-  /** @type {Map<string, { columns: Map<string, Column>, foreignKeys: ForeignKey[], primaryKey: string[] }>} */
+  /** @type {Map<string, { columns: Map<string, Column>, foreignKeys: ForeignKey[], primaryKey: string[], checkNames: string[] }>} */
   const tables = new Map();
   /** @type {Map<string, string[]>} */
   const enums = new Map();
@@ -107,8 +107,16 @@ export function parseReferenceDdl() {
     m = /^CREATE TABLE (\w+)\s*\(([\s\S]*)\)$/i.exec(statement);
     if (m) {
       const name = m[1];
-      const table = { columns: new Map(), foreignKeys: [], primaryKey: [] };
-      for (const item of splitTopLevel(m[2])) {
+      const table = { columns: new Map(), foreignKeys: [], primaryKey: [], checkNames: [] };
+      for (const rawItem of splitTopLevel(m[2])) {
+        // Only `CONSTRAINT <name> CHECK (...)` is accepted: the name is kept (matched to the catalog) and the
+        // CHECK is parsed as usual. Any other `CONSTRAINT ...` form throws, so nothing is silently misread.
+        const named = /^CONSTRAINT\s+(\w+)\s+(CHECK\b[\s\S]*)$/i.exec(rawItem);
+        if (!named && /^CONSTRAINT\b/i.test(rawItem))
+          throw new Error(
+            `database.md: unrecognised constraint in ${name}: ${rawItem.slice(0, 60)}`,
+          );
+        const item = named ? named[2] : rawItem;
         if (!TABLE_CONSTRAINT.test(item)) {
           const [col, ...rest] = item.split(/\s+/);
           const type = /^(\w+(?:\([^)]*\))?(?:\[\])?)/.exec(rest.join(' '))?.[1];
@@ -156,6 +164,7 @@ export function parseReferenceDdl() {
         }
         if (!/^CHECK\b/i.test(item))
           throw new Error(`database.md: unrecognised constraint in ${name}: ${item.slice(0, 60)}`);
+        if (named) table.checkNames.push(named[1]);
       }
       tables.set(name, table);
       continue;
