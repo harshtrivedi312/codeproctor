@@ -357,7 +357,11 @@ export class ReviewService {
     for (const c of chunks) {
       if (c.objectKey === null) continue;
       parts.push({
-        url: await this.storage.presignGet(c.objectKey, PLAYBACK_TTL_SECONDS),
+        url: await this.storage.presignGet(
+          c.objectKey,
+          contentTypeOf(parsed.kind),
+          PLAYBACK_TTL_SECONDS,
+        ),
         seq: c.seq,
         durationMs: c.durationMs,
       });

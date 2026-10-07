@@ -6,13 +6,16 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 
 export abstract class RecordingStoragePort {
-  /** A presigned GET URL for `key`, valid for `ttlSeconds`. */
-  abstract presignGet(key: string, ttlSeconds: number): Promise<string>;
+  /**
+   * A presigned GET URL for `key`, valid for `ttlSeconds`. `contentType` is the type the object is
+   * served as (forced on the response, with `attachment`, ADR 0013 section 5.7).
+   */
+  abstract presignGet(key: string, contentType: string, ttlSeconds: number): Promise<string>;
 }
 
 /**
- * The default binding until the S3 adapter exists: playback answers 503 and nothing else in the
- * review API is affected. TODO(FU-BE-229): bind the S3 adapter.
+ * The binding when no object store is wired: playback answers 503 and nothing else in the
+ * review API is affected. The S3 binding is `StorageRecordingStorage` (FU-BE-229); this one stays the test default.
  */
 @Injectable()
 export class UnconfiguredRecordingStorage extends RecordingStoragePort {

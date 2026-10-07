@@ -9,14 +9,20 @@ function startSink(): Promise<{ server: Server; port: number; data: string[] }> 
   const data: string[] = [];
   const server = createServer((socket) => {
     let inData = false;
+    let tail = '';
     socket.write('220 sink ESMTP\r\n');
     socket.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       data.push(text);
       if (inData) {
-        if (text.includes('\r\n.\r\n')) {
+        // The end-of-data marker can be split across TCP chunks: look at the joined tail.
+        const seen = tail + text;
+        if (seen.includes('\r\n.\r\n')) {
           inData = false;
+          tail = '';
           socket.write('250 queued\r\n');
+        } else {
+          tail = seen.slice(-8);
         }
         return;
       }
