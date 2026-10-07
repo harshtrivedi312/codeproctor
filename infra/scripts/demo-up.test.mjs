@@ -112,8 +112,9 @@ describe('local compose stack (D-67)', () => {
   });
 
   it('MinIO refuses to start without its login in .env (no known default password)', () => {
-    assert.match(compose, /- MINIO_ROOT_PASSWORD=\$\{MINIO_ROOT_PASSWORD:\?/);
-    assert.match(compose, /- MINIO_ROOT_USER=\$\{MINIO_ROOT_USER:\?/);
+    assert.match(compose, /MINIO_ROOT_USER and MINIO_ROOT_PASSWORD must be set in \.env/);
+    assert.match(compose, /\[ -n "\$\$\{MINIO_ROOT_PASSWORD:-\}" \]/);
+    assert.doesNotMatch(compose, /MINIO_ROOT_PASSWORD=[^$\s]/, 'no literal default');
   });
 
   it('MinIO allows browser uploads from the local web origin only', () => {

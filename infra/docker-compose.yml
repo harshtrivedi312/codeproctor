@@ -89,10 +89,19 @@ services:
   minio:
     image: bitnamilegacy/minio@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
     restart: unless-stopped
+    entrypoint:
+      - sh
+      - -c
+      - '[ -n "$${MINIO_ROOT_USER:-}" ] && [ -n "$${MINIO_ROOT_PASSWORD:-}" ] || { echo "MINIO_ROOT_USER and MINIO_ROOT_PASSWORD must be set in .env (see .env.example)" >&2; exit 1; }; exec /opt/bitnami/scripts/minio/entrypoint.sh "$$@"'
+      - sh
+    # An entrypoint override drops the image's CMD, so name it again.
+    command: ['/opt/bitnami/scripts/minio/run.sh']
     environment:
       # No defaults: the Bitnami image would otherwise start with a publicly known login (minio/miniosecret).
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (see .env.example)}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
+      # The entrypoint below refuses to start unless both are set (a `${VAR:?}` here would make a plain
+      # `docker compose config` fail without a .env, which CI runs).
+      - MINIO_ROOT_USER
+      - MINIO_ROOT_PASSWORD
       - MINIO_DEFAULT_BUCKETS=codeproctor-media,codeproctor-backup
       - MINIO_API_CORS_ALLOW_ORIGIN=http://localhost:3000
     ports:
