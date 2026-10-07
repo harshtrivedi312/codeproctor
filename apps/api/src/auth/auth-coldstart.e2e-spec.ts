@@ -89,7 +89,7 @@ describe('2FA verify right after a cold start (FR-102, TC-003, NFR-03, NFR-04, Q
     return (res.body as { challengeToken: string }).challengeToken;
   }
 
-  it('TC-003: parallel 2FA verifies on a freshly booted app (lazy Redis not yet connected) all succeed, never 503', async () => {
+  it('TC-003: parallel 2FA verifies on a freshly booted app (Redis connect started at boot, possibly still in flight; the connecting path itself is covered by redis-ready.spec.ts) all succeed, never 503', async () => {
     const emails = await createTotpUsers('cold', USERS);
     await bootFreshApp();
     const challenges = await Promise.all(emails.map(challengeFor));

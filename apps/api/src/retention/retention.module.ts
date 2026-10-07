@@ -10,6 +10,20 @@ import { DatabaseModule } from '../database';
 import { LegalHoldPort, NoLegalHold } from './legal-hold.port';
 import { loadRetentionConfig } from './retention.config';
 import { ConsentRetentionRepository } from './consent-retention.repository';
+import {
+  ErasureAlertPort,
+  ErasureListPort,
+  ErasureNoticePort,
+  ErasureSchedulerPort,
+  SessionFencePort,
+  UnconfiguredErasureAlert,
+  UnconfiguredErasureList,
+  UnconfiguredErasureNotice,
+  UnconfiguredErasureScheduler,
+  UnconfiguredSessionFence,
+} from './erasure/erasure.ports';
+import { ErasureRepository } from './erasure/erasure.repository';
+import { ErasureService } from './erasure/erasure.service';
 import { RetentionRepository } from './retention.repository';
 import { RETENTION_CONFIG, RetentionService } from './retention.service';
 
@@ -18,6 +32,8 @@ export interface RetentionModuleOptions {
   readonly objectStore: NonNullable<ModuleMetadata['imports']>[number];
   /** Optional: a module that exports LegalHoldPort (OQ-10). The default holds nothing. */
   readonly legalHold?: NonNullable<ModuleMetadata['imports']>[number];
+  /** Optional: a module that exports SessionFencePort, ErasureSchedulerPort, ErasureNoticePort, ErasureAlertPort and ErasureListPort. Without it every erasure call is refused (fail closed). */
+  readonly erasure?: NonNullable<ModuleMetadata['imports']>[number];
 }
 
 @Module({})
@@ -35,6 +51,7 @@ export class RetentionModule {
         DatabaseModule,
         options.objectStore,
         ...(options.legalHold ? [options.legalHold] : []),
+        ...(options.erasure ? [options.erasure] : []),
       ],
       providers: [
         RetentionRepository,
@@ -42,8 +59,19 @@ export class RetentionModule {
         RetentionService,
         { provide: RETENTION_CONFIG, useFactory: () => loadRetentionConfig(process.env) },
         ...(options.legalHold ? [] : [{ provide: LegalHoldPort, useClass: NoLegalHold }]),
+        ErasureRepository,
+        ErasureService,
+        ...(options.erasure
+          ? []
+          : [
+              { provide: SessionFencePort, useClass: UnconfiguredSessionFence },
+              { provide: ErasureSchedulerPort, useClass: UnconfiguredErasureScheduler },
+              { provide: ErasureNoticePort, useClass: UnconfiguredErasureNotice },
+              { provide: ErasureAlertPort, useClass: UnconfiguredErasureAlert },
+              { provide: ErasureListPort, useClass: UnconfiguredErasureList },
+            ]),
       ],
-      exports: [RetentionService],
+      exports: [RetentionService, ErasureService],
     };
   }
 }
