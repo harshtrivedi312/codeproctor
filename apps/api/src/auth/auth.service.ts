@@ -890,8 +890,12 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     const next = newOpaqueToken();
     // Signed before the rotation commits, like startSession (S1).
     const body = this.authenticated(user);
+    // Phase tracking for the failure rule below (FR-104, DL-37, FU-BE-197).
+    let callbackStarted = false;
+    let callbackFinished = false;
     try {
       await this.prisma.client.$transaction(async (tx) => {
+        callbackStarted = true;
         // The new token exists only while the account is active and still has the password hash
         // loaded above. FOR SHARE locks the user row: a reset in flight is waited for (then the
         // WHERE fails), and a reset arriving later waits for this commit and revokes the new
@@ -919,6 +923,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
           data: { revokedAt: new Date(), replacedById: createdId },
         });
         if (flipped.count !== 1) throw new RefreshReuseSignal();
+        callbackFinished = true;
       });
     } catch (e) {
       if (e instanceof PasswordChangedSignal) {
@@ -932,7 +937,26 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
         throw new UnauthorizedException('Authentication required.');
       }
-      throw e;
+      // Failure rule (FR-104, TC-005, DL-37, FU-BE-197). This transaction inserts the new refresh
+      // token and flips the old one to revoked. If the commit landed on the server but the client
+      // saw P2028 or a lost connection, a 503 would invite a retry with the OLD token, which is now
+      // revoked, and reuse detection would kill the whole family (a forced logout that looks like
+      // theft). So only a failure that is certainly a clean rollback answers 503 BUSY:
+      //   - before the callback started (no transaction: pool timeout, contention on BEGIN, and
+      //     Prisma's own start-timeout P2028 are all nothing-happened failures);
+      //   - inside the callback body, a statement-level lock error (55P03, 40P01, 40001, P2034).
+      // Everything else (the callback finished and the commit failed, P2028 inside, a connection
+      // loss, anything unexpected) is outcome-unknown: a fixed non-retryable 401 tells the client to
+      // sign in again. It changes no state and revokes nothing. Since #216 lockContentionCode maps
+      // P2028 to 503 BUSY on every route, which is exactly the retry trap this closes. The pool
+      // timeout (#276) needs no token here: it surfaces before the callback starts, by phase.
+      if (!callbackStarted) throw e;
+      const code = lockContentionCode(e);
+      if (!callbackFinished && code !== undefined && code !== 'P2028') throw e;
+      this.logger.error(
+        `Refresh rotation outcome unknown (${errorName(e)}) REFRESH_ROTATE_UNKNOWN`,
+      );
+      throw new UnauthorizedException('Authentication required.');
     }
     return { body, refreshToken: next };
   }
