@@ -70,10 +70,11 @@ export function useReviewSession(id: string) {
 export async function fetchPlayback(
   sessionId: string,
   recordingId: string,
+  signal?: AbortSignal,
 ): Promise<ReviewPlayback> {
   const { data, error, response } = await api.GET(
     '/v1/review/sessions/{sessionId}/recordings/{recordingId}/playback',
-    { params: { path: { sessionId, recordingId } } },
+    { params: { path: { sessionId, recordingId } }, ...(signal ? { signal } : {}) },
   );
   if (!data) fail(response, error);
   return data;
