@@ -689,6 +689,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // Removing the code and opening the session are one transaction, so a password change that
       // refuses the session also puts the code back.
       return await this.prisma.client.$transaction(async (tx) => {
+        phase.finished = false; // a re-run of the callback must not keep a stale flag
         // The check and the removal are one statement, so two concurrent uses cannot both win.
         const used = await this.raw(
           'consume one recovery code atomically: check and removal in one UPDATE (FR-102)',
@@ -709,14 +710,15 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // anything that is not a rollback code (P2028 or P1017 at COMMIT, a connection error): the
       // code may be spent and the refresh family created, the token never delivered. Fixed 500,
       // no release of the challenge (not retryable), no refund, nothing about the code revealed.
-      if (phase.finished && !isCleanRollback(phase, e)) {
+      const clean = isCleanRollback(phase, e);
+      if (phase.finished && !clean) {
         throw new OutcomeUnknownError('auth.2fa.verify.recovery');
       }
       // FU-BE-208: only a statement-level lock error before the INSERT returned is certainly clean.
       if (
         !wrongCode &&
         !insert.done &&
-        isCleanRollback(phase, e) &&
+        clean &&
         // Defensive: the signal is only thrown after the INSERT returned (insert.done), so this
         // never matters today; it keeps a refused session from ever releasing the mark.
         !(e instanceof PasswordChangedSignal)
@@ -738,7 +740,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         // recovery transaction failed at COMMIT with anything but a rollback code).
         !insert.done &&
         lockContentionCode(e) !== undefined &&
-        isCleanRollback(phase, e) &&
+        clean &&
         !(isObject(e) && this.refundedErrors.has(e))
       ) {
         await this.refundAttempt(user).catch(() => undefined);

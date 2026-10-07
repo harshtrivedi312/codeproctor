@@ -526,6 +526,13 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       });
       return { ...u, recovery, other };
     }
+    const expectUnknownLogged = (spy: jest.SpyInstance): void => {
+      const calls = spy.mock.calls as unknown[][];
+      const call = calls.find((c) => c[1] === 'Write outcome unknown');
+      expect((call?.[0] as Record<string, unknown> | undefined)?.route).toBe(
+        'auth.2fa.verify.recovery',
+      );
+    };
     const hashesOf = async (id: string): Promise<string[]> =>
       (await prisma.user.findUniqueOrThrow({ where: { id } })).recoveryCodeHashes;
     const families = (id: string): Promise<number> =>
@@ -537,9 +544,12 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         const u = await recoveryUser();
         const challenge = await challengeFor(u.email);
         const refund = spyRefund();
+        const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const logSpy = jest.spyOn(Logger.prototype, 'error');
         commitThenFail(make);
         const res = await verify2fa(challenge, u.recovery);
         expectFixed500(res);
+        expectUnknownLogged(logSpy);
         expect(refund).not.toHaveBeenCalled();
         // The transaction's own clearFailures committed: the counter is what the success path left.
         expect(await failedLogins(u.id)).toBe(0);
@@ -559,8 +569,11 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         const u = await recoveryUser();
         const challenge = await challengeFor(u.email);
         const refund = spyRefund();
+        const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const logSpy = jest.spyOn(Logger.prototype, 'error');
         failAfterCallback(make);
         expectFixed500(await verify2fa(challenge, u.recovery));
+        expectUnknownLogged(logSpy);
         expect(refund).not.toHaveBeenCalled();
         expect(await failedLogins(u.id)).toBe(1);
         expect(await hashesOf(u.id)).toHaveLength(2);
@@ -641,9 +654,12 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
     it('FU-BE-208, FU-BE-219, DL-37, FR-102: the TOTP branch is unchanged: a P2028 after the family INSERT is not the recovery 500', async () => {
       const u = await createUser({ role: UserRole.REVIEWER, totp: true });
       const challenge = await challengeFor(u.email);
+      const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+      const logSpy = jest.spyOn(Logger.prototype, 'error');
       spyOnService('clearFailures').mockRejectedValueOnce(p2028());
       const res = await verify2fa(challenge, authenticator.generate(SECRET));
       expect(res.status).toBe(503);
+      expect(logSpy.mock.calls.some((c) => c[1] === 'Write outcome unknown')).toBe(false);
     });
 
     it('FU-BE-208, FR-102: a successful login keeps its mark: the same code cannot be replayed with a fresh challenge', async () => {
