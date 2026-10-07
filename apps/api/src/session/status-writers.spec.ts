@@ -94,36 +94,99 @@ export function findStatusWrites(source: string): string[] {
  */
 export function findNonSameValueStatusWrites(source: string): string[] {
   const found: string[] = [];
-  for (const match of source.matchAll(WRITE_CALL)) {
-    const call = balanced(source, (match.index ?? 0) + match[0].length - 1);
-    const where = [...call.matchAll(/\bwhere\s*:\s*\{/g)].map((k) =>
-      balanced(call, (k.index ?? 0) + k[0].length - 1),
-    );
-    const data = [...call.matchAll(/\bdata\s*:\s*\{/g)].map((k) =>
-      balanced(call, (k.index ?? 0) + k[0].length - 1),
-    );
-    const valueOf = (body: string): string | null => {
-      const m = body.match(/\bstatus\s*:\s*([^,}\n]+)/);
-      return m?.[1]?.trim() ?? null;
-    };
-    const wanted = where.map(valueOf).find((v) => v !== null) ?? null;
-    if (data.length === 0 || /\bdata\b\s*[,}]/.test(call.replace(/\bdata\s*:\s*\{[\s\S]*\}/, ''))) {
-      found.push(`${match[0].trim()} ... data is not an object literal`);
+  const clean = stripComments(source);
+  /** The top-level `key: value` entries of an object literal; spreads and computed keys show as keys. */
+  const entries = (objectText: string): Array<{ key: string; value: string }> => {
+    const inner = objectText.slice(1, -1);
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < inner.length; i++) {
+      const c = inner[i] as string;
+      if (c === '"' || c === "'" || c === '`') {
+        const quote = c;
+        i += 1;
+        while (i < inner.length && inner[i] !== quote) i += inner[i] === '\\' ? 2 : 1;
+      } else if (c === '{' || c === '[' || c === '(') depth += 1;
+      else if (c === '}' || c === ']' || c === ')') depth -= 1;
+      else if (c === ',' && depth === 0) {
+        parts.push(inner.slice(start, i));
+        start = i + 1;
+      }
+    }
+    parts.push(inner.slice(start));
+    return parts
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map((p) => {
+        const m = p.match(/^([A-Za-z_$][\w$]*)\s*(?::\s*([\s\S]*))?$/);
+        return m
+          ? { key: m[1] as string, value: (m[2] ?? m[1] ?? '').trim() }
+          : { key: p, value: '' };
+      });
+  };
+  // A plain identifier or member chain, or an UPPER_CASE status literal: nothing computed.
+  const bare = /^(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*|'[A-Z_]+')$/;
+  for (const match of clean.matchAll(WRITE_CALL)) {
+    const label = match[0].trim();
+    const arg = (match.index ?? 0) + match[0].length;
+    if (clean[arg] !== '{') {
+      found.push(`${label} ... the argument is not an object literal`);
       continue;
     }
-    for (const body of data) {
-      // Only the status column may be written, and only with the value the where matched.
-      const keys = [...body.matchAll(/(?:^|[{,\s])([A-Za-z_$][\w$]*)\s*:/g)].map((m) => m[1]);
-      const dataValue = valueOf(body);
-      if (dataValue === null) found.push(`${match[0].trim()} ... data has no status`);
-      else if (wanted === null || dataValue !== wanted)
-        found.push(`${match[0].trim()} ... data.status (${dataValue}) differs from where.status`);
-      if (keys.some((k) => k !== 'status'))
-        found.push(`${match[0].trim()} ... data writes a column other than status`);
+    const top = entries(balanced(clean, arg));
+    if (top.length !== 2 || top.some((e) => e.key !== 'where' && e.key !== 'data')) {
+      found.push(`${label} ... the argument must be exactly { where, data }`);
+      continue;
+    }
+    const whereText = top.find((e) => e.key === 'where')?.value ?? '';
+    const dataText = top.find((e) => e.key === 'data')?.value ?? '';
+    if (!whereText.startsWith('{') || !dataText.startsWith('{')) {
+      found.push(`${label} ... where and data must be object literals`);
+      continue;
+    }
+    const where = entries(whereText);
+    const data = entries(dataText);
+    // data: exactly one entry, `status: <bare expression>`.
+    if (data.length !== 1 || data[0]?.key !== 'status' || !bare.test(data[0].value)) {
+      found.push(`${label} ... data must be exactly { status: <identifier> }`);
+      continue;
+    }
+    // where: only id, orgId and one status entry with the identical expression.
+    const allowed = new Set(['id', 'orgId', 'status']);
+    const statusEntries = where.filter((e) => e.key === 'status');
+    if (where.some((e) => !allowed.has(e.key)) || statusEntries.length !== 1) {
+      found.push(`${label} ... where may only name id, orgId and one status`);
+    } else if (statusEntries[0]?.value !== data[0].value) {
+      found.push(
+        `${label} ... data.status (${data[0].value}) differs from where.status (${statusEntries[0]?.value})`,
+      );
     }
   }
-  if (RAW_STATUS_WRITE.test(source)) found.push('raw SQL that writes sessions.status');
+  if (RAW_STATUS_WRITE.test(clean)) found.push('raw SQL that writes sessions.status');
   return found;
+}
+
+/** The source with line and block comments removed (strings kept). */
+function stripComments(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    if (c === '"' || c === "'" || c === '`') {
+      const start = i;
+      i += 1;
+      while (i < text.length && text[i] !== c) i += text[i] === '\\' ? 2 : 1;
+      out += text.slice(start, i + 1);
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 1;
+      out += ' ';
+    } else out += c;
+  }
+  return out;
 }
 
 function isTestFile(path: string): boolean {
@@ -166,9 +229,10 @@ describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4
   it('FR-106, #208: only session-state.service.ts imports the lock core', () => {
     const importers = sources(SRC)
       .filter((f) => f.path !== LOCK_CORE)
-      .filter((f) => /['"][^'"\n]*\bsession-locks['"]/.test(f.text))
-      .map((f) => f.path);
-    expect(importers.every((p) => p === OWNER)).toBe(true);
+      .filter((f) => /['"`][^'"`\n]*\bsession-locks(?:\.[jt]s)?['"`]/.test(f.text))
+      .map((f) => f.path)
+      .filter((p) => p !== OWNER);
+    expect(importers).toEqual([]);
   });
 
   it('FR-106, #208: the same-value check accepts a re-assert and refuses a real change', () => {
@@ -184,6 +248,17 @@ describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4
       'await tx.session.updateMany({ where: { id, status: read }, data: { authEpoch: 1 } });',
       'const data = {}; await tx.session.updateMany({ where: { id, status: read }, data });',
       'await tx.$executeRaw`UPDATE sessions SET status = ${s} WHERE id = ${id}`;',
+      // Bypasses a text match would miss (reviewer): a negated or OR'd filter, comments, spreads,
+      // quoted keys, a nested relation filter.
+      'await tx.session.updateMany({ where: { id, NOT: { status: read } }, data: { status: read } });',
+      "await tx.session.updateMany({ where: { id, OR: [{ status: read }, { status: 'OPENED' }] }, data: { status: read } });",
+      'await tx.session.updateMany({ where: { id, invitation: { status: read } }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id /* status: read */ }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, // status: read\n }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, status: read }, data: { status: read, ...extra } });',
+      'await tx.session.updateMany({ where: { id, status: read, ...w }, data: { status: read } });',
+      "await tx.session.updateMany({ where: { id, status: read }, data: { status: read, 'authEpoch': 1 } });",
+      'await tx.session.updateMany({ where: { id, status: read }, data: { status: next() } });',
     ];
     for (const code of bad) expect(findNonSameValueStatusWrites(code).length).toBeGreaterThan(0);
   });
