@@ -623,7 +623,7 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
   const readOnly = ALL_MODELS.filter((m) => CANDIDATE_MODELS[m]?.kind === 'read');
   const grantOnly = ALL_MODELS.filter((m) => CANDIDATE_MODELS[m]?.kind === 'grant-only');
 
-  it('TC-008 the denied models are the 13 that are in no CS-4.3 row', () => {
+  it('TC-008 the denied models are the 14 that are in no CS-4.3 row', () => {
     expect([...denied].sort()).toEqual(
       [
         'User',
@@ -639,6 +639,7 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
         'Appeal',
         'WebhookEndpoint',
         'WebhookDelivery',
+        'ScheduledWindow', // C-53: staff and the SCHEDULE_CAPACITY system read only
       ].sort(),
     );
   });
