@@ -546,5 +546,8 @@ function liveExtras(appEnv: string): Record<string, string> {
     WEB_ORIGIN: 'https://app.example.com',
     TRUST_PROXY_HOPS: '1',
     REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+    // Object storage (BE-09) is required in pilot and production.
+    S3_REGION: 'eu-west-2',
+    S3_MEDIA_BUCKET: 'cp-pilot-media',
   };
 }

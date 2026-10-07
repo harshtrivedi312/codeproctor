@@ -178,15 +178,16 @@ export const envSchema = z
     // 503 STORAGE_UNCONFIGURED. The two credentials are secrets (never log); both or neither (AWS
     // may use the instance role).
     // Empty for AWS S3; https://<account>.r2.cloudflarestorage.com for R2.
-    S3_ENDPOINT: z.url().optional(),
+    // An empty value (a copied .env template line such as `S3_REGION=`) counts as unset, like the
+    // SES settings above (DL-52): the live-environment checks below still require real values.
+    S3_ENDPOINT: emptyAsUnset(z.url()),
     // The AWS region, or `auto` for R2.
-    S3_REGION: z.string().min(1).optional(),
-    S3_MEDIA_BUCKET: z
-      .string()
-      .regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a valid bucket name')
-      .optional(),
-    S3_ACCESS_KEY_ID: z.string().min(1).optional(),
-    S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+    S3_REGION: emptyAsUnset(z.string().min(1)),
+    S3_MEDIA_BUCKET: emptyAsUnset(
+      z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a valid bucket name'),
+    ),
+    S3_ACCESS_KEY_ID: emptyAsUnset(z.string().min(1)),
+    S3_SECRET_ACCESS_KEY: emptyAsUnset(z.string().min(1)),
     S3_FORCE_PATH_STYLE: z
       .enum(['true', 'false'])
       .default('false')
