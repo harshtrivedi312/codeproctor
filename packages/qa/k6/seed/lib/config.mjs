@@ -85,6 +85,25 @@ export function checkStorageUrl(url, storageAllowedText, apiIsLocal) {
   return host;
 }
 
+// An invalid SEED_INVITE_LINK_REGEX is a configuration error, caught by --dry-run too.
+function linkReChecked(re) {
+  if (re === undefined) return undefined;
+  try {
+    new RegExp(re);
+  } catch {
+    throw new Error('SEED_INVITE_LINK_REGEX is not a valid regular expression.');
+  }
+  return re;
+}
+
+// Staff credentials, OTPs and bearer tokens travel on these URLs: a non-local host must use https.
+function requireHttps(url, host, what) {
+  if (LOCAL_HOSTS.includes(host)) return;
+  if (!url.toLowerCase().startsWith('https://')) {
+    throw new Error(`${what} must use https:// for a host that is not local.`);
+  }
+}
+
 // Validates and normalises. Throws Error with a message that never contains a secret value.
 export function loadConfig(argv, env) {
   const args = parseArgs(argv);
@@ -106,7 +125,10 @@ export function loadConfig(argv, env) {
 
   const apiBase = (need('API_BASE_URL') ?? '').replace(/\/+$/, '');
   let host = null;
-  if (apiBase) host = checkTarget(apiBase, env.ALLOWED_HOSTS); // same guard as the k6 scripts
+  if (apiBase) {
+    host = checkTarget(apiBase, env.ALLOWED_HOSTS); // same guard as the k6 scripts
+    requireHttps(apiBase, host, 'API_BASE_URL');
+  }
   need('SEED_STAFF_EMAIL');
   need('SEED_STAFF_PASSWORD');
   const orgName = need('SEED_ORG_NAME');
@@ -121,7 +143,10 @@ export function loadConfig(argv, env) {
   let mailUrl = null;
   if (!cleanup) {
     mailUrl = (need('SEED_MAIL_URL') ?? '').replace(/\/+$/, '');
-    if (mailUrl) checkTarget(mailUrl, env.ALLOWED_HOSTS); // the mail sink holds tokens: same guard
+    if (mailUrl) {
+      // the mail sink holds tokens: same guard, and https off the local machine
+      requireHttps(mailUrl, checkTarget(mailUrl, env.ALLOWED_HOSTS), 'SEED_MAIL_URL');
+    }
   }
   const domain = assertSyntheticDomain(env.SEED_EMAIL_DOMAIN || 'example.test');
   if (env.SEED_STAFF_TOTP_SECRET !== undefined && env.SEED_STAFF_TOTP_SECRET === '') {
@@ -170,7 +195,7 @@ export function loadConfig(argv, env) {
     orgName,
     testId,
     mailUrl,
-    linkRe: env.SEED_INVITE_LINK_REGEX,
+    linkRe: linkReChecked(env.SEED_INVITE_LINK_REGEX),
     domain,
     count,
     runId,

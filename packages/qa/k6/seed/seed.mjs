@@ -3,8 +3,9 @@
 // Public API only; no database access; staging with synthetic data only (ADR 0009).
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { loadConfig, USAGE } from './lib/config.mjs';
+import { loadConfig, assertSafeOutPath, USAGE } from './lib/config.mjs';
 import { createClient } from './lib/http.mjs';
 import { createStaff } from './lib/staff.mjs';
 import { createMailpitSource } from './lib/mail.mjs';
@@ -20,10 +21,15 @@ async function writeSecure(file, data, { force = false } = {}) {
       'The output file already exists; use --force to replace it, or pick another path.',
     );
   }
-  const tmp = `${file}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, data, { flag: 'w', mode: 0o600 });
-  await fs.chmod(tmp, 0o600);
-  await fs.rename(tmp, file);
+  // 'wx' with a random suffix: an existing path (a planted symlink) is never followed or reused.
+  const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    await fs.writeFile(tmp, data, { flag: 'wx', mode: 0o600 });
+    await fs.rename(tmp, file);
+  } catch (e) {
+    await fs.rm(tmp, { force: true });
+    throw e;
+  }
 }
 
 function plan(cfg, runId) {
@@ -112,6 +118,16 @@ async function seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sle
     throw new Error(
       'The output file already exists; use --force to replace it, or pick another path.',
     );
+  }
+  // A failed run leaves a manifest but no sessions file: do not overwrite the ids of candidates
+  // that still exist (TC-094 needs them for --cleanup).
+  if (cfg.manifest && existsSync(cfg.manifest) && !cfg.force) {
+    const prior = JSON.parse(await fs.readFile(cfg.manifest, 'utf8').catch(() => '{}'));
+    if (prior.cleaned !== true) {
+      throw new Error(
+        'A manifest from an earlier run exists and was not cleaned up; run --cleanup for it first, or use --force.',
+      );
+    }
   }
   await staff.login();
   const mail = createMailpitSource({ client: http(cfg.mailUrl), linkRe: cfg.linkRe, sleep });
@@ -224,8 +240,10 @@ async function cleanup({ cfg, staff, runId, say, log }) {
   }
   manifest.cleaned = failed.length === 0;
   await writeSecure(cfg.manifest, JSON.stringify(manifest, null, 2), { force: true });
-  if (failed.length === 0 && manifest.sessionsFile)
-    await fs.rm(manifest.sessionsFile, { force: true });
+  if (failed.length === 0 && manifest.sessionsFile) {
+    // The path comes from a file on disk: it must pass the same rules as --out before it is removed.
+    await fs.rm(assertSafeOutPath(manifest.sessionsFile), { force: true });
+  }
   say(`run id: ${runId}`);
   say(`erasure requested: ${removed}, already gone: ${already}, failed: ${failed.length}`);
   if (failed.length) {

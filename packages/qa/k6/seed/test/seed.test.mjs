@@ -1,5 +1,5 @@
 // Run with: node --test packages/qa/k6/seed/test/seed.test.mjs
-// Tests the seeder against mock/mock-api.mjs (the ASSUMED routes of lib/routes.mjs). No staging,
+// Tests the seeder against mock/mock-api.mjs (which mirrors the real candidate routes; the staff invitation body and erasure are still ASSUMED). No staging,
 // no k6, no network beyond 127.0.0.1. Names carry the TC IDs the seeded sessions serve.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -173,7 +173,8 @@ test('TC-090 seed: system check and room scan not on main stop the seed with a n
     assert.ok(!fs.existsSync(path.join(dir, 'sessions.json')));
     AVAILABLE.systemCheck = true;
     AVAILABLE.roomScan = false;
-    const r2 = await run(['--count', '1'], envFor(m, dir));
+    // --force: the first run left an uncleaned manifest in this directory
+    const r2 = await run(['--count', '1', '--force'], envFor(m, dir));
     assert.equal(r2.code, 1);
     assert.match(r2.err, /room scan upload: not available on main yet/);
     assert.ok(!m.st.requests.some((q) => q.key.endsWith('/media/presign')));
@@ -575,6 +576,78 @@ test('TC-090 seed: --identity stops with a named error while the identity route 
     assert.equal(r.code, 1);
     assert.match(r.err, /identity step: not available on main yet/);
     assert.ok(!fs.existsSync(path.join(dir, 'sessions.json')));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: a non-local host must use https for the API and the mail sink (credentials, OTPs, tokens)', () => {
+  const base = {
+    ALLOWED_HOSTS: 'staging.example.com',
+    SEED_STAFF_EMAIL: 'a@example.test',
+    SEED_STAFF_PASSWORD: 'x',
+    SEED_ORG_NAME: 'Synthetic Org',
+    SEED_TEST_ID: '11111111-1111-4111-8111-111111111111',
+    SEED_MAIL_URL: 'https://staging.example.com',
+    SEED_OUT: '/var/tmp/s.json',
+  };
+  assert.throws(
+    () => loadConfig([], { ...base, API_BASE_URL: 'http://staging.example.com/api/v1' }),
+    /API_BASE_URL must use https/,
+  );
+  assert.throws(
+    () =>
+      loadConfig([], {
+        ...base,
+        API_BASE_URL: 'https://staging.example.com/api/v1',
+        SEED_MAIL_URL: 'http://staging.example.com',
+      }),
+    /SEED_MAIL_URL must use https/,
+  );
+  assert.doesNotThrow(() =>
+    loadConfig([], { ...base, API_BASE_URL: 'https://staging.example.com/api/v1' }),
+  );
+});
+
+test('TC-090 seed: an invalid SEED_INVITE_LINK_REGEX is caught by the configuration, not mid-run', () => {
+  const env = {
+    API_BASE_URL: 'http://127.0.0.1:9',
+    ALLOWED_HOSTS: '',
+    SEED_INVITE_LINK_REGEX: '(',
+  };
+  assert.throws(() => loadConfig(['--dry-run'], env), /not a valid regular expression/);
+});
+
+test('TC-094 seed: a new run will not overwrite the manifest of an earlier run that was not cleaned up', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    fs.rmSync(env.SEED_OUT); // the sessions file is gone, the manifest (and its candidates) remain
+    const before = fs.readFileSync(`${env.SEED_OUT}.manifest.json`, 'utf8');
+    const again = await run(['--count', '1'], env);
+    assert.equal(again.code, 1);
+    assert.match(again.err, /manifest from an earlier run exists/);
+    assert.equal(fs.readFileSync(`${env.SEED_OUT}.manifest.json`, 'utf8'), before);
+    const forced = await run(['--count', '1', '--force'], env);
+    assert.equal(forced.code, 0, forced.all);
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-105 seed: --stop-at OPENED never calls consent and records the OPENED state', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const r = await run(['--count', '1', '--stop-at', 'OPENED'], env);
+    assert.equal(r.code, 0, r.all);
+    const [e] = JSON.parse(fs.readFileSync(env.SEED_OUT, 'utf8'));
+    assert.equal(e.state, 'OPENED');
+    assert.ok(!m.st.requests.some((q) => q.key.includes('/consent')));
   } finally {
     await m.close();
   }

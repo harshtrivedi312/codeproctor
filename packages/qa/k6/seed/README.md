@@ -8,15 +8,15 @@ Owner: QA B (ops). Creates fresh synthetic candidates, invitations and candidate
 
 Per candidate (all through the API, nothing in the database):
 
-| Step                                                                                                                                    | State after                               | Source                                                 |
-| --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------ |
-| `POST /tests/:id/invitations` with a synthetic name, a `@example.test` email and the identity waiver                                    | INVITED                                   | FSD section 4; waiver: C-19, C-25, ADR 0015 (Proposed) |
-| Read the link token from the mail sink, `POST /candidate/session/otp`, read the OTP from the mail sink, `POST /candidate/session/start` | OPENED                                    | FR-106, FR-303, ADR 0003                               |
-| `GET /candidate/session/consent`, `POST /candidate/session/consent/sign` with the typed synthetic name and the 18+ confirmation         | CONSENTED                                 | FR-401, C-07, C-30; a fresh signature per session      |
-| `POST /candidate/session/system-check` with a clean synthetic report                                                                    | CONSENTED                                 | ADR 0013 5.4                                           |
-| Identity: nothing to do, waived by the invitation. No ID image, no selfie, no face anywhere                                             | (waived)                                  | C-25, ADR 0015                                         |
-| Room scan: presign, `PUT` of one tiny labeled placeholder chunk (not a video), confirm                                                  | `verify-session` job moves it to VERIFIED | FR-404, ADR 0013 5.5 and the CONSENTED to VERIFIED job |
-| Start test, polled while it answers 409 (VERIFIED not yet reached)                                                                      | IN_PROGRESS                               | ADR 0013 ("the start-test call")                       |
+| Step                                                                                                                                                                                    | State after                               | Source                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------ |
+| `POST /tests/:id/invitations` with a synthetic name, a `@example.test` email and the identity waiver                                                                                    | INVITED                                   | FSD section 4; waiver: C-19, C-25, ADR 0015 (Proposed) |
+| Read the link token from the mail sink, `POST /candidate/session/link` (sends nothing), `POST /candidate/session/otp`, read the OTP from the mail sink, `POST /candidate/session/start` | OPENED                                    | FR-106, FR-303, ADR 0003                               |
+| `GET /candidate/session/consent`, `POST /candidate/session/consent/sign` with the typed synthetic name and the 18+ confirmation                                                         | CONSENTED                                 | FR-401, C-07, C-30; a fresh signature per session      |
+| `POST /candidate/session/system-check` with a clean synthetic report                                                                                                                    | CONSENTED                                 | ADR 0013 5.4                                           |
+| Identity: nothing to do, waived by the invitation. No ID image, no selfie, no face anywhere                                                                                             | (waived)                                  | C-25, ADR 0015                                         |
+| Room scan: presign, `PUT` of one tiny labeled placeholder chunk (not a video), confirm                                                                                                  | `verify-session` job moves it to VERIFIED | FR-404, ADR 0013 5.5 and the CONSENTED to VERIFIED job |
+| Start test, polled while it answers 409 (VERIFIED not yet reached)                                                                                                                      | IN_PROGRESS                               | ADR 0013 ("the start-test call")                       |
 
 It then **does not call `POST /candidate/session/proctor-key`**. That route answers 409 `KEY_ALREADY_ISSUED` the second time for an epoch (ADR 0013 section 4), so the k6 script must make the one call. The sessions file therefore has no `keyB64`.
 
@@ -26,7 +26,6 @@ Output entry per session (extra keys are ignored by k6):
 {
   "token": "...",
   "sessionQuestionId": "<uuid>",
-  "questionId": "<uuid>",
   "seedRunId": "k6seed-...",
   "tokenExpiresAt": "<iso, if the API returns it>"
 }
@@ -54,15 +53,15 @@ node packages/qa/k6/seed/seed.mjs --cleanup --run-id k6seed-<14 digits>-<6 hex> 
 
 Switches (argv carries nothing secret; any other argument is refused without echoing it):
 
-| Switch                                    | Meaning                                                                                                                                                                                                                                       |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--count N` / `SEED_COUNT`                | Candidates, 1 to 1000, default 200 (TC-090); use 50 for TC-091                                                                                                                                                                                |
-| `--out FILE` / `SEED_OUT`                 | Sessions file, absolute path, written with mode 0600 (temp file, then rename). Refused if it exists unless `--force`                                                                                                                          |
-| `--stop-at STATE`                         | End each candidate after OPENED, CONSENTED or IN_PROGRESS (default). `CONSENTED` is for TC-105: the capacity script starts the later steps itself. The sessions file then holds `token`, `state`, `tokenExpiresAt` and no `sessionQuestionId` |
-| `--identity`                              | Run the identity step with generated synthetic assets. Fails with a named "not available on main yet" error until that route exists; cannot be combined with `--stop-at`                                                                      |
-| `--dry-run`                               | Validates the configuration (including the host guard) and prints the plan. No request is sent, nothing is written. Exit 2 if configuration is missing                                                                                        |
-| `--allow-partial`                         | If some candidates fail, still write the ones that worked (exit stays 1). Default: write nothing and tell you to clean up                                                                                                                     |
-| `--cleanup --run-id ID [--manifest FILE]` | Erase what that run created (below)                                                                                                                                                                                                           |
+| Switch                                    | Meaning                                                                                                                                                                                                                                                    |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--count N` / `SEED_COUNT`                | Candidates, 1 to 1000, default 200 (TC-090); use 50 for TC-091                                                                                                                                                                                             |
+| `--out FILE` / `SEED_OUT`                 | Sessions file, absolute path, written with mode 0600 (temp file, then rename). Refused if it exists unless `--force`                                                                                                                                       |
+| `--stop-at STATE`                         | End each candidate after OPENED, CONSENTED or IN_PROGRESS (default). `CONSENTED` is for TC-105: the capacity script starts the later steps itself. The sessions file then holds `token`, `state`, `seedRunId`, `tokenExpiresAt` and no `sessionQuestionId` |
+| `--identity`                              | Run the identity step with generated synthetic assets. Fails with a named "not available on main yet" error until that route exists; cannot be combined with `--stop-at`                                                                                   |
+| `--dry-run`                               | Validates the configuration (including the host guard) and prints the plan. No request is sent, nothing is written. Exit 2 if configuration is missing                                                                                                     |
+| `--allow-partial`                         | If some candidates fail, still write the ones that worked (exit stays 1). Default: write nothing and tell you to clean up                                                                                                                                  |
+| `--cleanup --run-id ID [--manifest FILE]` | Erase what that run created (below)                                                                                                                                                                                                                        |
 
 ## Environment
 
@@ -87,10 +86,12 @@ Switches (argv carries nothing secret; any other argument is refused without ech
 
 - **Staging only (ADR 0009).** No database access, no database credentials. The staff password and TOTP secret exist only in the environment of the process and are never written, printed or put in an error. Run it from your own shell or a CI job with the secrets mapped to environment variables.
 - **Host guard** before any request, in the same code as the k6 scripts. Not allow-listed, prod, production, pilot, userinfo tricks: exit 2, nothing sent.
+- **https off the local machine.** `API_BASE_URL` and `SEED_MAIL_URL` must be `https://` unless the host is local (127.0.0.1, localhost): staff credentials, OTPs and bearer tokens never travel in cleartext. Exit 2, nothing sent.
+- **Files are written safely.** Temp files use a random name and exclusive create (a planted symlink is never followed). A new run refuses to overwrite the manifest of an earlier run that was not cleaned up (use `--cleanup` first, or `--force`). `--cleanup` removes the sessions file only if its path passes the same rules as `--out`.
 - **Synthetic only.** Names `K6SEED <run> NNN`, emails `<run id>-NNN@example.test`. No face, no ID. The room-scan chunk is a repeated ASCII label ("CODEPROCTOR-SYNTHETIC-K6SEED-PLACEHOLDER-NOT-A-VIDEO"), not a video.
 - **Output hygiene.** Everything printed goes through `lib/redact.mjs` (URLs whole, bearer tokens, JWTs, long opaque strings, six-digit codes, known secret values). Errors state the step, the HTTP status and the problem `code` only, never a body. Redirects are never followed.
 - **Files.** The sessions file (bearer tokens) must be outside the repo, or one of the git-ignored patterns under `packages/qa/k6` (`sessions*.json`, `.local/`). Mode 0600. The manifest holds ids only (candidate, invitation and session ids, run id), also 0600, written after every invitation so a crashed run can still be cleaned up.
-- **Polite.** One global request-rate limit; 429 and 503 honour `Retry-After` (capped at 30 s) with backoff and jitter; 502/504/network errors are retried only for GET and PUT. Non-repeatable POSTs are never replayed after an unclear failure.
+- **Polite.** One global request-rate limit; 429 and 503 honour `Retry-After` (capped at 30 s) with backoff and jitter; 502/504/network errors are retried only for GET and PUT (and for the `link` POST, which sends nothing). Non-repeatable POSTs are never replayed after an unclear failure.
 
 ## Cleanup and idempotency (TC-094)
 
@@ -118,7 +119,7 @@ Room-scan note: BE-12 ingest may try to probe or transcode the placeholder chunk
 ## Tests
 
 ```sh
-node --test packages/qa/k6/seed/test/seed.test.mjs   # 26 tests, local mock only, no network beyond 127.0.0.1
+node --test packages/qa/k6/seed/test/seed.test.mjs   # 30 tests, local mock only, no network beyond 127.0.0.1
 ```
 
 `mock/mock-api.mjs` is the stand-in (staff login with optional TOTP, invitations, a Mailpit-style sink, OTP, consent, system check, room scan with a presigned PUT, start-test with a delay before VERIFIED, proctor-key once-only, erasure, fault injection for 429/503/500). It is not the product.

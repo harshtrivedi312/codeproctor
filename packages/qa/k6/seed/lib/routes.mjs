@@ -6,8 +6,8 @@
 // AVAILABLE says which candidate steps exist on main; a step that is not available fails the seed
 // with a named "not available on main yet" error instead of guessing a route.
 export const ROUTES = {
-  login: '/auth/login', // DOC fsd 4; body { email, password } -> { status, session?, challengeToken? }
-  verify2fa: '/auth/2fa/verify', // DOC; body { challengeToken, code } -> { accessToken, user }
+  login: '/auth/login', // REAL (apps/api/src/auth); body { email, password } -> { status, session?, challengeToken? }
+  verify2fa: '/auth/2fa/verify', // REAL; body { challengeToken, code } -> { accessToken, user }
   invite: (testId) => `/tests/${testId}/invitations`, // DOC path; ASSUMED single-invite body below
   erase: (candidateId) => `/candidates/${candidateId}/erasure`, // ASSUMED (TC-094, ADR 0004 R-6: no route in fsd 4)
   // REAL, public, no token. Body { invitationToken } -> 200 { state, ... }; sends nothing (TC-021).
