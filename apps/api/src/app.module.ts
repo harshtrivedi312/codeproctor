@@ -12,8 +12,11 @@ import type { Env } from './config/env';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CandidateModule } from './candidate/candidate.module';
+import { GradingModule } from './grading/grading.module';
+import { SubmissionsModule } from './submissions/submissions.module';
 import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
+import { ReviewModule } from './review/review.module';
 import { TestsModule } from './tests/tests.module';
 import { QuestionsModule } from './questions/questions.module';
 import { JwtAuthGuard } from './common/auth/jwt-auth.guard';
@@ -123,9 +126,12 @@ function areaOf(context: ExecutionContext): Area {
     AuditModule,
     AuthModule,
     CandidateModule,
+    SubmissionsModule,
+    GradingModule,
     UsersModule,
     OrgSettingsModule,
     TestsModule,
+    ReviewModule,
     QuestionsModule,
     HealthModule,
     ClientErrorsModule,
