@@ -11,6 +11,10 @@ import {
   TIER_FAILURE_ALERT_DAYS,
   ERASURE_AUDIT_ACTIONS,
   ERASURE_RERUN_BASE_SECONDS,
+  FENCE_POLL_FAST_SECONDS,
+  FENCE_POLL_FAST_WINDOW_SECONDS,
+  FENCE_POLL_SLOW_SECONDS,
+  FENCE_POLL_WINDOW_SECONDS,
   STORAGE_SWEEP_MARGIN_SECONDS,
   sessionPrefix,
 } from '../retention.constants';
@@ -132,6 +136,7 @@ export class ErasureService {
     }
 
     let heldAny = false;
+    let requested = 0;
     for (const s of sessions) {
       if (s.status === 'ERASED') continue;
       const wouldHold =
@@ -140,22 +145,36 @@ export class ErasureService {
         heldAny = true;
         continue;
       }
-      const result = await this.fence.fence({ orgId, sessionId: s.id, closeOpenAppeal: !hold });
-      if (result === 'held') {
-        heldAny = true;
-        continue;
-      }
-      if (result === 'fenced') {
-        // Record the fence time first: completion waits for it, even if the next call fails.
-        const fencedAt = await inOrg(() =>
-          this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
-        );
-        await this.scheduler.scheduleRerun({
+      // Only a request: the fence runs as a SERVICE session job and decides under the session lock
+      // (a session that became held in the meantime stays as it is). The status is read back below.
+      await this.fence.requestFence({
+        orgId,
+        sessionId: s.id,
+        closeOpenAppeal: !hold,
+        requestedAt: current(),
+      });
+      requested += 1;
+    }
+    if (requested > 0) {
+      // Look again once the job has had time to run. This is a look-again, NOT a fence time: the fence
+      // time is recorded below the first time a session is READ as ERASED. The polls are bounded by the
+      // age of the erasure request (see FENCE_POLL_*); the daily sweep is the retry after that.
+      // Measured from the later of the request and the close of the last hold: a request whose hold closed
+      // weeks later still gets its fast polls (the same base as the C-06 deadline).
+      const closed = await inOrg(() => this.repo.holdClosedAt(candidateId));
+      const base = closed !== null && closed > requestedAt ? closed : requestedAt;
+      const nowAt = current();
+      const ageSeconds = (nowAt.getTime() - base.getTime()) / 1000;
+      if (ageSeconds < FENCE_POLL_WINDOW_SECONDS) {
+        const after =
+          ageSeconds < FENCE_POLL_FAST_WINDOW_SECONDS
+            ? FENCE_POLL_FAST_SECONDS
+            : FENCE_POLL_SLOW_SECONDS;
+        await this.scheduler.scheduleFencePoll({
           orgId,
           candidateId,
           requestId,
-          fencedAt,
-          runAt: new Date(fencedAt.getTime() + SETTLE_MS),
+          runAt: new Date(nowAt.getTime() + after * 1000),
         });
       }
     }

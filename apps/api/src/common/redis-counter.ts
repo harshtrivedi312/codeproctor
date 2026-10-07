@@ -42,3 +42,23 @@ export async function hitWindowCounter(
   }
   return { count, ttlSeconds };
 }
+
+// KEYS[1] counter. Gives one hit back, never below zero, and never creates the key.
+export const WINDOW_REFUND_SCRIPT = `
+local v = tonumber(redis.call('GET', KEYS[1]))
+if v and v > 0 then return redis.call('DECR', KEYS[1]) end
+return 0`;
+
+/**
+ * Gives back one hit of a window counter (a slot taken for an attempt that failed for a reason
+ * the caller could not control, such as database lock contention, DL-37). Best effort: a Redis
+ * failure is swallowed so it never masks the error being propagated. Never use it on a counter
+ * that records a failed authentication.
+ */
+export async function refundWindowCounter(redis: Redis, key: string): Promise<void> {
+  try {
+    await redis.eval(WINDOW_REFUND_SCRIPT, 1, key);
+  } catch {
+    // The slot stays taken until the window ends; the original error is what matters.
+  }
+}
