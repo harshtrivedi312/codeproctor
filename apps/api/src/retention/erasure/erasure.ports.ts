@@ -21,14 +21,18 @@ import { Injectable } from '@nestjs/common';
  */
 export abstract class SessionFencePort {
   /**
-   * Enqueues the fence job for one session. Idempotent (the job id is fixed per session, so a second
-   * request while one is queued or running is a no-op). Resolves once the job is queued, not when it has
-   * run. Never throws a value.
+   * Enqueues the fence job for one session. The job id is `erasure-fence_{sessionId}_{epoch seconds of
+   * requestedAt}`: two requests in the same second collapse into one, and a FINISHED or FAILED job
+   * never blocks a later request (BullMQ keeps a finished job's id until it is removed, so a fixed id
+   * per session would turn a request after a closed hold into a no-op). The job should also set
+   * `removeOnComplete` and `removeOnFail`. Resolves once the job is queued, not when it has run. Never
+   * throws a value.
    */
   abstract requestFence(args: {
     orgId: string;
     sessionId: string;
     closeOpenAppeal: boolean;
+    requestedAt: Date;
   }): Promise<void>;
 }
 
@@ -45,6 +49,17 @@ export abstract class ErasureSchedulerPort {
     candidateId: string;
     requestId: string;
     fencedAt: Date;
+    runAt: Date;
+  }): Promise<void>;
+  /**
+   * A short delayed look-again after a fence was REQUESTED (not a fence time): a job with the id
+   * `erasure-fence-poll_{requestId}_{epoch seconds of runAt}` that calls `ErasureService.run`. The
+   * service stops asking once the request is older than an hour; the daily sweep covers the rest.
+   */
+  abstract scheduleFencePoll(args: {
+    orgId: string;
+    candidateId: string;
+    requestId: string;
     runAt: Date;
   }): Promise<void>;
 }
@@ -101,6 +116,9 @@ export class UnconfiguredSessionFence extends SessionFencePort {
 @Injectable()
 export class UnconfiguredErasureScheduler extends ErasureSchedulerPort {
   scheduleRerun(): Promise<void> {
+    return Promise.reject(new Error('erasure scheduler is not configured'));
+  }
+  scheduleFencePoll(): Promise<void> {
     return Promise.reject(new Error('erasure scheduler is not configured'));
   }
 }

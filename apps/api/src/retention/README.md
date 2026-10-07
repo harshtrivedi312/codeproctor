@@ -76,7 +76,7 @@ through a single-flight job. Tests use `../test/retention/in-memory-object-store
    1b. Before anything is fenced or deleted, `ErasureListPort.append` records the candidate on the erasure list that survives restores (a failure stops the run); `complete` follows when every session is settled and the candidate is anonymised, and a failure is retried by the sweep.
 2. Request the fence for each other session through `SessionFencePort.requestFence` (a SERVICE session job
    that Backend B builds; it decides under the session lock, so a session that turned held stays as it is;
-   retention never writes `sessions.status`), and schedule a look-again re-run. The service reads the status
+   retention never writes `sessions.status`), and schedule a short look-again (not a fence time; bounded by the request's age, then the daily sweep retries). The fence job id carries the request time, so a finished job never blocks a later request. The service reads the status
    back: it records the fence time the first time it reads a session as ERASED and schedules the re-run after
    fence + 60 s + the storage sweep margin.
 3. For each ERASED session: delete the whole prefix with verification, then one transaction (candidate

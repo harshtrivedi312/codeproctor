@@ -28,16 +28,33 @@ import type { PrismaClient } from '../../generated/prisma/client.js';
  * runs what the job would do under the session lock (held, or ERASED with the epoch bump and the anchor).
  */
 class FakeFence extends SessionFencePort {
-  calls: Array<{ sessionId: string; closeOpenAppeal: boolean }> = [];
+  calls: Array<{ sessionId: string; closeOpenAppeal: boolean; requestedAt: Date }> = [];
+  /** When true the request is only recorded; `applyQueued()` plays the jobs later. */
+  deferred = false;
+  private queued: Array<{ sessionId: string; closeOpenAppeal: boolean }> = [];
   constructor(private readonly owner: PrismaClient) {
     super();
+  }
+  async applyQueued(): Promise<void> {
+    const jobs = this.queued;
+    this.queued = [];
+    for (const j of jobs) await this.runJob(j);
   }
   async requestFence(a: {
     orgId: string;
     sessionId: string;
     closeOpenAppeal: boolean;
+    requestedAt: Date;
   }): Promise<void> {
-    this.calls.push({ sessionId: a.sessionId, closeOpenAppeal: a.closeOpenAppeal });
+    this.calls.push({
+      sessionId: a.sessionId,
+      closeOpenAppeal: a.closeOpenAppeal,
+      requestedAt: a.requestedAt,
+    });
+    if (this.deferred) this.queued.push(a);
+    else await this.runJob(a);
+  }
+  private async runJob(a: { sessionId: string; closeOpenAppeal: boolean }): Promise<void> {
     const s = await this.owner.session.findUniqueOrThrow({ where: { id: a.sessionId } });
     if (s.status === SessionStatus.ERASED) return;
     const open = await this.owner.appeal.count({
@@ -62,8 +79,13 @@ class FakeFence extends SessionFencePort {
 }
 class FakeScheduler extends ErasureSchedulerPort {
   jobs: Date[] = [];
+  polls: Date[] = [];
   scheduleRerun(a: { runAt: Date }): Promise<void> {
     this.jobs.push(a.runAt);
+    return Promise.resolve();
+  }
+  scheduleFencePoll(a: { runAt: Date }): Promise<void> {
+    this.polls.push(a.runAt);
     return Promise.resolve();
   }
 }
@@ -728,5 +750,84 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
       where: { id: session.invitationId },
     });
     expect(JSON.stringify(stored.accommodations)).toContain('private');
+  });
+  it('TC-094 #23 C-06: a requested fence is not a fence: nothing is deleted, purged or stamped until the session is READ as ERASED, and a look-again is scheduled', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const sid = sessionIdOf(h.A);
+    const cid = await candidateOf(h.A);
+    const { svc, fence, scheduler } = service();
+    fence.deferred = true;
+    const r = await svc.requestErasure({
+      orgId: h.A.orgId,
+      candidateId: cid,
+      actorId: ACTOR(),
+      now: NOW,
+    });
+    expect(r.status).toBe('inProgress');
+    expect(fence.calls).toHaveLength(1);
+    expect((await h.owner.session.findUniqueOrThrow({ where: { id: sid } })).status).not.toBe(
+      'ERASED',
+    );
+    expect(h.store.keys.has(keys(h.A).media)).toBe(true);
+    expect(await h.owner.mediaChunk.count({ where: { sessionId: sid } })).toBeGreaterThan(0);
+    expect(
+      await h.owner.auditLog.count({ where: { entityId: sid, action: 'ERASURE_SESSION_FENCED' } }),
+    ).toBe(0);
+    expect(scheduler.polls).toHaveLength(1);
+    expect(scheduler.polls[0]!.getTime() - NOW.getTime()).toBeLessThan(60_000);
+    // The job lands later; the next run stamps the fence time at THAT read and completes only after the settle window.
+    await fence.applyQueued();
+    const readAt = at(40_000);
+    expect((await svc.run(h.A.orgId, cid, readAt)).status).toBe('inProgress');
+    const row = await h.owner.auditLog.findFirstOrThrow({
+      where: { entityId: sid, action: 'ERASURE_SESSION_FENCED' },
+    });
+    expect(Date.parse((row.metadata as { fencedAt: string }).fencedAt)).toBeGreaterThanOrEqual(
+      readAt.getTime(),
+    );
+    expect(await completedRows(cid)).toHaveLength(0);
+    expect((await svc.run(h.A.orgId, cid, at(40_000 + SETTLED))).status).toBe('completed');
+  });
+
+  it('TC-094 #24 C-06: a session the job decides to hold (it turned APPEALED after the pre-check) is never purged, and the next run delays and tells the candidate once', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const sid = sessionIdOf(h.A);
+    const cid = await candidateOf(h.A);
+    const { svc, fence, notices } = service();
+    fence.deferred = true;
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    // After the pre-check, before the job: an appeal is opened.
+    await h.owner.session.update({ where: { id: sid }, data: { status: 'APPEALED' } });
+    await h.owner.appeal.updateMany({
+      where: { sessionReview: { sessionId: sid } },
+      data: { status: 'OPEN' },
+    });
+    await fence.applyQueued(); // the job sees the hold and leaves the session alone
+    const r = await svc.run(h.A.orgId, cid, at(60_000));
+    expect(r.status).toBe('held');
+    expect(notices.delayed).toBe(1);
+    await svc.run(h.A.orgId, cid, at(120_000));
+    expect(notices.delayed).toBe(1);
+    expect(h.store.keys.has(keys(h.A).media)).toBe(true);
+    expect((await h.owner.session.findUniqueOrThrow({ where: { id: sid } })).status).toBe(
+      'APPEALED',
+    );
+  });
+
+  it('TC-094 #25: while nothing is ERASED or held a run only asks for the fence again; the polls stop once the request is older than an hour', async () => {
+    await setup(h.A, { submittedDaysAgo: 3, anchorDaysAgo: 3 });
+    const cid = await candidateOf(h.A);
+    const { svc, fence, scheduler } = service();
+    fence.deferred = true;
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    await svc.run(h.A.orgId, cid, at(30_000)); // 30 s old: fast polls
+    await svc.run(h.A.orgId, cid, at(600_000)); // 10 min old: slow polls
+    expect(fence.calls).toHaveLength(3);
+    expect(scheduler.polls).toHaveLength(3);
+    expect(scheduler.polls[2]!.getTime() - at(600_000).getTime()).toBeGreaterThanOrEqual(300_000);
+    await svc.run(h.A.orgId, cid, at(2 * 3_600_000)); // over an hour: only the daily sweep retries
+    expect(fence.calls).toHaveLength(4);
+    expect(scheduler.polls).toHaveLength(3);
+    expect(await completedRows(cid)).toHaveLength(0);
   });
 });

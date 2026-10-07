@@ -11,6 +11,10 @@ import {
   TIER_FAILURE_ALERT_DAYS,
   ERASURE_AUDIT_ACTIONS,
   ERASURE_RERUN_BASE_SECONDS,
+  FENCE_POLL_FAST_SECONDS,
+  FENCE_POLL_FAST_WINDOW_SECONDS,
+  FENCE_POLL_SLOW_SECONDS,
+  FENCE_POLL_WINDOW_SECONDS,
   STORAGE_SWEEP_MARGIN_SECONDS,
   sessionPrefix,
 } from '../retention.constants';
@@ -28,8 +32,6 @@ import {
 import { ErasureRepository, requestIdOf } from './erasure.repository';
 
 const DAY_MS = 86_400_000;
-/** A requested fence is looked at again after this long (the job normally finishes in seconds). */
-const FENCE_POLL_MS = 15_000;
 const SETTLE_MS = (ERASURE_RERUN_BASE_SECONDS + STORAGE_SWEEP_MARGIN_SECONDS) * 1000;
 
 export interface ErasureRunResult {
@@ -145,20 +147,31 @@ export class ErasureService {
       }
       // Only a request: the fence runs as a SERVICE session job and decides under the session lock
       // (a session that became held in the meantime stays as it is). The status is read back below.
-      await this.fence.requestFence({ orgId, sessionId: s.id, closeOpenAppeal: !hold });
+      await this.fence.requestFence({
+        orgId,
+        sessionId: s.id,
+        closeOpenAppeal: !hold,
+        requestedAt: current(),
+      });
       requested += 1;
     }
     if (requested > 0) {
-      // Look again once the job has had time to run; the repair in the purge loop then records the fence
-      // time (the first time the session is READ as ERASED, never earlier than the real fence) and
-      // schedules the post-margin re-run.
-      await this.scheduler.scheduleRerun({
-        orgId,
-        candidateId,
-        requestId,
-        fencedAt: current(),
-        runAt: new Date(current().getTime() + FENCE_POLL_MS),
-      });
+      // Look again once the job has had time to run. This is a look-again, NOT a fence time: the fence
+      // time is recorded below the first time a session is READ as ERASED. The polls are bounded by the
+      // age of the erasure request (see FENCE_POLL_*); the daily sweep is the retry after that.
+      const ageSeconds = (current().getTime() - requestedAt.getTime()) / 1000;
+      if (ageSeconds < FENCE_POLL_WINDOW_SECONDS) {
+        const after =
+          ageSeconds < FENCE_POLL_FAST_WINDOW_SECONDS
+            ? FENCE_POLL_FAST_SECONDS
+            : FENCE_POLL_SLOW_SECONDS;
+        await this.scheduler.scheduleFencePoll({
+          orgId,
+          candidateId,
+          requestId,
+          runAt: new Date(current().getTime() + after * 1000),
+        });
+      }
     }
     if (heldAny) {
       const key = { candidateId, requestId, action: ERASURE_AUDIT_ACTIONS.DELAY_NOTIFIED };
