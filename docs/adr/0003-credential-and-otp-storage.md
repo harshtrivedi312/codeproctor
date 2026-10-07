@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): every recommendation as proposed; amended by D-21 (no OTP lockout during a test) and D-22 (self-service password reset). See section 6. Applied to database.md; deltas in ADR 0008. |
+| Status | **Accepted** 2026-10-01 (a proposed amendment in section 7 is not in force) (D-16): every recommendation as proposed; amended by D-21 (no OTP lockout during a test) and D-22 (self-service password reset). See section 6. Applied to database.md; deltas in ADR 0008. |
 | Author | architect |
 | Decides | Q-03, Q-04, Q-05, A-11 item 1 |
 | Serves | FR-101, FR-102, FR-104, FR-106, FR-107 (added by D-22); NFR-04; TC-003, TC-005, TC-007, TC-097, TC-098 |
