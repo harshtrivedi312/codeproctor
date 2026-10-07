@@ -1094,6 +1094,82 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       }
     });
 
+    // DL-42, FU-BE-197: a pool-wait timeout carries no SQLSTATE; it is refunded like the lock errors.
+    const poolError = (): Error => new Error('timeout exceeded when trying to connect');
+
+    it('FR-101, DL-42, FU-BE-197: a right password whose session open cannot get a pool connection is 503 BUSY, keeps no failed attempt, and the retry signs in', async () => {
+      const u = await createUser();
+      const spy = startSessionSpy().mockRejectedValueOnce(poolError());
+      try {
+        const res = await login(u.email).expect(503);
+        expect(res.headers['retry-after']).toBe('2');
+        expect((res.body as { code?: string }).code).toBe('BUSY');
+        expect(await failedLogins(u.id)).toBe(0);
+        await login(u.email).expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-102, DL-42, FU-BE-197: a right TOTP code whose session open cannot get a pool connection is 503, gives the attempt back and releases the challenge', async () => {
+      const secret = 'JBSWY3DPEHPK3PXP';
+      const u = await createUser({ role: UserRole.REVIEWER, totp: secret });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      const spy = startSessionSpy().mockRejectedValueOnce(poolError());
+      try {
+        const res = await request(app.getHttpServer())
+          .post(`${API}/2fa/verify`)
+          .send({ challengeToken, code: authenticator.generate(secret) })
+          .expect(503);
+        expect((res.body as { code?: string }).code).toBe('BUSY');
+        expect(await failedLogins(u.id)).toBe(0);
+        expect(await markExists(challengeToken)).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-102, DL-42, FU-BE-197: a pool timeout thrown by the TOTP check gives the attempt back exactly once', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
+      await prisma.user.update({ where: { id: u.id }, data: { failedLogins: 2 } });
+      const { challengeToken } = (await login(u.email).expect(200)).body as Body;
+      totpVerify.mockRejectedValueOnce(poolError());
+      await verify2fa(challengeToken, '123456').expect(503);
+      expect(await failedLogins(u.id)).toBe(2);
+    });
+
+    it('FR-101, DL-42, FU-BE-197: a wrong password whose failure write hits a pool timeout is 503 and is still counted (wrong credentials are never refunded)', async () => {
+      const u = await createUser();
+      const fail = registerFailureSpy().mockRejectedValueOnce(poolError());
+      try {
+        const res = await login(u.email, 'not-the-password-at-all-1').expect(503);
+        expect((res.body as { code?: string }).code).toBe('BUSY');
+        expect(await failedLogins(u.id)).toBe(1);
+      } finally {
+        fail.mockRestore();
+      }
+    });
+
+    it('FR-101, DL-42, FU-BE-197: under pool exhaustion a wrong-password login answers the same for an existing and an unknown account', async () => {
+      const u = await createUser();
+      const comparable = (res: request.Response): unknown => {
+        const body = { ...(res.body as Record<string, unknown>), traceId: undefined };
+        const { 'retry-after': retryAfter, 'content-type': contentType } = res.headers;
+        return { status: res.status, body, retryAfter, contentType };
+      };
+      const seen: unknown[] = [];
+      for (const email of [u.email, `nobody-${Date.now()}@example.com`]) {
+        const fail = registerFailureSpy().mockRejectedValueOnce(poolError());
+        try {
+          seen.push(comparable(await login(email, 'not-the-password-at-all-1')));
+        } finally {
+          fail.mockRestore();
+        }
+      }
+      expect(seen[0]).toEqual(seen[1]);
+      expect(seen[0]).toMatchObject({ status: 503, retryAfter: '2', body: { code: 'BUSY' } });
+    });
+
     it('FR-101: a wrong password still counts as a failed attempt (never refunded)', async () => {
       const u = await createUser();
       await login(u.email, 'not-the-password-at-all-1').expect(401);
@@ -1246,6 +1322,27 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         const lines = logged.slice(from).join('');
         expect(lines).toContain('Audit write after commit failed (Error) for AUTH_ACCOUNT_LOCKED');
         expect(lines).not.toContain('secret-marker');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('FR-101, DL-42, FU-BE-197: the lockout audit hitting a pool timeout leaves the 401 answers and the lock in place (no BUSY, no 500)', async () => {
+      const u = await createUser();
+      const spy = jest
+        .spyOn(authService as unknown as { audit: () => Promise<void> }, 'audit')
+        .mockRejectedValue(new Error('timeout exceeded when trying to connect'));
+      const from = logged.length;
+      try {
+        for (let i = 0; i < 5; i++) await login(u.email, `wrong-password-${i}`).expect(401);
+        const res = await login(u.email).expect(401);
+        expect((res.body as { code?: string }).code).toBeUndefined();
+        expect(
+          (await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).lockedUntil,
+        ).not.toBeNull();
+        const lines = logged.slice(from).join('');
+        expect(lines).toContain('Audit write after commit failed (Error) for AUTH_ACCOUNT_LOCKED');
+        expect(lines).not.toContain('timeout exceeded');
       } finally {
         spy.mockRestore();
       }
