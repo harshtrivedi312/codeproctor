@@ -86,7 +86,7 @@ Switches (argv carries nothing secret; any other argument is refused without ech
 
 - **Staging only (ADR 0009).** No database access, no database credentials. The staff password and TOTP secret exist only in the environment of the process and are never written, printed or put in an error. Run it from your own shell or a CI job with the secrets mapped to environment variables.
 - **Host guard** before any request, in the same code as the k6 scripts. Not allow-listed, prod, production, pilot, userinfo tricks: exit 2, nothing sent.
-- **https off the local machine.** `API_BASE_URL` and `SEED_MAIL_URL` must be `https://` unless the host is local (127.0.0.1, localhost): staff credentials, OTPs and bearer tokens never travel in cleartext. Exit 2, nothing sent.
+- **https off the local machine.** `API_BASE_URL` and `SEED_MAIL_URL` must be `https://` unless the host is local (localhost, 127.0.0.1, host.docker.internal): staff credentials, OTPs and bearer tokens never travel in cleartext. Exit 2, nothing sent.
 - **Files are written safely.** Temp files use a random name and exclusive create (a planted symlink is never followed). A new run refuses to overwrite the manifest of an earlier run that was not cleaned up (use `--cleanup` first, or `--force`). `--cleanup` removes the sessions file only if its path passes the same rules as `--out`.
 - **Synthetic only.** Names `K6SEED <run> NNN`, emails `<run id>-NNN@example.test`. No face, no ID. The room-scan chunk is a repeated ASCII label ("CODEPROCTOR-SYNTHETIC-K6SEED-PLACEHOLDER-NOT-A-VIDEO"), not a video.
 - **Output hygiene.** Everything printed goes through `lib/redact.mjs` (URLs whole, bearer tokens, JWTs, long opaque strings, six-digit codes, known secret values). Errors state the step, the HTTP status and the problem `code` only, never a body. Redirects are never followed.
@@ -119,7 +119,7 @@ Room-scan note: BE-12 ingest may try to probe or transcode the placeholder chunk
 ## Tests
 
 ```sh
-node --test packages/qa/k6/seed/test/seed.test.mjs   # 30 tests, local mock only, no network beyond 127.0.0.1
+node --test packages/qa/k6/seed/test/seed.test.mjs   # 31 tests, local mock only, no network beyond 127.0.0.1
 ```
 
 `mock/mock-api.mjs` is the stand-in (staff login with optional TOTP, invitations, a Mailpit-style sink, OTP, consent, system check, room scan with a presigned PUT, start-test with a delay before VERIFIED, proctor-key once-only, erasure, fault injection for 429/503/500). It is not the product.

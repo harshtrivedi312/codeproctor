@@ -652,3 +652,25 @@ test('TC-105 seed: --stop-at OPENED never calls consent and records the OPENED s
     await m.close();
   }
 });
+
+test('TC-094 seed: --cleanup refuses an unsafe sessions-file path from the manifest before erasing anything', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    const mfFile = `${env.SEED_OUT}.manifest.json`;
+    const mf = JSON.parse(fs.readFileSync(mfFile, 'utf8'));
+    mf.sessionsFile = '/etc/hosts'; // a hand-edited manifest must never make cleanup remove this
+    fs.writeFileSync(mfFile, JSON.stringify(mf));
+    const before = m.st.requests.length;
+    const r = await run(['--cleanup', '--run-id', mf.runId], env);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /Failed:/);
+    assert.ok(!m.st.requests.slice(before).some((q) => q.key.includes('erasure')));
+    assert.ok(fs.existsSync('/etc/hosts'));
+  } finally {
+    await m.close();
+  }
+});

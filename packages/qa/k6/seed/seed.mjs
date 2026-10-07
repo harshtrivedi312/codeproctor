@@ -3,6 +3,7 @@
 // Public API only; no database access; staging with synthetic data only (ADR 0009).
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig, assertSafeOutPath, USAGE } from './lib/config.mjs';
@@ -122,7 +123,12 @@ async function seed({ cfg, staff, apiClient, http, runId, say, log, secrets, sle
   // A failed run leaves a manifest but no sessions file: do not overwrite the ids of candidates
   // that still exist (TC-094 needs them for --cleanup).
   if (cfg.manifest && existsSync(cfg.manifest) && !cfg.force) {
-    const prior = JSON.parse(await fs.readFile(cfg.manifest, 'utf8').catch(() => '{}'));
+    let prior;
+    try {
+      prior = JSON.parse(await fs.readFile(cfg.manifest, 'utf8'));
+    } catch {
+      throw new Error('An existing manifest cannot be read; remove it by hand or use --force.');
+    }
     if (prior.cleaned !== true) {
       throw new Error(
         'A manifest from an earlier run exists and was not cleaned up; run --cleanup for it first, or use --force.',
@@ -213,6 +219,11 @@ async function cleanup({ cfg, staff, runId, say, log }) {
   if (manifest.runId !== runId) throw new Error('The manifest belongs to a different run id.');
   if (manifest.orgName !== cfg.orgName)
     throw new Error('The manifest belongs to a different organisation.');
+  // Refuse an unsafe sessions-file path now, before any erasure, not after the manifest says cleaned.
+  const sessionsFile = manifest.sessionsFile ? assertSafeOutPath(manifest.sessionsFile) : null;
+  if (sessionsFile && cfg.out && path.resolve(cfg.out) !== sessionsFile) {
+    throw new Error('The manifest names a different sessions file than SEED_OUT.');
+  }
   await staff.login();
   let removed = 0;
   let already = 0;
@@ -240,10 +251,7 @@ async function cleanup({ cfg, staff, runId, say, log }) {
   }
   manifest.cleaned = failed.length === 0;
   await writeSecure(cfg.manifest, JSON.stringify(manifest, null, 2), { force: true });
-  if (failed.length === 0 && manifest.sessionsFile) {
-    // The path comes from a file on disk: it must pass the same rules as --out before it is removed.
-    await fs.rm(assertSafeOutPath(manifest.sessionsFile), { force: true });
-  }
+  if (failed.length === 0 && sessionsFile) await fs.rm(sessionsFile, { force: true });
   say(`run id: ${runId}`);
   say(`erasure requested: ${removed}, already gone: ${already}, failed: ${failed.length}`);
   if (failed.length) {
