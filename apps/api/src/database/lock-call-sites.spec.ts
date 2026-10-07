@@ -718,6 +718,8 @@ export class S {
     ],
     ['process.getBuiltinModule', "const m: unknown = process.getBuiltinModule('module');"],
     ['an import of node:vm', "import { runInThisContext } from 'node:vm';"],
+    ['an import of vm', "import { runInThisContext } from 'vm';"],
+    ['an import of node:module alone', "import * as m from 'node:module';"],
     ['an import of module', "import * as m from 'module';"],
     ['an escaped specifier', "import * as core from '../database/session\\u002dlocks';"],
   ])(

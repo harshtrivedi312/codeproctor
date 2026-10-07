@@ -123,7 +123,9 @@ const NON_SOURCE_EXTENSIONS = ['.md'] as const;
 
 function isTestFile(path: string): boolean {
   return (
-    /\.(spec|e2e-spec)\.(ts|mts|cts|js|mjs|cjs)$/.test(path) ||
+    // SF-1 of review r6 of #208: only `.spec.ts` and `.e2e-spec.ts` are tests (jest.config.js runs those, and
+    // tsconfig.build.json leaves only those out of dist), so a `*.spec.cts` or `*.spec.mjs` is scanned as source.
+    /\.(spec|e2e-spec)\.ts$/.test(path) ||
     path.startsWith('test/') ||
     path.startsWith('database/testing/') ||
     path.startsWith('generated/')
@@ -173,11 +175,13 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(unknown).toEqual([]);
   });
 
-  it('TC-008 the extension rules: .ts .mts .cts .js .mjs .cjs are scanned (a spec of any of them is not), .tsx and the rest are unknown', () => {
+  it('TC-008 the extension rules: .ts .mts .cts .js .mjs .cjs are scanned (only a .ts spec is a test: SF-1 of review r6 of #208), .tsx and the rest are unknown', () => {
     for (const ext of ['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs']) {
       expect(SCANNED_EXTENSIONS as readonly string[]).toContain(ext);
-      expect(isTestFile(`x/a.spec${ext}`)).toBe(true);
-      expect(isTestFile(`x/a.e2e-spec${ext}`)).toBe(true);
+      // Jest runs only .spec.ts and .e2e-spec.ts, and the build leaves only those out of dist, so a spec of any
+      // other extension ships as code and is scanned like source.
+      expect(isTestFile(`x/a.spec${ext}`)).toBe(ext === '.ts');
+      expect(isTestFile(`x/a.e2e-spec${ext}`)).toBe(ext === '.ts');
       expect(isTestFile(`x/a${ext}`)).toBe(false);
     }
     for (const ext of ['.tsx', '.jsx', '.vue', '.coffee', '.json']) {

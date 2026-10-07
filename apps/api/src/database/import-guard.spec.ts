@@ -100,7 +100,9 @@ const SOURCE_EXTENSIONS = /\.(ts|mts|cts|js|mjs|cjs)$/;
 
 function isTestFile(path: string): boolean {
   return (
-    /\.(spec|e2e-spec)\.(ts|mts|cts|js|mjs|cjs)$/.test(path) ||
+    // SF-1 of review r6 of #208: only `.spec.ts` and `.e2e-spec.ts` are tests (jest.config.js runs those, and
+    // tsconfig.build.json leaves only those out of dist), so a `*.spec.cts` or `*.spec.mjs` is scanned as source.
+    /\.(spec|e2e-spec)\.ts$/.test(path) ||
     path.startsWith('test/') ||
     path.startsWith('database/testing/') ||
     path.startsWith('generated/')
