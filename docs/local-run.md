@@ -107,6 +107,12 @@ The password of every staff account is the development password in `prisma/seed/
 (`DEMO_PASSWORD`, currently `ChangeMe!2026`). It exists only in the development seed; staging, pilot
 and production never use it, and the seed refuses to run anywhere but a local development database.
 
+The demo invitation (`demo-invite.mjs`) is Avery Stone's, on the **Backend Engineer Screen**, which uses the
+**STANDARD** proctoring profile (the other test, the Senior Engineer Screen, is STRICT and is not used for
+the demo). That test has 60 minutes in two sections: four coding questions (Parcel Surcharge, Sensor Burst
+Count, Steady Stretch, Stock Rebalancing, each with 3 sample tests shown to the candidate and 8 hidden
+tests), one multiple-choice and one short-answer question, so runs and submits have something to show.
+
 Also seeded: 8 questions (coding, multiple choice, short answer; all published), 2 tests (Backend
 Engineer Screen, Senior Engineer Screen), 7 invitations with their sessions in different states
 (invited, consented, expired, declined, completed, one under review), consents, identity checks,
