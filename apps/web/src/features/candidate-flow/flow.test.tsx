@@ -15,6 +15,7 @@ import {
   renderWithQuery,
   startAtStepper,
   setupCandidateServer,
+  storedKeys,
 } from './test-helpers';
 import { fireEvent } from '@testing-library/react';
 
@@ -69,7 +70,7 @@ function open(token: string) {
 }
 
 describe('stepper end to end (FR-401 to FR-403)', () => {
-  it('FR-401: walks welcome, OTP, consent, system check, identity and start, and enters the test by a full navigation', async () => {
+  it('FR-401: walks welcome, OTP, consent, system check, identity and start, and enters the test in the same document', async () => {
     const seen = recordRequests();
     const user = userEvent.setup();
     open(MOCK_TOKENS.open);
@@ -133,7 +134,9 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     expect(screen.getAllByText(/\(done\)/i)).toHaveLength(4);
     await user.click(screen.getByRole('button', { name: /start the test/i }));
     // Start hands over to the test screen in the same document (FU-FEB-10, option (c)).
-    expect(await screen.findByText(/enter fullscreen to begin/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('dialog', { name: /share your entire screen/i }),
+    ).toBeInTheDocument();
 
     expect(window.location.pathname).toBe('/t/link');
     const order = seen.map((r) => new URL(r.url).pathname.split('/').pop());
@@ -148,7 +151,7 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
       order.indexOf('identity'),
     );
     // Nothing stored, ever.
-    expect(localStorage.length).toBe(0);
+    expect(storedKeys()).toEqual([]);
     expect(sessionStorage.length).toBe(0);
     expect(window.location.href).not.toContain(MOCK_TOKENS.open);
   });
@@ -183,7 +186,7 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     await passOtp(user);
     await expectHeadingFocused(/please read and sign/i);
     expect(getSessionToken()).not.toBeNull();
-    expect(localStorage.length + sessionStorage.length).toBe(0);
+    expect(storedKeys()).toEqual([]);
     view.unmount();
     expect(getSessionToken()).toBeNull();
   });
@@ -194,10 +197,12 @@ describe('stepper end to end (FR-401 to FR-403)', () => {
     open(MOCK_TOKENS.resume);
     await passOtp(user);
     await user.click(await screen.findByRole('button', { name: /continue my test/i }));
-    expect(await screen.findByText(/enter fullscreen to begin/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('dialog', { name: /share your entire screen/i }),
+    ).toBeInTheDocument();
     expect(seen.some((r) => r.url.endsWith('/test/start'))).toBe(false);
     expect(window.location.pathname).toBe('/t/link');
-    expect(localStorage.length + sessionStorage.length).toBe(0);
+    expect(storedKeys()).toEqual([]);
   });
 
   it('NFR-06: no axe violations on the start step', async () => {

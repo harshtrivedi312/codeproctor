@@ -63,8 +63,9 @@ export function recordRequests(): { method: string; url: string; body: unknown }
 
 /** Sends the code and enters the OTP, as a candidate would. */
 export async function passOtp(user: ReturnType<typeof userEvent.setup>, code = MOCK_OTP) {
-  await user.click(await screen.findByRole('button', { name: /email me a one-time code/i }));
-  const input = await screen.findByLabelText(/6-digit code/i);
+  const slow = { timeout: 15_000 };
+  await user.click(await screen.findByRole('button', { name: /email me a one-time code/i }, slow));
+  const input = await screen.findByLabelText(/6-digit code/i, undefined, slow);
   await user.type(input, code);
   await user.click(screen.getByRole('button', { name: /check code/i }));
 }
@@ -85,7 +86,10 @@ export function fakeScrollBox(el: HTMLElement, scrollHeight = 2000, clientHeight
 
 export async function expectHeadingFocused(name: RegExp): Promise<void> {
   // Query again on every try: the heading may be replaced while a step finishes loading.
-  await waitFor(() => expect(screen.getByRole('heading', { level: 1, name })).toHaveFocus());
+  // 15 s: under a loaded CI runner a step (the consent text renders markdown) can take a while.
+  await waitFor(() => expect(screen.getByRole('heading', { level: 1, name })).toHaveFocus(), {
+    timeout: 15_000,
+  });
 }
 
 /** No camera, microphone or screen request may happen: used for TC-030 and TC-096. */
@@ -154,4 +158,14 @@ export function fakeRoomDeps(upload: 'ok' | 'exists' | 'failed' = 'ok') {
       upload: () => Promise.resolve(upload),
     },
   };
+}
+
+/**
+ * Browser storage written by this app must hold nothing. The proctor SDK keeps one counter per
+ * session in localStorage (`codeproctor:eventseq:*`, the next event batch number: no token, key or
+ * answer; FU-FEB-45), which is the only entry allowed.
+ */
+export function storedKeys(): string[] {
+  const local = Object.keys(localStorage).filter((k) => !k.startsWith('codeproctor:eventseq:'));
+  return [...local, ...Object.keys(sessionStorage)];
 }

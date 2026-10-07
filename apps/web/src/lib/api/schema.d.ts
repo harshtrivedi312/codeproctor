@@ -1155,14 +1155,18 @@ export interface components {
       expectedRevision?: string;
     };
     /**
-     * @description The machine codes the API's problem filter can set (problem.filter.ts PROBLEM_CODES). Guard 403s carry none.
+     * @description The machine codes of docs/api-contract.md (preamble). Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web's automatic retry is a separate change). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
      * @enum {string}
      */
     ProblemCode:
       | 'REAUTH_FAILED'
       | 'TWO_FACTOR_REQUIRED_FOR_ROLE'
       | 'SETTINGS_CONFLICT'
-      | 'VARIANT_HAS_AI_REFERENCES';
+      | 'VARIANT_HAS_AI_REFERENCES'
+      | 'BUSY'
+      | 'ANSWER_NOT_MANUAL'
+      | 'SESSION_NOT_UNDER_REVIEW'
+      | 'VERDICT_ALREADY_SET';
     /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference rows). The UI branches on status and endpoint, and on that code. */
     Problem: {
       type: string;
@@ -1410,7 +1414,7 @@ export interface components {
       total: number;
     };
     /**
-     * @description The session state machine of ADR 0002 (ERASED is not shown to recruiters).
+     * @description The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
      * @enum {string}
      */
     SessionStatus:
@@ -1426,7 +1430,8 @@ export interface components {
       | 'COMPLETED'
       | 'EXPIRED'
       | 'APPEALED'
-      | 'DECLINED';
+      | 'DECLINED'
+      | 'ERASED';
     /** @enum {string} */
     IdentityWaiverReason: 'REFUSED_BIOMETRIC_PROCESSING' | 'CANNOT_COMPLETE_ID_CHECK' | 'OTHER';
     /** @description ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500 characters) is required and allowed only with OTHER. Never put health details in it. */

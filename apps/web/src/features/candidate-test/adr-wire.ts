@@ -10,11 +10,11 @@ import { z } from 'zod';
  * Replace with the generated types when the API publishes them (ADR 0012).
  */
 
-/** GET /candidate/session (BE-07). The server clock and the deadlines the timers run on. */
 /**
  * States in which the test is over (ADR 0002 section 3). Only these mean "submitted" to the screen;
  * a status that is in neither list is treated as "could not read" (never as over), so a renamed or
  * lower-case value cannot show the submitted page and clear the candidate's credentials.
+ * ERASED comes from ADR 0004 section 9.5 (a proposed amendment, not yet in database.md).
  */
 export const RUNNING_STATUSES = ['IN_PROGRESS', 'PAUSED'] as const;
 export const OVER_STATUSES = [
@@ -31,6 +31,7 @@ export function isOverStatus(status: string): boolean {
   return (OVER_STATUSES as readonly string[]).includes(status);
 }
 
+/** GET /candidate/session (BE-07). The server clock and the deadlines the timers run on. */
 export const sessionStateSchema = z.object({
   serverTime: z.string(),
   status: z.string(),
@@ -111,11 +112,11 @@ export const runResultSchema = z.object({
 });
 
 /**
- * PROVISIONAL path (ADR 0013 5.11 names "the section-finish route" without a path). Finishing the
- * last section submits the session (ADR 0002 S-5), so `submitted` is true then.
+ * `POST /candidate/session/section/finish` (ADR 0013 section 5.11; BE-11, documented, not yet
+ * implemented on main). Body `{ position }`: the position of the section the candidate is looking
+ * at, never an id. It only enqueues the close and is idempotent: 202 `{ accepted: true }` for the
+ * open section and for an already closing or closed one (the no-op repeat), 409 SECTION_NOT_OPEN
+ * for a section that has not opened, 404 for an unknown position, 400 for a bad body. It says
+ * nothing about the next section: that opens when the close job runs, so the client re-reads.
  */
-export const sectionFinishedSchema = z.object({
-  finishedAt: z.string(),
-  nextSectionId: z.string().nullable(),
-  submitted: z.boolean().default(false),
-});
+export const sectionFinishAcceptedSchema = z.object({ accepted: z.literal(true) });

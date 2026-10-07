@@ -30,7 +30,7 @@ for (let i = 0; i < count; i++) {
     hits: new Map(),
   };
   sessions.set(token, s);
-  list.push({ token, sessionQuestionId: s.sessionQuestionId, questionId: s.questionId });
+  list.push({ token, sessionQuestionId: s.sessionQuestionId });
 }
 fs.writeFileSync(path.join(here, 'sessions.json'), JSON.stringify(list));
 
