@@ -6,15 +6,20 @@ need them run in GitHub Actions or on the server.
 
 There is no hosted staging database (owner decision C-65: staging is local only). The only non-pilot
 setup is [docs/local-run.md](local-run.md); the earlier "Staging database setup (DEP-01)" section was
-removed in this change and can be read in the git history if a pilot step needs its wording (the
+removed in PR #290 and can be read in the git history if a pilot step needs its wording (the
 `app_user` password and role checks, ADR 0006 sections 7.4 and 8.8, are DEP-03 work now).
+One requirement from it survives: a pilot database reached over any network needs certificate-verifying
+TLS (`verify-full` with a trusted root). `PGSSLMODE` does not reach Prisma's migration engine or the
+API's node-postgres driver, so each database URL needs its own parameter (confirm the spelling for Prisma 7
+and `pg`), and `sslmode=require` encrypts without checking the server. A database on the same host that
+never crosses a network (ADR 0017) does not need it.
 If the earlier plans left anything behind, the owner deletes it: the `staging` GitHub environment and its
 `STAGING_*` secrets, the R2 backup token, the read-only backup database role and the staging backup bucket.
 
 ## Database backups and restore
 
 Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`.
-No scheduled workflow (C-63); there is no hosted staging (C-65); the pilot backup runs on the pilot host (DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
+No scheduled workflow (C-63); the pilot backup runs on the pilot host (DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
 
 ### What runs
 
@@ -30,7 +35,7 @@ and optionally `BACKUP_PREFIX` (default `db/`), `BACKUP_RETENTION_DAYS` (default
 `BACKUP_SSE` (for example `AES256` on AWS S3), `PG_BIN_DIR`. Timestamped mode must have `BACKUP_MODE=timestamped` set in the environment of every script that touches the bucket (`backup.sh`, `restore.sh`, `erasure-list.sh`). The scripts take no secrets as
 arguments, so nothing shows up in `ps`, and they never print a URL, key or password.
 
-Environments: there is no hosted staging (C-65). Pilot and production write
+Environments: Pilot and production write
 to AWS S3 in the same region as the data, so candidate data stays in AWS; only configuration
 differs. Backups of pilot and production run on the server or in a pilot workflow that DEP-03
 adds. Turn on bucket default encryption and Block Public Access on the backup bucket (ARC-05).
@@ -83,7 +88,7 @@ Known gaps until DB-06 lands (FU-DBB-01): re-application erases every session of
 review or appeal hold still protects it, anonymises the candidate at once instead of at day 28, and sets
 no `ERASED` status.
 
-### Restore drill (run on a throwaway server)
+### Local restore drill (run on a throwaway server)
 
 Locally, with a throwaway container (never the dev stack):
 
@@ -166,8 +171,8 @@ content in an SSH command line or heredoc that a log would show.
 ```
 
 `retentionDays` is optional (default 90; 7 to 730). `expectedDatabase` is required: the script compares
-it with `current_database()` and refuses to write if `DATABASE_URL` points anywhere else (a non-local
-`app_user` URL would otherwise pass, and real admin data must never land in a shared environment). `reissue` takes only
+it with `current_database()` and refuses to write if `DATABASE_URL` points anywhere else (any other
+database's `app_user` URL would otherwise pass; real admin data belongs only in the pilot database). `reissue` takes only
 `orgName`, `adminEmail` and `expectedDatabase`.
 Environment: `DATABASE_URL` (the `app_user` URL; the script refuses any other role, and a superuser or
 `BYPASSRLS` role, and has no `MIGRATION_DATABASE_URL` fallback) and `REDIS_URL`, plus `GITHUB_RUN_ID` if
