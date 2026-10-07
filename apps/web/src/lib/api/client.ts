@@ -98,7 +98,7 @@ const busyMiddleware: Middleware = {
     }
     const sent = busyCopies.get(request);
     if (!sent || !(await isBusyResponse(response))) {
-      if (!(response.status === 503)) busyStore.answered();
+      if (response.status !== 503) busyStore.answered();
       return undefined;
     }
     const { copy, stamp } = sent;

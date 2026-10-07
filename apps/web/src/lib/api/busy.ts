@@ -42,7 +42,7 @@ export function retryAfterMs(header: string | null): number {
   return Math.min(MAX_WAIT_MS, Math.max(MIN_WAIT_MS, seconds * 1000));
 }
 
-/** The wait before retry number `attempt` (0-based): the header's wait plus jitter in [0, JITTER_MS). */
+/** The wait before a retry: the header's wait plus jitter in [0, JITTER_MS). */
 export function busyDelayMs(header: string | null, random: () => number = Math.random): number {
   return retryAfterMs(header) + Math.floor(random() * JITTER_MS);
 }
@@ -56,6 +56,8 @@ export function busyDelayMs(header: string | null, random: () => number = Math.r
 export function isNoRetryRoute(pathname: string, method: string): boolean {
   const path = pathname.replace(/^\/api(?=\/v\d+\/)/, '');
   if (/^\/v\d+\/auth\//.test(path)) return true; // login, 2FA, password, refresh, logout
+  // A Run that reached Judge0 keeps its slot on a 503 (contract section 8, FR-502); the SDK resends from its own buffer.
+  if (/^\/v\d+\/candidate\//.test(path)) return true;
   const m = method.toUpperCase();
   if (m !== 'GET' && m !== 'HEAD' && /^\/v\d+\/admin\/users(?:\/|$)/.test(path)) return true; // invite, PATCH, unlock, re-issue, 2FA reset
   return false;

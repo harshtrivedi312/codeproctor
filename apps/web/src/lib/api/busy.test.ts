@@ -53,6 +53,7 @@ describe('DL-37 503 BUSY: the pure rules', () => {
       ['/v1/admin/users/abc/unlock', 'POST'],
       ['/v1/admin/users/abc/2fa/reset/start', 'POST'],
       ['/api/v1/auth/login', 'POST'],
+      ['/v1/candidate/questions/q1/run', 'POST'],
     ] as const) {
       expect(isNoRetryRoute(path, method), `${method} ${path}`).toBe(true);
     }
