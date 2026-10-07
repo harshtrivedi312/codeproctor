@@ -17,7 +17,7 @@ export class MailBackedCandidateMailPort extends CandidateMailPort {
     return this.sender.send({
       template: 'otp',
       to,
-      params: { otp: mail.code, minutes: mail.expiresInMinutes, testName: mail.testName },
+      params: { otp: mail.code, minutes: mail.expiresInMinutes },
     });
   }
 
