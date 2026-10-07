@@ -43,7 +43,7 @@ const CHANNEL_NAME = 'cp.refresh.channel';
 /** A waiter that got the lock but saw no outcome waits this long for a late message before sending itself. */
 export const OUTCOME_GRACE_MS = 250;
 /** Fallback election: how long a start announcement waits for a competing lower id. */
-const ELECTION_MS = 60;
+const ELECTION_MS = 150;
 /** Fallback: the longest a tab waits for another tab's refresh before sending its own. */
 const FOREIGN_WAIT_MS = 30_000;
 
@@ -102,6 +102,9 @@ function onMessage(data: unknown): void {
     for (const wake of outcomeWaiters) wake();
   }
 }
+
+// Listen from page load, so a start announced by another tab is never missed (browser only).
+if (typeof window !== 'undefined') getChannel();
 
 function post(message: Message): void {
   try {

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/mocks/server';
+import { createFakeLocks } from '@/test/fake-web-locks';
 
 /*
  * Cross-tab single flight for POST /v1/auth/refresh (FR-104, TC-005). A "tab" here is a fresh copy
@@ -32,48 +33,6 @@ const sessionFor = (token: string, id = 'u-1'): Session => ({
 });
 
 /* ---- fakes shared by all simulated tabs ------------------------------------------------------ */
-interface LockEntry {
-  run: (granted: boolean) => void;
-}
-let held = false;
-const queue: LockEntry[] = [];
-function fakeLocks() {
-  const next = () => {
-    const entry = queue.shift();
-    if (entry) {
-      held = true;
-      entry.run(true);
-    }
-  };
-  return {
-    request(name: string, a: unknown, b?: unknown): Promise<unknown> {
-      const options = typeof a === 'function' ? {} : (a as { ifAvailable?: boolean });
-      const cb = (typeof a === 'function' ? a : b) as (lock: object | null) => Promise<unknown>;
-      return new Promise((resolve, reject) => {
-        const go = (granted: boolean) => {
-          if (!granted) return cb(null).then(resolve, reject);
-          cb({ name })
-            .then(resolve, reject)
-            .finally(() => {
-              held = false;
-              next();
-            });
-        };
-        if (options.ifAvailable) {
-          if (held) return go(false);
-          held = true;
-          return go(true);
-        }
-        if (!held && queue.length === 0) {
-          held = true;
-          return go(true);
-        }
-        queue.push({ run: go });
-      });
-    },
-  };
-}
-
 const channels = new Set<FakeChannel>();
 class FakeChannel {
   onmessage: ((e: MessageEvent<unknown>) => void) | null = null;
@@ -112,12 +71,10 @@ async function openTab(): Promise<Tab> {
 const origLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
 const origBC = globalThis.BroadcastChannel;
 function installFakes(withLocks: boolean) {
-  held = false;
-  queue.length = 0;
   channels.clear();
   Object.defineProperty(navigator, 'locks', {
     configurable: true,
-    value: withLocks ? fakeLocks() : undefined,
+    value: withLocks ? createFakeLocks() : undefined,
   });
   globalThis.BroadcastChannel = FakeChannel as unknown as typeof BroadcastChannel;
 }

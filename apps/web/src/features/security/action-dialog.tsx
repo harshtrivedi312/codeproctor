@@ -325,8 +325,8 @@ export function ActionDialog({
             <UnconfirmedStep
               state={stage.state}
               failure={failure}
-              onCheck={() => void checkSetupOutcome()}
-              onRegenerate={() => void regenerateAfterUnknown()}
+              onCheck={checkSetupOutcome}
+              onRegenerate={regenerateAfterUnknown}
               onCancel={onClose}
             />
           </>
@@ -481,12 +481,11 @@ function UnconfirmedStep({
 }: {
   state: 'checking' | 'on' | 'retry';
   failure: Failure | null;
-  onCheck: () => void;
-  onRegenerate: () => void;
+  onCheck: () => Promise<void>;
+  onRegenerate: () => Promise<void>;
   onCancel: () => void;
 }): React.JSX.Element {
   const [busy, setBusy] = React.useState(false);
-  React.useEffect(() => setBusy(false), [state, failure]);
   return (
     <div className="mt-4 space-y-4" data-testid="setup-unconfirmed">
       <FailureAlert failure={failure} />
@@ -516,7 +515,7 @@ function UnconfirmedStep({
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              onRegenerate();
+              void onRegenerate().finally(() => setBusy(false));
             }}
           >
             Get new recovery codes
@@ -528,7 +527,7 @@ function UnconfirmedStep({
             disabled={busy}
             onClick={() => {
               setBusy(true);
-              onCheck();
+              void onCheck().finally(() => setBusy(false));
             }}
           >
             Check again
