@@ -580,23 +580,34 @@ export class S {
 
   const OTHERS = `${SESSION_STATE_FILE}: database/session-locks is reached other than by an import { name as alias } from statement (a require, import(), import x = require, a side-effect import or a re-export): refused`;
 
+  const LOADER = `${SESSION_STATE_FILE}: require, createRequire or import( appears in the state file: it needs none, so any loader is refused (a string that says require too)`;
+
   it.each([
-    ['import x = require(...)', "import coreAll = require('../database/session-locks');"],
-    ['const x = require(...)', "const coreAll = require('../database/session-locks');"],
-    ['let x = require(...)', "let coreAll = require('../database/session-locks.js');"],
-    ['const x = await import(...)', "const coreAll = await import('../database/session-locks');"],
+    ['import x = require(...)', "import coreAll = require('../database/session-locks');", true],
+    ['const x = require(...)', "const coreAll = require('../database/session-locks');", true],
+    ['let x = require(...)', "let coreAll = require('../database/session-locks.js');", true],
+    [
+      'const x = await import(...)',
+      "const coreAll = await import('../database/session-locks');",
+      true,
+    ],
     [
       'a typed const = require(...)',
       "const coreAll: unknown = require('../database/session-locks');",
+      true,
     ],
-    ['a template-literal specifier', 'const coreAll = require(`../database/session-locks`);'],
-    ['import(...).then(...)', "void import('../database/session-locks').then(() => undefined);"],
-    ['a side-effect import', "import '../database/session-locks';"],
+    ['a template-literal specifier', 'const coreAll = require(`../database/session-locks`);', true],
+    [
+      'import(...).then(...)',
+      "void import('../database/session-locks').then(() => undefined);",
+      true,
+    ],
+    ['a side-effect import', "import '../database/session-locks';", false],
   ])(
     'TC-008 S-1 %s next to the named imports is refused: the core is reached by an import { x as alias } from statement and no other way',
-    (_what, extra) => {
+    (_what, extra, loader) => {
       const problems = state(STATE_TEXT + '\n' + extra);
-      expect(problems).toEqual([OTHERS]);
+      expect(problems).toEqual(loader ? [LOADER, OTHERS] : [OTHERS]);
     },
   );
 
@@ -621,10 +632,63 @@ export class S {
     }
   });
 
-  it('TC-008 S-1 a specifier of another module, or the type-only import of the core, is not a finding', () => {
+  // ---- SF-2 (review r3 of #208): a loader whose specifier the scan cannot read is refused by its token -----------------
+
+  const BYPASSES: ReadonlyArray<[string, string]> = [
+    [
+      'createRequire',
+      "import { createRequire } from 'node:module';\nconst locks: unknown = createRequire(__filename)('../database/session-locks');\nexport const allLocks = locks;",
+    ],
+    [
+      'require held in a variable',
+      "const r = require;\nconst locks: unknown = r('../database/session-locks');",
+    ],
+    ['module.require', "const locks: unknown = module.require('../database/session-locks');"],
+    ['a parenthesised specifier', "const locks: unknown = require(('../database/session-locks'));"],
+    [
+      'a concatenated specifier',
+      "const locks: unknown = require('../database/' + 'session-locks');",
+    ],
+    ['a built template specifier', 'const m = "session-locks";\nvoid import(`../database/${m}`);'],
+    ['a parenthesised dynamic import', "void import(('../database/session-locks'));"],
+  ];
+
+  it.each(BYPASSES)(
+    'TC-008 SF-2 %s in the state file with the named imports is refused by its token',
+    (_what, extra) => {
+      expect(state(STATE_TEXT + '\n' + extra)).toContain(LOADER);
+    },
+  );
+
+  it.each(BYPASSES)(
+    'TC-008 SF-2 %s in a pre-switch-over state file (no import, no lock name) is refused by its token',
+    (_what, extra) => {
+      // A readable literal (module.require('...')) also moves the file into the full-shape state; the token finding is
+      // there either way, and it is the only thing that sees the unreadable ones.
+      expect(state(PRE_STATE_TEXT + '\n' + extra)).toContain(LOADER);
+    },
+  );
+
+  it.each([
+    ['a log message that says require', "this.logger.warn('a require failed');"],
+    ['a type query', "type Locks = typeof import('../database/other');"],
+  ])('TC-008 SF-2 %s fails too (fail closed, documented)', (_what, extra) => {
+    expect(state(PRE_STATE_TEXT + '\n' + extra)).toEqual([LOADER]);
+  });
+
+  it('TC-008 SF-2 words that only contain the token, and import statements, are not loaders', () => {
+    const text = PRE_STATE_TEXT.replace(
+      "const note = 'the compare-and-set below is the only write';",
+      "const note = 'required, requires, import.meta-free, imports';",
+    );
+    expect(state(text)).toEqual([]);
+    expect(state(STATE_TEXT)).toEqual([]);
+  });
+
+  it('TC-008 S-1 the type-only import of the core is not a finding; a loader of another module is the SF-2 finding only, not OTHERS', () => {
     expect(
       state(STATE_TEXT + "\nconst x = require('../database/other');\nvoid import('./elsewhere');"),
-    ).toEqual([]);
+    ).toEqual([LOADER]);
     expect(
       state(
         STATE_TEXT.replace(

@@ -729,8 +729,13 @@ Five tests pin it, all with an **empty** list outside the defining file today:
       `import { guardLive as coreGuardLive } from` statement and **by no other form**: never under its own name, never
       as a namespace (`import * as locks`), and never by `import locks = require(...)`, `const locks = require(...)`,
       `await import(...)`, a side-effect `import '...'` or an `export ... from` of the module. Every specifier of
-      `database/session-locks` in the file must be one of the parsed `import { ... } from` statements, so a form the
-      scan does not know still fails. A file that reaches the module in any way is never skipped by the export check.
+      `database/session-locks` in the file must be one of the parsed `import { ... } from` statements, so a form with a
+      plain string-literal specifier that the parser does not know still fails. A specifier that is **not** a plain
+      string literal (`createRequire(__filename)(...)`, `const r = require; r(...)`, a parenthesised, concatenated or
+      built template specifier) is not read at all, so **the state file may hold no `require`, `createRequire` or
+      `import(` token at all** (SF-2 of the r3 review), in either state: any of them fails, even in a string or a log
+      message that says "require", and so does a `typeof import(...)` type query. A file that reaches the module in a
+      form the scan can read is never skipped by the export check.
     - **The wrapper.** Each core is **called exactly once, inside the wrapper method of the same name**, a method of
       the `SessionStateService` class (a method of another class in the file does not count), and the alias is used
       nowhere else (not passed, returned, stored, or called in another method or an exported function). The wrapper
@@ -778,7 +783,9 @@ All of these are **text rules** over the comment-stripped source, not a parser, 
 rely past: a quote or a `/*` inside a **regex literal** can unbalance a body or hide code (`stripComments` and the brace
 matching skip strings and templates, not regex literals), so the result there is wrong in either direction; a name written
 with a **unicode escape**, built at run time, reached through a computed property or an eval, or passed out through a
-closure built from a parameter is not seen; and the exported-function check assumes prettier's column-0 layout. FU-DB-189
+closure built from a parameter is not seen; a specifier that is not a plain string literal is not read by the import
+guard in any other file (the state file refuses every loader token instead, SF-2); and the exported-function check
+assumes prettier's column-0 layout. FU-DB-189
 builds the AST gate that replaces the scan; FU-DB-244 records the comment-stripper case.
 
 **What to add, and when.**

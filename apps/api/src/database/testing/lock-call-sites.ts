@@ -40,6 +40,9 @@
 //   - a name written with a unicode escape (`gu\u0061rdLive`), built at run time, reached through a computed property, an
 //     eval or a `Reflect` call on a name that is not spelled in the file, and a lock that escapes through a closure
 //     built from a parameter (the scan does not follow values), are not seen;
+//   - a module specifier that is not a plain string literal (`createRequire(__filename)(...)`, a held `require`, a
+//     parenthesised, concatenated or built specifier) is not read by specifiersOf: the import guard misses it in every
+//     file, and the state file therefore refuses every `require`, `createRequire` and `import(` token (SF-2);
 //   - the exported-function check works on lines (it assumes prettier's column-0 layout).
 // FU-DB-189 builds the AST gate (CS-4 PR 3) that replaces this text scan; until then the rules above are the control.
 // The rules are documented for Backend B and Database B in apps/api/src/database/README.md ("Who calls what").
@@ -450,12 +453,26 @@ const namedLocks = (code: string): LockName[] =>
  */
 export function stateFileProblems(path: string, code: string): string[] {
   const out: string[] = [];
+  // SF-2 (review r3 of #208): the state file needs no require, createRequire or dynamic import, and the specifier scan
+  // reads only plain string literals, so every such token is refused in both states, whatever follows it: a held
+  // `require`, `createRequire(__filename)(...)`, `module.require(...)`, a parenthesised, concatenated or template
+  // specifier. A string or a log message that says "require" fails too (fail closed), and so does `typeof import(...)`.
+  if (
+    indexesOf(code, /(?<![\w$])(?:require|createRequire)(?![\w$])|(?<![\w$])import\s*\(/).length > 0
+  ) {
+    out.push(
+      `${path}: require, createRequire or import( appears in the state file: it needs none, so any loader is refused (a string that says require too)`,
+    );
+  }
   const imports = parseLockImports(code);
   if (imports.ranges.length === 0 && imports.others === 0) {
-    return namedLocks(code).map(
-      (name) =>
-        `${path}: ${name} is named in a state file that does not import database/session-locks: a file with no import names no lock at all (no wrapper, no member call, no string); one with the import needs the full wrapper shape`,
-    );
+    return [
+      ...out,
+      ...namedLocks(code).map(
+        (name) =>
+          `${path}: ${name} is named in a state file that does not import database/session-locks: a file with no import names no lock at all (no wrapper, no member call, no string); one with the import needs the full wrapper shape`,
+      ),
+    ];
   }
   const names = LOCK_NAMES;
   if (imports.namespaces.length > 0) {
