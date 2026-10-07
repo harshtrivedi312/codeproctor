@@ -36,6 +36,12 @@ import { TestStartService } from './test-start.service';
     { provide: CandidateMailPort, useClass: UnboundCandidateMailPort },
     { provide: ObjectStoragePort, useClass: UnconfiguredObjectStorage },
   ],
-  exports: [CandidateTokenService, SessionRateLimiter, CandidateMailPort, ObjectStoragePort],
+  exports: [
+    CandidateTokenService,
+    SessionRateLimiter,
+    CandidateMailPort,
+    ObjectStoragePort,
+    CandidateScope,
+  ],
 })
 export class CandidateModule {}

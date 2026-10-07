@@ -1,6 +1,7 @@
 'use client';
 import { usePathname, useRouter } from 'next/navigation';
 import * as React from 'react';
+import { Button } from '@/components/ui/button';
 import { useAuth, type StaffRole } from './auth-provider';
 
 interface RequireRoleProps {
@@ -21,7 +22,7 @@ export function RequireRole({
   fallback,
   children,
 }: RequireRoleProps): React.JSX.Element | null {
-  const { status, role, signedOutByUser, loginPath } = useAuth();
+  const { status, role, signedOutByUser, loginPath, refreshBusy, retryRefresh } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
@@ -35,6 +36,19 @@ export function RequireRole({
     }
   }, [status, signedOutByUser, loginPath, router, pathname]);
 
+  if (status === 'loading' && refreshBusy) {
+    return (
+      <div role="status" className="space-y-2 p-6 text-sm">
+        <p>
+          The service is busy right now, so we could not check your sign-in. We did not sign you
+          out.
+        </p>
+        <Button variant="outline" size="sm" onClick={retryRefresh}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
   if (status === 'loading') {
     return (
       <p role="status" className="p-6 text-sm text-muted-foreground">

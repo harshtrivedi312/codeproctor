@@ -14,9 +14,11 @@ import {
   LOCK_CONTENTION_CODE,
   LOCK_CONTENTION_DETAIL,
   LOCK_CONTENTION_RETRY_AFTER_SECONDS,
+  POOL_TIMEOUT_TOKEN,
   lockContentionCode,
 } from './db-contention';
 import { AuditWriteAfterCommitError } from '../audit/audit-write-after-commit.error';
+import { OutcomeUnknownError } from './outcome-unknown.error';
 import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
 import { OrgContextMissingError, OrgScopeError } from '../database/errors';
@@ -82,7 +84,8 @@ export class ProblemFilter implements ExceptionFilter {
     const lockCode =
       exception instanceof HttpException ||
       exception instanceof OrgScopeError ||
-      exception instanceof AuditWriteAfterCommitError
+      exception instanceof AuditWriteAfterCommitError ||
+      exception instanceof OutcomeUnknownError
         ? undefined
         : lockContentionCode(exception);
     const status = noScope
@@ -114,16 +117,27 @@ export class ProblemFilter implements ExceptionFilter {
         { traceId, errorName: exception.name, auditAction: exception.action },
         'Audit write after commit failed',
       );
+    } else if (exception instanceof OutcomeUnknownError) {
+      // The action's commit may or may not have landed (FU-BE-208). The generic 500 body (no
+      // detail, no code, no Retry-After). Logged by error name and route only (no entity, actor or
+      // organisation id, no message): this error-level line is the alert signal.
+      this.logger.error(
+        { traceId, errorName: exception.name, route: exception.route },
+        'Write outcome unknown',
+      );
     } else if (lockCode !== undefined) {
       // Class name and the fixed code token only: the message can hold SQL and parameters.
-      // P2028 also means a closed or unknown transaction (a code bug), so it is logged at error
-      // level to be noticed when it recurs; the genuine lock cases stay at warn.
+      // P2028 also means a closed or unknown transaction (a code bug), and a pool timeout means
+      // the pool is exhausted (FU-BE-197, DL-42): both are logged at error level (the alertable
+      // line, so a sustained shortage is visible); the genuine lock cases stay at warn.
       const fields = {
         traceId,
         errorName: exception instanceof Error ? exception.name : 'NonError',
         lockCode,
       };
-      if (lockCode === 'P2028') this.logger.error(fields, 'Database transaction error');
+      if (lockCode === POOL_TIMEOUT_TOKEN) {
+        this.logger.error({ ...fields, pool: 'prisma' }, 'Database pool wait timed out');
+      } else if (lockCode === 'P2028') this.logger.error(fields, 'Database transaction error');
       else this.logger.warn(fields, 'Database lock contention');
       problem.detail = LOCK_CONTENTION_DETAIL;
       // Set here, never copied from the error.

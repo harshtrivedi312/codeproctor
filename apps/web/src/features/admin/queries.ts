@@ -1,6 +1,7 @@
 'use client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Schemas } from '@/lib/api/client';
+import { BUSY_CODE } from '@/lib/api/busy';
 import { getGeneration } from '@/lib/auth-session';
 
 /** An API answer that was not 2xx, carrying the status so screens can explain it. */
@@ -20,8 +21,34 @@ export class ApiFailure extends Error {
 function fail(response: Response, error: unknown): never {
   const message =
     error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
-  throw new ApiFailure(response.status, message);
+  const code =
+    error && typeof error === 'object' && 'code' in error && error.code === BUSY_CODE
+      ? BUSY_CODE
+      : '';
+  throw new ApiFailure(response.status, message, code);
 }
+
+/** 503 BUSY after the client's own retries: lock contention, the action did not happen. */
+export const isBusyFailure = (e: unknown): boolean =>
+  e instanceof ApiFailure && e.status === 503 && e.code === BUSY_CODE;
+
+/**
+ * What to tell the user when a staff write failed in a way the screen has no special words for.
+ * BUSY (after the client's own retries): nothing happened, try again. 500: the action may have
+ * happened (the audit row can fail after the commit), so look first. Never retried automatically.
+ */
+export function writeFailureText(e: unknown, fallback: string): string {
+  if (isBusyFailure(e)) {
+    return 'The service is busy and nothing was changed. Wait a moment, then try again.';
+  }
+  if (isServerFailure(e)) {
+    return 'Something went wrong. Check the list before trying again: the change may already have happened.';
+  }
+  return fallback;
+}
+
+/** A 500 on a write: the action may have happened (the audit row can fail after the commit). */
+export const isServerFailure = (e: unknown): boolean => e instanceof ApiFailure && e.status === 500;
 
 export const adminKeys = {
   users: ['admin', 'users'] as const,
@@ -33,8 +60,8 @@ export const adminKeys = {
 export function useStaffUsers() {
   return useQuery({
     queryKey: adminKeys.users,
-    queryFn: async () => {
-      const { data, error, response } = await api.GET('/v1/admin/users');
+    queryFn: async ({ signal }) => {
+      const { data, error, response } = await api.GET('/v1/admin/users', { signal });
       if (!data) fail(response, error);
       return data.items;
     },
@@ -73,8 +100,8 @@ export function useUpdateUser() {
 export function useOrgSettings() {
   return useQuery({
     queryKey: adminKeys.settings,
-    queryFn: async () => {
-      const { data, error, response } = await api.GET('/v1/admin/settings');
+    queryFn: async ({ signal }) => {
+      const { data, error, response } = await api.GET('/v1/admin/settings', { signal });
       if (!data) fail(response, error);
       return data;
     },
@@ -101,8 +128,8 @@ export function useUpdateSettings() {
 export function useConsentTexts() {
   return useQuery({
     queryKey: adminKeys.consent,
-    queryFn: async () => {
-      const { data, error, response } = await api.GET('/v1/admin/consent-texts');
+    queryFn: async ({ signal }) => {
+      const { data, error, response } = await api.GET('/v1/admin/consent-texts', { signal });
       if (!data) fail(response, error);
       return data;
     },
@@ -139,8 +166,8 @@ export function useSetCurrentConsent() {
 export function useCandidates() {
   return useQuery({
     queryKey: adminKeys.candidates,
-    queryFn: async () => {
-      const { data, error, response } = await api.GET('/v1/admin/candidates');
+    queryFn: async ({ signal }) => {
+      const { data, error, response } = await api.GET('/v1/admin/candidates', { signal });
       if (!data) fail(response, error);
       return data.items;
     },

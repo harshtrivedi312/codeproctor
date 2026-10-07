@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { api, type Schemas } from '@/lib/api/client';
+import { busyStore } from '@/lib/api/busy';
 import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
 import {
   beginSession,
@@ -60,6 +61,9 @@ interface AuthContextValue {
    * cross-tab broadcast (other tabs sign out) and cleared last.
    */
   signOutRevoked: () => Promise<void>;
+  /** The silent refresh got 503 BUSY and gave up: nobody was signed out; offer a manual retry. */
+  refreshBusy: boolean;
+  retryRefresh: () => void;
   /**
    * The server just set this user's refresh cookie but the session is not published yet (forced
    * enrollment: the recovery codes are still on screen). Clears the sign-out marker and tells
@@ -78,6 +82,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const router = useRouter();
   const queryClient = useQueryClient();
   const booted = React.useRef(false);
+  const refreshBusy = React.useSyncExternalStore(
+    busyStore.subscribe,
+    () => busyStore.get().refreshBusy,
+    () => false,
+  );
+  const retryRefresh = React.useCallback(() => void refreshSession(), []);
   const [status, setStatus] = React.useState<AuthStatus>('loading');
   const [user, setUser] = React.useState<AuthUser | null>(null);
   const [pending, setPending] = React.useState<PendingChallenge | null>(null);
@@ -284,6 +294,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       retrySignOut,
       loginPath,
       signOutRevoked,
+      refreshBusy,
+      retryRefresh,
       announceSession,
       setPending,
       signIn,
@@ -298,6 +310,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       retrySignOut,
       loginPath,
       signOutRevoked,
+      refreshBusy,
+      retryRefresh,
       announceSession,
       signIn,
       signOut,
