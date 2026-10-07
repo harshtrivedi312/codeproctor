@@ -43,6 +43,14 @@ export const CANDIDATE_PROBLEM_CODES = [
   'RATE_LIMITED',
   'CANDIDATE_PORTAL_UNCONFIGURED',
   'MAIL_UNAVAILABLE',
+  // Proctor batch routes (BE-10, ADR 0013 section 2 and 5.2).
+  'VALIDATION_FAILED',
+  'SIGNATURE_INVALID',
+  'KEY_EPOCH_STALE',
+  'SEQ_CONFLICT',
+  'PAYLOAD_TOO_LARGE',
+  'UNSUPPORTED_MEDIA_TYPE',
+  'NOT_FOUND',
 ] as const;
 export type CandidateProblemCode = (typeof CANDIDATE_PROBLEM_CODES)[number];
 export type ProblemCode = (typeof PROBLEM_CODES)[number];

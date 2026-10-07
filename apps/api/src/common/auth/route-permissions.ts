@@ -119,6 +119,14 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_session:heartbeat',
   },
+  'POST /candidate/session/events': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_events:write',
+  },
+  'POST /candidate/session/keystrokes': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_keystrokes:write',
+  },
   'POST /candidate/session/proctor-key': {
     principal: 'CANDIDATE',
     permission: 'candidate_session:key',
