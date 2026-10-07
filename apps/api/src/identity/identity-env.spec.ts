@@ -51,6 +51,8 @@ describe('Identity worker settings (FR-403, ADR 0014 4.3, 4.4)', () => {
       ...worker,
       NODE_ENV: 'production',
       APP_ENV: 'staging',
+      EMAIL_PROVIDER: 'ses',
+      SES_FROM_ADDRESS: 'no-reply@example.com',
       WEB_ORIGIN: 'https://app.example.test',
       TRUST_PROXY_HOPS: '1',
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
