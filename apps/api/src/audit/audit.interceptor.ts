@@ -8,6 +8,7 @@ import {
   ExecutionContext,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NestInterceptor,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -16,6 +17,7 @@ import { Observable, mergeMap } from 'rxjs';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import type { AuthUser } from '../common/auth/auth.types';
+import { AuditWriteAfterCommitError } from './audit-write-after-commit.error';
 import { AUDITED } from './audited.decorator';
 import type { AuditedOptions } from './audited.decorator';
 
@@ -30,6 +32,8 @@ type AuditedRequest = Request & { user?: AuthUser };
 
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
+  private readonly logger = new Logger(AuditInterceptor.name);
+
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
@@ -46,7 +50,26 @@ export class AuditInterceptor implements NestInterceptor {
     const req = context.switchToHttp().getRequest<AuditedRequest>();
     return next.handle().pipe(
       mergeMap(async (data: unknown) => {
-        await this.write(req, options);
+        try {
+          await this.write(req, options);
+        } catch (e) {
+          // A missing actor is a wiring bug, not a failed write: rethrown unchanged.
+          if (e instanceof InternalServerErrorException) {
+            this.logger.error('Audited route without a verified user');
+            throw e;
+          }
+          // The handler has already committed. A lock or deadlock error here must not reach the
+          // client as 503 + Retry-After (DL-37): that invites a retry of a non-idempotent action
+          // that already happened. A fixed error with no cause is never remapped (the filter
+          // answers a bare 500, as before; an HttpException would add a detail the QA contract
+          // for this route does not expect), so no Retry-After is sent. The response data stays
+          // dropped (fail closed). Class name and the audit action only are logged.
+          this.logger.error(
+            { errorName: e instanceof Error ? e.name : 'NonError', auditAction: options.action },
+            'Audit write failed after the handler committed',
+          );
+          throw new AuditWriteAfterCommitError(options.action);
+        }
         return data;
       }),
     );
