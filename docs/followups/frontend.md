@@ -696,3 +696,13 @@ None of this exists in the API yet. Every route, body, limit and error word belo
 
 - Per the hub's decision, `REASON_NOT_ENABLED` (ADR 0015 section 6: the 422 on `POST /tests/:id/invitations` and the accommodations PATCH while the waiver reason `REFUSED_BIOMETRIC_PROCESSING` is switched off by the server flag) is named in the `docs/api-contract.md` preamble (hub commit, cherry-picked here) and added to `ProblemCode`; Backend A adds it to `PROBLEM_CODES`. The drift test keeps checking the preamble both ways, so the preamble and the enum must change together.
 - ADR 0015's other codes (`IDENTITY_CHECK_WAIVED`, `ACCOMMODATION_LOCKED`, `IDENTITY_NOT_WAIVED`, `DETECTOR_DISABLED`, and 412 `PRECONDITION_FAILED` / 428 `PRECONDITION_REQUIRED`) are assigned to the code lists in the hub's text outside the preamble, so they are not in the enum and the drift test does not require them. Add each to `ProblemCode` (and to the preamble) in the PR that makes the web branch on it (the accommodations PATCH and the review workspace, FE-11).
+
+## Review demo (D-67, frontend/review-demo)
+
+- FU-FE-REVIEW-01: The review API shapes (queue, bundle, playback) are PROVISIONAL in `apps/web/openapi/openapi.yaml` and isolated in `apps/web/src/features/review/model.ts`. Re-check against Backend A's PR 297 when it merges, regenerate types and delete the mock-only assumptions in `apps/web/src/mocks/review-handlers.ts`.
+- FU-FE-REVIEW-02: Queue paging is client-side after fetching every cursor page, and only GRADED and UNDER_REVIEW are offered as status filters (the API default). Move the status filter to the `status` query parameter if sessions with other states are needed.
+- FU-FE-REVIEW-03: Not built: flag confirm/dismiss (no API route), identity panel, synchronized players with click-to-seek on the timeline, keystroke replay, code diffs between runs, keyboard shortcuts (j/k, space), risk band badges beyond a simple number tone. Frontend prompt Step 11 / FR-901.
+- FU-FE-REVIEW-04: Code is shown in a styled read-only `<pre>`, not Monaco (cheap path for the demo). Switch to the repo Monaco wrapper for syntax colour.
+- FU-FE-REVIEW-05: Recording players have no captions track (`media-has-caption` is disabled for the panel). Decide with a11y owner whether reviewer tooling needs transcripts.
+- FU-FE-REVIEW-06: Mock playback serves a tiny WAV data url; a `<video>` plays sound with a black picture. Real WebM chunks (parts) were only tested with fake blob urls.
+- FU-FE-REVIEW-07: Playwright tests for TC-062/077/078/099 and a screenshot pass are not done; only Vitest + axe on list and detail.
