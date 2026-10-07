@@ -140,6 +140,10 @@ echo "Every codeproctor-pilot-* role must be tagged Environment=pilot or Environ
 for r in $(aws iam list-roles --profile "$PROFILE" --query "Roles[?starts_with(RoleName, 'codeproctor-pilot-')].RoleName" --output text 2>/dev/null); do
   env="$(aws iam list-role-tags --profile "$PROFILE" --role-name "$r" --query "Tags[?Key=='Environment']|[0].Value" --output text 2>/dev/null)"
   rpath="$(aws iam get-role --profile "$PROFILE" --role-name "$r" --query 'Role.Path' --output text 2>/dev/null)"
+  case "$r" in
+    codeproctor-pilot-deploy) ;;  # the CI role lives under /codeproctor-guardrails/
+    *) if [ "$rpath" = "/" ]; then pass=$((pass+1)); printf 'PASS  %-70s path /\n' "role $r path"; else fail=$((fail+1)); printf 'FAIL  %-70s path is "%s" (the bucket and key policies name the role with path /)\n' "role $r path" "$rpath"; fi ;;
+  esac
   case "$env" in pilot|owner) pass=$((pass+1)); printf 'PASS  %-70s tag=%s path=%s\n' "role $r" "$env" "$rpath" ;; *) fail=$((fail+1)); printf 'FAIL  %-70s Environment tag is "%s"\n' "role $r" "$env" ;; esac
 done
 

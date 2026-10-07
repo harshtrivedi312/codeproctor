@@ -141,8 +141,9 @@ access instance-role-only.
 ### Backups (ADR 0017 5.3, C-55)
 
 - **Dumps.** The instance writes every dump to the one key `db/dump/latest.dump` in a single `PutObject` that
-  carries its checksum and row counts (`aws s3 cp` switches to multipart above 8 MB, so the uploader must use a
-  single `put-object` or set the multipart threshold). Each overwrite leaves the previous version as a noncurrent version
+  carries its checksum and row counts (`aws s3 cp` switches to multipart above 8 MB, so a multipart upload of
+  `latest.dump` is permitted by the policy, but the checksum and Object Lock rules apply to every part: a single
+  `put-object` keeps the checksum and row counts on one object, which is why one is preferred). Each overwrite leaves the previous version as a noncurrent version
   (the bucket is versioned, and the instance role cannot delete). The lifecycle rule on `db/dump/` has
   `NewerNoncurrentVersions` **2** and `NoncurrentDays` **1** and **no current-version expiry**: the current
   version plus the 2 newest noncurrent versions (the newest 3 dumps) survive at any age. An older dump goes at
@@ -157,7 +158,12 @@ access instance-role-only.
   happens once the lock ends (documented S3 behaviour: modelled offline, unverified, listed in the first-apply
   checks). **Limit:** the lock runs from each version's own creation, so it protects recent dumps only. If
   backups stalled for more than 12 days and 3 junk versions then displace the real dumps, the older displaced versions expire at once and the newest displaced one after 1 day; only the alarms below
-  help (offline model case).
+  help (offline model case). Two detection gaps: (a) at the default of 6 an attacker can push 3 junk dump
+  versions in one day without tripping `DumpVersionsPerDay`, and the size alarm is defeated by matching the
+  size, so the lock keeps the real dumps but nothing pages; (b) the expiry function decides "the newest 3 full
+  base backups" from key listings it cannot verify (no GetObject): fake base backups spread over several days
+  stay under `MaxFullBaseBackupCountChange` and could steer it into deleting real ones after 12 days (database
+  track: a signed or owner-held base-backup inventory, FU-QA-19).
 - **Physical repository (`db/wal/`).** No lifecycle rule. An owner-applied expiry function (never on the
   instance; role `codeproctor-pilot-backup-expiry` is created here) keeps everything younger than 12 days
   plus the newest 3 full base backups and the WAL from the oldest of them, and deletes the rest. Only full
@@ -177,9 +183,17 @@ access instance-role-only.
   `lambda:CreateFunction`, `UpdateFunctionCode` or `UpdateFunctionConfiguration`.** CI already denies `iam:*`
   and `lambda:*`; this is a requirement on the owner's later templates. Whether the first function creation
   works is a verification note (FU-QA-13).
+- **No-overwrite on the two erasure prefixes only.** The bucket policy denies the instance role any
+  `s3:PutObject` under `db/erasure-list/*` and `db/erasure-completed/*` that does not send `If-None-Match` (a
+  conditional write: entries are written once, under unique `<stamp>-<uuid>.json` names; the scripts must send
+  `--if-none-match`, FU-QA-18). Not verified against real S3 (first-apply checks). It is not applied to
+  `db/wal/` or the physical repository (the tool rewrites its metadata in place; there versioning, the lock and
+  version-aware expiry are the control), nor to `db/dump/latest.dump`. Defence in depth: the restore and the
+  expiry function's prune rule treat an entry as present if any version of it, current or noncurrent, was ever
+  non-empty (the union of versions, not the current one).
 - **Write confinement (backup bucket).** The bucket policy denies the instance role `s3:PutObject*` on every key
   except `db/dump/latest.dump`, `db/wal/*`, `db/erasure-list/*` and `db/erasure-completed/*`. Without it, a dump
-  put under any other key (a mis-set `BACKUP_MODE=timestamped`, or a compromised host) would never expire: a
+  put under any other key (the planned `BACKUP_MODE`, FU-QA-18: a mis-set `timestamped` mode, or a compromised host) would never expire: a
   current version never expires, the expiry role is denied under `db/dump/`, and outside those prefixes
   nothing deletes anything.
 - **Alarms** (CloudWatch; they notify `AlarmTopicArn`, the owner's SNS email and SMS topic; with no topic the
@@ -193,7 +207,7 @@ access instance-role-only.
   | `codeproctor-pilot-backup-stale-2d`              | `NewestDumpAgeHours`, Maximum (expiry Lambda)                               | The newest dump is older than 48 hours (missing data breaches)     |
   | `codeproctor-pilot-backup-age-28d`               | `OldestKeptBackupAgeDays` (expiry Lambda)                                   | A kept backup reaches 28 days (the owner decides; nothing deletes) |
   | `codeproctor-pilot-backup-dump-size-anomaly`     | `DumpSizeChangeFactor` = max(new/old, old/new), always >= 1 (expiry Lambda) | More than `DumpSizeChangeFactor` (3)                               |
-  | `codeproctor-pilot-backup-dump-versions-per-day` | `DumpVersionsPerDay` (expiry Lambda)                                        | More than `MaxDumpVersionsPerDay` (3) new dump versions in a day   |
+  | `codeproctor-pilot-backup-dump-versions-per-day` | `DumpVersionsPerDay` (expiry Lambda)                                        | More than `MaxDumpVersionsPerDay` (6) new dump versions in a day   |
   | `codeproctor-pilot-backup-base-backup-count`     | `FullBaseBackupCountChange`, the ABSOLUTE change (expiry Lambda)            | More than `MaxFullBaseBackupCountChange` (2) in a day, up or down  |
   | `codeproctor-pilot-backup-uploader-silent-2d`    | `BackupSuccess` in namespace `codeproctor-pilot-instance` (the uploader)    | Secondary signal only: no success reported for 2 days              |
 
@@ -204,7 +218,9 @@ access instance-role-only.
   the `notBreaching` anomaly alarms would never see data and would fail silent). All Lambda-fed alarms use a
   period of 1 day, matching the daily producer schedule (a test checks it). The Lambda is a dependency outside this template (database track): until it exists the
   freshness and age alarms sit in ALARM (missing data breaches), so the first email is expected. The
-  anomaly alarms' design is not verified.
+  anomaly alarms' design is not verified. **The freshness alarms will fire whenever the pilot instance is
+  stopped for more than 2 days** (nothing is written while it is off, ADR 0017 5.3). That is intended; the owner
+  is asked to confirm it in Open items.
 
 - **Erasure and the exception.** Kept backups can hold an erased person's rows beyond 14 days in a stall; ADR
   0004 9.7 re-applies the erasure list after a restore (DPIA note).
@@ -234,7 +250,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ```
 
 `test_isolation.py` runs 154 cases and 16 structural checks on the CI role, the Route 53 guard and the trust
-policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 160 cases and 46 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
+policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 171 cases and 47 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
 lifecycle, and the proof (with the real CI policies) that CI can only put the two manifests. A case can expect
 "no explicit deny" or "implicit deny" when the real allow is a policy the test does not model. Each case row
 lists the context keys supplied by hand. TC IDs are for QA to allocate (`docs/test-cases.md` has no DEP
@@ -245,7 +261,7 @@ was run offline with no findings (a dev tool, not a repository dependency).
 ## Things to verify at the first apply
 
 See FU-QA-13 in `docs/followups/qa.md`. In short: ECR push and manifest put; Object Lock at creation with
-versioning, and a skipped-then-expired locked version; the expiry role trust with `aws:SourceArn`; the alarms
+versioning, and a skipped-then-expired locked version; whether the first function creation works with the unconditioned Lambda trust; the alarms
 and their producers; browser PUT through CORS with `x-amz-tagging`; the instance role starting with an encrypted
 EBS volume; the `hostedzone/` sentinel for an empty `AssessHostedZoneId`; `RetentionService`'s startup checks;
 presigned URLs; whether `ec2messages` is needed.
@@ -273,6 +289,13 @@ presigned URLs; whether `ec2messages` is needed.
   environment gate (above) as the control.
 
 ## Open items
+
+- **Deviations from the ADR, honestly:** there is **no general overwrite deny** on the backup bucket (replaced by
+  versioning plus the 12 day lock plus version-aware expiry, ADR 0017 5.3 as amended in #244), **except on the
+  two erasure prefixes**, where an overwrite without `If-None-Match` is denied. Residual risk: an overwritten
+  erasure-list entry is recoverable only from the noncurrent version.
+- **Owner:** please confirm that freshness alarms firing while the instance is stopped for more than 2 days is
+  intended.
 
 - **Hub:** the only open wording difference is 28 days (ADR) against 30 days (Delivery Lead) for the second
   alarm; 12 days is the lock and the freshness alarm is 2 days (FU-QA-20).

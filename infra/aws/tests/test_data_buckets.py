@@ -131,14 +131,16 @@ def main():
     r53 = [st for st in pol if st["Sid"] == "DenyRoute53OutsideAssessZone"]
     chk("expiry role: Route 53 deny for every zone except the assess zone", len(r53) == 1 and r53[0]["NotResource"] == "arn:aws:route53:::hostedzone/Z0ASSESSEXAMPLE")
     pm = [st for st in pol if st["Sid"] == "AlarmedMetrics"][0]
+    _r2 = T.Resolver(raw, {"InstanceRoleName": "codeproctor-pilot-app", "Judge0RoleName": "codeproctor-pilot-judge0", "RestoreRoleName": "codeproctor-pilot-restore", "AppOrigin": "https://app.example.test", "DumpSizeChangeFactor": "3", "MaxDumpVersionsPerDay": "6", "MaxFullBaseBackupCountChange": "2", "AssessHostedZoneId": "", "AlarmTopicArn": ""})
+    _e = _r2.r(raw["Resources"]["BackupExpiryRole"])["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
+    chk("AssessHostedZoneId empty on the data stack: the expiry role names no zone at all (strictly tighter)", [st for st in _e if st["Sid"] == "DenyRoute53OutsideAssessZone"][0]["NotResource"] == "arn:aws:route53:::hostedzone/")
     chk("expiry role may publish metrics only in namespace codeproctor-pilot (the alarmed namespace)", pm["Condition"]["StringEquals"]["cloudwatch:namespace"] == "codeproctor-pilot")
     trust = role["AssumeRolePolicyDocument"]["Statement"][0]
     chk("expiry role trust: the Lambda service only, with NO aws:SourceArn or aws:SourceAccount condition (Lambda probably does not populate them); the guard is the PassRole and Lambda rule in the README", trust["Principal"] == {"Service": "lambda.amazonaws.com"} and "Condition" not in trust)
     al = {n: v["Properties"] for n, v in res.items() if v["Type"] == "AWS::CloudWatch::Alarm"}
     chk("alarms: freshness (Lambda-side), uploader signal, age 28 days, dump size, dump versions per day, full base backup count", set(al) == {"BackupFreshnessAlarm", "BackupUploaderSignalAlarm", "BackupAgeAlarm", "DumpSizeAnomalyAlarm", "DumpVersionCountAlarm", "BaseBackupCountAlarm"})
     chk("only the Lambda can produce alarmed metrics: every alarm but the uploader signal is in codeproctor-pilot; the uploader signal is in codeproctor-pilot-instance", all(a["Namespace"] == "codeproctor-pilot" for n, a in al.items() if n != "BackupUploaderSignalAlarm") and al["BackupUploaderSignalAlarm"]["Namespace"] == "codeproctor-pilot-instance" and al["BackupUploaderSignalAlarm"]["MetricName"] == "BackupSuccess")
-    sched_days = raw["Metadata"]["CodeProctor"]["ExpiryFunctionScheduleDays"]
-    chk("every Lambda-fed alarm Period matches the producer schedule (daily): a shorter period would sit in ALARM while waiting for data", sched_days == 1 and all(a["Period"] == sched_days * 86400 for n, a in al.items() if a["Namespace"] == "codeproctor-pilot"))
+    chk("every Lambda-fed alarm Period is 1 day (86400): a shorter period would sit in ALARM while waiting for the daily producer", all(a["Period"] == 86400 for n, a in al.items() if a["Namespace"] == "codeproctor-pilot"))
     chk("no alarm has dimensions (producers publish with none; with dimensions the notBreaching alarms would fail silent)", not any("Dimensions" in a for a in al.values()))
     f = al["BackupFreshnessAlarm"]
     chk("freshness alarm: Lambda-side NewestDumpAgeHours Maximum > 48 (2 days), missing data breaching", f["MetricName"] == "NewestDumpAgeHours" and f["Period"] == 86400 and f["Statistic"] == "Maximum" and f["Threshold"] == 48 and f["ComparisonOperator"] == "GreaterThanThreshold" and f["TreatMissingData"] == "breaching")
@@ -211,7 +213,18 @@ def main():
         add(f"backup: instance role cannot put {label}", "app", "s3:PutObject", key_, enc_ok, "DENY", "backup")
     add("backup: instance role cannot abort a multipart upload outside the known keys", "app", "s3:AbortMultipartUpload", B + "/db/other/x", {}, "DENY", "backup")
     add("backup: instance role writes WAL", "app", "s3:PutObject", WAL, {}, "ALLOW", "backup")
-    add("backup: instance role writes an erasure-list entry", "app", "s3:PutObject", ERA, {}, "ALLOW", "backup")
+    ERC = B + "/db/erasure-completed/20261006T020000Z-x.json"
+    add("backup: instance role writes an erasure-list entry for the first time (If-None-Match sent)", "app", "s3:PutObject", ERA, {"s3:if-none-match": "*"}, "ALLOW", "backup")
+    add("backup: instance role overwrites an erasure-list entry (no If-None-Match)", "app", "s3:PutObject", ERA, {}, "DENY", "backup")
+    add("backup: instance role writes an erasure-completed entry for the first time (If-None-Match sent)", "app", "s3:PutObject", ERC, {"s3:if-none-match": "*"}, "ALLOW", "backup")
+    add("backup: instance role overwrites an erasure-completed entry (no If-None-Match)", "app", "s3:PutObject", ERC, {}, "DENY", "backup")
+    add("backup: the conditional-write deny does not apply to db/dump/latest.dump (no If-None-Match needed)", "app", "s3:PutObject", DUMP, {}, "ALLOW", "backup")
+    add("backup: the conditional-write deny does not apply to the physical repository metadata (rewritten in place)", "app", "s3:PutObject", B + "/db/wal/archive/x/archive.info", {}, "ALLOW", "backup")
+    add("backup: instance role can abort a multipart upload of db/dump/latest.dump", "app", "s3:AbortMultipartUpload", DUMP, {}, "ALLOW", "backup")
+    add("backup: instance role can abort a multipart upload under db/wal/", "app", "s3:AbortMultipartUpload", WAL, {}, "ALLOW", "backup")
+    add("backup: owner can put an object under an unlisted prefix", "owner", "s3:PutObject", B + "/db/other/x", {}, "ALLOW", "backup")
+    add("backup: expiry role can list the bucket", "expiry", "s3:ListBucket", B, {}, "ALLOW", "backup")
+    add("backup: expiry role can delete a version under db/erasure-completed/", "expiry", "s3:DeleteObjectVersion", ERC, {}, "ALLOW", "backup")
     for obj, label in ((DUMP, "dump"), (WAL, "WAL"), (ERA, "erasure list")):
         add(f"backup: instance role cannot DeleteObject on the {label}", "app", "s3:DeleteObject", obj, {}, "DENY", "backup")
         add(f"backup: instance role cannot DeleteObjectVersion on the {label}", "app", "s3:DeleteObjectVersion", obj, {}, "DENY", "backup")
@@ -234,6 +247,7 @@ def main():
     add("backup: restore role cannot change versioning", "restore", "s3:PutBucketVersioning", B, {}, "DENY", "backup")
     add("backup: expiry role can delete a version", "expiry", "s3:DeleteObjectVersion", WAL, {}, "ALLOW", "backup")
     add("backup: expiry role cannot delete under an unlisted prefix (no allow)", "expiry", "s3:DeleteObject", B + "/db/other/x", {}, "DENY-IMPLICIT", "backup")
+    add("expiry role: Route 53 change in the assess zone (no allow)", "expiry", "route53:ChangeResourceRecordSets", "arn:aws:route53:::hostedzone/Z0ASSESSEXAMPLE", {}, "DENY-IMPLICIT")
     add("expiry role: Route 53 change in another zone", "expiry", "route53:ChangeResourceRecordSets", "arn:aws:route53:::hostedzone/Z0MAINEXAMPLE", {}, "DENY")
     add("expiry role: PutMetricData into the instance namespace (no allow)", "expiry", "cloudwatch:PutMetricData", "*", {"cloudwatch:namespace": "codeproctor-pilot-instance"}, "DENY-IMPLICIT")
     add("expiry role: PutMetricData into the alarmed namespace", "expiry", "cloudwatch:PutMetricData", "*", {"cloudwatch:namespace": "codeproctor-pilot"}, "ALLOW")

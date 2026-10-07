@@ -27,59 +27,87 @@ Description: >-
 #     the newest 3 goes at the later of (its creation + 12 days, the Object Lock) and (its replacement
 #     + 1 day), plus S3's delay.
 #   - OBJECT LOCK: the bucket is created with Object Lock ENABLED (ObjectLockEnabled: true) and a
-#     default retention in GOVERNANCE mode of 12 days. Object Lock needs versioning. S3 has allowed enabling it on an
+#     default retention in GOVERNANCE mode of 12 days. Object Lock needs versioning. S3 has allowed
+#     enabling it on an
 #     existing versioned bucket since late 2023, but the cautious advice stays: a bucket made without it
-#     should be replaced, not reconfigured (and it needs Content-MD5 or a checksum on every upload and part). No role the instance or CI can assume holds s3:BypassGovernanceRetention (denied
+#     should be replaced, not reconfigured (and it needs Content-MD5 or a checksum on every upload
+#     and part). No role the instance or CI can assume holds s3:BypassGovernanceRetention (denied
 #     in the CI policy and in this bucket policy for every codeproctor-* role); only the owner's own
 #     principal has it. A compromised host therefore cannot delete or shorten any version for 12 days,
 #     which is the floor for the junk-version push-out attack. A lifecycle expiry of a locked version is
 #     deferred until the lock ends, not an error. With NoncurrentDays 1 and a 12 day lock a lifecycle
-#     expiry that falls inside the lock is skipped and happens once the lock ends (documented S3 behaviour;
+#     expiry that falls inside the lock is skipped and happens once the lock ends (documented S3
+#     behaviour;
 #     UNVERIFIED here, modelled offline and listed in the first-apply checks).
 #     Limit: the lock runs from a version's own creation, so it protects recent dumps only. If backups
 #     stalled for more than 12 days and junk versions then displace the real dumps, the older displaced
 #     versions expire at once and the newest displaced one after 1 day: the alarms must page the owner
-#     first. Day 30 is the owner's decision: NOTHING deletes
+#     first. DETECTION GAPS: (a) at the default of 6 an attacker can push 3 junk dump versions in
+#     one day without tripping DumpVersionsPerDay, and the size alarm is defeated by matching the
+#     size: the 12 day lock keeps the real dumps but nothing pages; (b) the expiry function decides
+#     "the newest 3 full base backups" from key listings it cannot verify (it has no GetObject):
+#     fake base backups spread over several days stay under MaxFullBaseBackupCountChange and could
+#     steer it into deleting real ones after 12 days (database track: a signed or owner-held base-
+#     backup inventory). Day 30 is the owner's decision: NOTHING deletes
 #     automatically at day 30 (no expiry rule), only the 28 day alarm fires.
 #   - ALARMS (the real guard against junk versions). The threat is a compromised main instance, so the
-#     instance must NOT be the producer of any alarmed metric. The owner-applied expiry Lambda is the ONLY
-#     producer of NewestDumpAgeHours, DumpSizeChangeFactor, DumpVersionsPerDay, FullBaseBackupCountChange
+#     instance must NOT be the producer of any alarmed metric. The owner-applied expiry Lambda is
+#     the ONLY
+#     producer of NewestDumpAgeHours, DumpSizeChangeFactor, DumpVersionsPerDay,
+#     FullBaseBackupCountChange
 #     and OldestKeptBackupAgeDays (namespace codeproctor-pilot), all computed from ListObjectVersions on
-#     db/dump/ and db/wal/ (Size, LastModified). The uploader's BackupSuccess goes to a DIFFERENT namespace
+#     db/dump/ and db/wal/ (Size, LastModified). The uploader's BackupSuccess goes to a DIFFERENT
+#     namespace
 #     (codeproctor-pilot-instance) and is a secondary signal only. REQUIREMENT for the owner's instance
 #     template: NO role other than codeproctor-pilot-backup-expiry may PutMetricData into the namespace
-#     codeproctor-pilot (the main, Judge0 and restore roles too): their cloudwatch:PutMetricData must carry
-#     cloudwatch:namespace = codeproctor-pilot-instance, so none can inflate an alarmed metric. Metrics are
-#     published WITH NO DIMENSIONS (the alarms have none: with dimensions the notBreaching anomaly alarms
+#     codeproctor-pilot (the main, Judge0 and restore roles too): their cloudwatch:PutMetricData
+#     must carry
+#     cloudwatch:namespace = codeproctor-pilot-instance, so none can inflate an alarmed metric.
+#     Metrics are
+#     published WITH NO DIMENSIONS (the alarms have none: with dimensions the notBreaching anomaly
+#     alarms
 #     would never see data and fail silent). The
 #     Lambda is a dependency outside this template (code owned by the database track).
 #   - Base backups and WAL (db/wal/, pgBackRest or WAL-G repository, full base backups only): NO age
-#     lifecycle rule. An owner-applied expiry function, with its own role (codeproctor-pilot-backup-expiry,
+#     lifecycle rule. An owner-applied expiry function, with its own role (codeproctor-pilot-backup-
+#     expiry,
 #     created here), run daily by a schedule and never on the instance, keeps everything younger than
-#     12 days (the lock makes earlier deletion impossible anyway) plus the newest 3 full base backups and
+#     12 days (the lock makes earlier deletion impossible anyway) plus the newest 3 full base
+#     backups and
 #     the WAL from the oldest of them, and deletes the rest. It may delete only under db/wal/,
-#     db/erasure-list/ and db/erasure-completed/ (never db/dump/, which lifecycle owns). The function and its schedule (code owned by the database track) belong to a later owner
-#     template, ADR 0017 section 7; this stack builds only the role and the bucket policy that permits it.
+#     db/erasure-list/ and db/erasure-completed/ (never db/dump/, which lifecycle owns). The
+#     function and its schedule (code owned by the database track) belong to a later owner
+#     template, ADR 0017 section 7; this stack builds only the role and the bucket policy that
+#     permits it.
 #   - 30 day cap: nothing is kept past 30 days without the owner's decision. Alarms: no new backup for
 #     2 days (Lambda-side metric), and a kept backup reaching 28 days (metrics below).
 #   - ADR 0004 9.2 (versioning off or noncurrent expired within 1 day) was written for the media bucket,
 #     whose RetentionService fails closed on it; it does not read the backup bucket. ADR 0017 5.1 now
 #     says versioning ON for the backup bucket (C-55), so there is no conflict.
-#   - WRITE CONFINEMENT: the backup bucket policy denies the instance role s3:PutObject* on every key but
+#   - NO-OVERWRITE on the two erasure prefixes only: the bucket policy denies the instance role an
+#     s3:PutObject
+#     under db/erasure-list/* and db/erasure-completed/* that does not send If-None-Match (a conditional
+#     write; entries are written once under unique <stamp>-<uuid>.json names). NOT verified against real
+#     S3 (first-apply checks). It is NOT applied to db/wal/ or the physical repository (the tool
+#     rewrites its
+#     metadata in place: there versioning, the lock and version-aware expiry are the control), nor to
+#     db/dump/latest.dump (overwriting it is the design). The restore and the expiry prune rule treat an
+#     entry as present if ANY version of it, current or noncurrent, was ever non-empty.
+#   - WRITE CONFINEMENT: the backup bucket policy denies the instance role s3:PutObject* on every
+#     key but
 #     db/dump/latest.dump, db/wal/*, db/erasure-list/* and db/erasure-completed/*. A dump under another
 #     key would never expire (a current version never expires and the expiry role is denied under
 #     db/dump/), and nothing deletes outside those prefixes.
 #   - db/erasure-list/ and db/erasure-completed/ never age-expire; they are pruned ONLY by the expiry
 #     function under the ADR 0017 5.3 "Erasure-list pruning" rule. The instance role cannot delete there
-#     either (the ADR gives it no delete on the backups bucket), so erasure-list.sh prune cannot run on the
+#     either (the ADR gives it no delete on the backups bucket), so erasure-list.sh prune cannot run
+#     on the
 #     instance: flagged for the database track.
 #
 # Versioning is OFF on media and releases (ADR 0004 section 9.2).
 # =============================================================================================
 
 Metadata:
-  CodeProctor:
-    ExpiryFunctionScheduleDays: 1
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
@@ -140,7 +168,7 @@ Parameters:
     Type: String
     Default: ''
     AllowedPattern: ^$|^Z[A-Z0-9]{5,32}$
-    Description: Same value as in github-oidc-roles.yaml. The expiry role carries the Route 53 deny for every zone except this one (empty means none)
+    Description: Leave EMPTY (strictly tighter; the expiry role then has no Route 53 permission at all). If you set it, set the same value as in github-oidc-roles.yaml. The expiry role carries the Route 53 deny for every zone except this one
   AlarmTopicArn:
     Type: String
     Default: ''
@@ -616,6 +644,18 @@ Resources:
             Condition:
               ArnEquals:
                 aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyOverwritingErasureEntries'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-list/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-completed/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+              'Null':
+                s3:if-none-match: 'true'
           - Sid: 'DenyExpiryRoleOnDumps'
             Effect: 'Deny'
             Principal: '*'
