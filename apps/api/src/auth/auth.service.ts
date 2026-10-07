@@ -39,6 +39,7 @@ import {
 import type { RequestContext } from '../common/request-context';
 import { errorName } from '../common/request-context';
 import { isObject, lockContentionCode } from '../common/db-contention';
+import { OutcomeUnknownError } from '../common/outcome-unknown.error';
 import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
@@ -112,7 +113,7 @@ interface TxPhase {
  * True only when a failed transaction certainly rolled back (FU-BE-208, DL-37, api-contract
  * section 8): it never started (pool wait, contention on BEGIN), or a lock-contention error hit
  * before the callback finished (55P03, 40P01, 40001, P2034, and P2028 inside the callback, which
- * is a rollback), or the commit itself failed with 40001 or 40P01 (a serialization failure or
+ * is a rollback), or the commit itself failed with 40001, 40P01 or P2034 (a serialization failure or
  * deadlock at COMMIT is a rollback). Anything else after the callback finished (P2028, P1017, a
  * connection error at COMMIT) is an unknown outcome. `extra` adds callback-body failures the
  * caller knows are rollbacks too (a refusal thrown by our own code before the callback finished).
@@ -120,7 +121,7 @@ interface TxPhase {
 function isCleanRollback(phase: TxPhase, e: unknown, extra?: (e: unknown) => boolean): boolean {
   if (!phase.started) return true;
   const code = lockContentionCode(e);
-  if (phase.finished) return code === '40001' || code === '40P01';
+  if (phase.finished) return code === '40001' || code === '40P01' || code === 'P2034';
   return code !== undefined || (extra?.(e) ?? false);
 }
 
@@ -245,8 +246,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         },
       };
     }
+    // The INSERT inside startSession is its own committed statement (no transaction here).
+    const insert = { done: false };
     try {
-      return await this.startSession(user);
+      return await this.startSession(user, this.prisma.client, undefined, insert);
     } catch (e) {
       // A reset landed while the password was being verified: the sign-in is refused and the
       // reserved attempt is given back, as the password was right when it was checked.
@@ -257,9 +260,12 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // DL-37: the password was already right and opening the session hit lock contention (503,
       // retry): give back the attempt of THIS request only. startSession runs on the root client
       // here, with no transaction: the refresh-family INSERT may already have committed when
-      // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-184). Failed-guess counts (wrong
-      // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
-      if (lockContentionCode(e) !== undefined)
+      // clearFailures fails, leaving a family whose token was never delivered (unusable;
+      // FU-BE-184). Failed-guess counts (wrong password, wrong code) are never refunded, so
+      // contention cannot erase an attacker's count.
+      // FU-BE-220: once the INSERT returned it may be a landed commit: no refund then (the retry
+      // pays one more counted attempt, which fails closed).
+      if (lockContentionCode(e) !== undefined && !insert.done)
         await this.refundAttempt(user).catch(() => undefined);
       throw e;
     }
@@ -579,9 +585,22 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       });
       return { session, recoveryCodes: codes };
     } catch (e) {
-      // FU-BE-208: after a clean rollback the same code must work again (the 503 invites a retry).
-      if (isCleanRollback(phase, e)) await releaseMark(mark);
-      // The code was right, so the reservation is not a failed guess.
+      // FU-BE-208: ONE classification. A clean rollback releases the mark (the 503 invites a
+      // retry with the same code). After the callback returned, anything that is not a rollback
+      // may have committed: the mark stays and the challenge stays spent (OutcomeUnknownError is
+      // not retryable, so withChallengeUse keeps its key), and the client learns nothing about
+      // whether 2FA is on, no recovery codes and no session.
+      const clean = isCleanRollback(phase, e);
+      const unknownOutcome = phase.started && phase.finished && !clean;
+      if (clean) await releaseMark(mark);
+      // FU-BE-220: a reservation is given back only when nothing could have committed. After an
+      // unknown outcome the counter keeps it (fails closed: at most one extra counted attempt).
+      if (unknownOutcome) {
+        throw new OutcomeUnknownError(
+          openSession ? 'auth.2fa.enroll.confirm' : 'auth.2fa.setup.confirm',
+        );
+      }
+      // The code was right and the transaction rolled back or never ran: not a failed guess.
       await this.refundAttempt(user).catch(() => undefined);
       if (e instanceof AlreadyEnrolledSignal) {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
@@ -653,6 +672,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // The TOTP path has no transaction: the family INSERT is one statement, so a lock error before
     // it returned is a clean failure; once it returned, a later failure is not (FU-BE-208).
     const insert = { done: false };
+    // The recovery-code path is a transaction: `finished` is set when its callback returned, so a
+    // failure after that is judged like every other commit-phase failure (FU-BE-208, FU-BE-220).
+    // `started: true` from the outset on purpose: a pool wait before BEGIN of the recovery
+    // transaction is therefore not treated as "never started" (clean): that fails closed.
+    const phase: TxPhase = { started: true, finished: false };
     try {
       if (/^\d{6}$/.test(code)) {
         if (!(await this.verifyTotp(user, secret, code, mark))) {
@@ -676,14 +700,16 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         );
         if (used !== 1) throw new WrongRecoveryCodeSignal();
         await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx, {}, tx);
-        return this.startSession(user, tx, secret);
+        const opened = await this.startSession(user, tx, secret);
+        phase.finished = true;
+        return opened;
       });
     } catch (e) {
       // FU-BE-208: only a statement-level lock error before the INSERT returned is certainly clean.
       if (
         !wrongCode &&
         !insert.done &&
-        isCleanRollback({ started: true, finished: false }, e) &&
+        isCleanRollback(phase, e) &&
         // Defensive: the signal is only thrown after the INSERT returned (insert.done), so this
         // never matters today; it keeps a refused session from ever releasing the mark.
         !(e instanceof PasswordChangedSignal)
@@ -701,7 +727,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // oracle, so this request's reservation goes back. A wrong code (failCode) is never refunded.
       if (
         !wrongCode &&
+        // FU-BE-220: never after a landed or possibly landed commit (the INSERT returned, or the
+        // recovery transaction failed at COMMIT with anything but a rollback code).
+        !insert.done &&
         lockContentionCode(e) !== undefined &&
+        isCleanRollback(phase, e) &&
         !(isObject(e) && this.refundedErrors.has(e))
       ) {
         await this.refundAttempt(user).catch(() => undefined);
@@ -791,8 +821,13 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     } catch (e) {
       // FU-BE-208: after a clean rollback the same code must work again. A Redis outage while
       // writing the token marker (our own 503, thrown before the callback finished) is one too.
-      if (isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException)) {
-        await releaseMark(mark);
+      const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
+      if (clean) await releaseMark(mark);
+      // FU-BE-208 / FU-BE-219: after the callback returned, anything that is not a rollback may
+      // have committed. The mark stays, no refund (the reservation was given back before the
+      // transaction only because both factors had already verified).
+      if (phase.started && phase.finished && !clean) {
+        throw new OutcomeUnknownError('auth.2fa.disable');
       }
       throw e;
     }
