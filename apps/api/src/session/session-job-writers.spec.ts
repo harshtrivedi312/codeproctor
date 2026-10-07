@@ -11,7 +11,8 @@ const SRC = resolve(__dirname, '..');
 const OWNER = 'session/session-job.processor.ts';
 
 /** Worker files that still use the org scope instead of the processor (FU-BEB-112). */
-const RUNS_IN_ORG_SCOPE_TODAY = ['candidate/session-jobs.service.ts'];
+// grading/grading-worker.ts (BE-11, P-24 D-68) moves onto the processor with the CS-4 PR 2 adoption.
+const RUNS_IN_ORG_SCOPE_TODAY = ['candidate/session-jobs.service.ts', 'grading/grading-worker.ts'];
 
 function sources(dir: string): Array<{ path: string; text: string }> {
   return readdirSync(dir).flatMap((name) => {
