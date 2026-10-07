@@ -305,7 +305,7 @@ export class GradeSessionService {
     try {
       // `mode: 'submit'` (PR #298) makes a local-stub result say it was not graded. It is built
       // outside an object literal so this compiles before and after #298 adds the option (until
-      // then the service ignores it): FU-BEB-113.
+      // then the service ignores it): FU-BEB-144.
       const request = {
         language,
         sourceCode: snapshot.sourceCode,
