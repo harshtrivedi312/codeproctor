@@ -1,6 +1,7 @@
 import { OrgScopeViolationError } from './errors';
 import { SYSTEM_SCOPE_REASONS } from './org-context';
 import {
+  SCHEDULE_BACK_RELATIONS,
   SCHEDULE_CAPACITY_COLUMNS,
   SCHEDULE_CAPACITY_OPERATIONS,
   assertScheduleCapacityScope,
@@ -191,6 +192,107 @@ describe('the SCHEDULE_CAPACITY system read of scheduled_windows (ADR 0017 4.7, 
       'deleteMany',
     ])('TC-008 %s is refused under SCHEDULE_CAPACITY: writes stay org-scoped', (operation) => {
       expect(check(operation, { where: { kind: 'SLOT' } })).toThrow(OrgScopeViolationError);
+    });
+  });
+
+  describe('(b) through a relation: no system query reaches scheduled_windows from another model (B1 of the #261 review)', () => {
+    it('TC-008 the relations that lead to scheduled_windows are derived from FK_CLASSES and pinned', () => {
+      expect([...SCHEDULE_BACK_RELATIONS]).toEqual([
+        'requestedScheduledWindows',
+        'scheduledWindows',
+      ]);
+      expect(Object.isFrozen(SCHEDULE_BACK_RELATIONS)).toBe(true);
+    });
+
+    const routes: ReadonlyArray<[string, string, string, unknown]> = [
+      [
+        'an include from Invitation',
+        'Invitation',
+        'findMany',
+        { include: { scheduledWindows: true } },
+      ],
+      [
+        'a select from Organization',
+        'Organization',
+        'findMany',
+        { select: { id: true, scheduledWindows: true } },
+      ],
+      [
+        'a nested select from User',
+        'User',
+        'findMany',
+        { select: { requestedScheduledWindows: { select: { orgId: true } } } },
+      ],
+      [
+        'a _count select',
+        'Invitation',
+        'findMany',
+        { select: { _count: { select: { scheduledWindows: true } } } },
+      ],
+      [
+        'a some filter (an oracle)',
+        'User',
+        'findMany',
+        {
+          select: { id: true },
+          where: { requestedScheduledWindows: { some: { status: 'SCHEDULED' } } },
+        },
+      ],
+      [
+        'an orderBy _count',
+        'Organization',
+        'findMany',
+        { orderBy: { scheduledWindows: { _count: 'desc' } } },
+      ],
+      [
+        'two levels down, from Session',
+        'Session',
+        'findMany',
+        { include: { invitation: { include: { scheduledWindows: true } } } },
+      ],
+      [
+        'inside an array',
+        'Invitation',
+        'findMany',
+        { where: { OR: [{ scheduledWindows: { none: {} } }] } },
+      ],
+      [
+        'a count with a relation filter',
+        'Invitation',
+        'count',
+        { where: { scheduledWindows: { some: {} } } },
+      ],
+    ];
+
+    for (const reason of ['BACKGROUND_JOB', 'RETENTION_ERASURE', 'AUTH_BOOTSTRAP']) {
+      it.each(routes)(`TC-008 under ${reason}, %s is refused`, (_what, model, operation, args) => {
+        expect(check(operation, args, reason, model)).toThrow(/leads to scheduled_windows/);
+      });
+    }
+
+    it('TC-008 a system query on another model with no such relation is untouched', () => {
+      expect(
+        check(
+          'findMany',
+          { include: { sessions: true }, where: { id: 'x' } },
+          'RETENTION_ERASURE',
+          'Invitation',
+        ),
+      ).not.toThrow();
+    });
+  });
+
+  describe('nit 1 of the #261 review: the scalar requestedById is refused by name too', () => {
+    it.each([
+      ['select', 'findMany', { select: { startsAt: true, requestedById: true } }],
+      ['where', 'count', { where: { requestedById: 'u' } }],
+      ['orderBy', 'findMany', { select: FIVE, orderBy: { requestedById: 'asc' } }],
+      ['by', 'groupBy', { by: ['requestedById'], _count: { _all: true } }],
+      ['distinct', 'findMany', { select: FIVE, distinct: ['requestedById'] }],
+      ['_max', 'aggregate', { _max: { requestedById: true } }],
+      ['invitationId in a where NOT', 'count', { where: { NOT: [{ invitationId: 'i' }] } }],
+    ])('TC-008 requestedById in %s is refused', (_what, operation, args) => {
+      expect(check(operation, args)).toThrow(OrgScopeViolationError);
     });
   });
 

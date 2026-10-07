@@ -16,6 +16,7 @@
 // the ADR 0006 row itself is the hub's (owner batch). Who may enter the reason is pinned in call-sites.spec.ts.
 import { OrgScopeViolationError } from './errors';
 import { deepFreeze } from './deep-freeze';
+import { FK_CLASSES } from './org-scope-relations';
 import { isFieldRef, isPlainPrototype } from './plain-args';
 
 /** The only columns a SCHEDULE_CAPACITY read may name (ADR 0017 section 4.7). */
@@ -142,8 +143,51 @@ function assertSelect(operation: string, select: unknown): void {
 }
 
 /**
- * Called by the extension for every query in a system scope, before the system-scope write check: the four rules
- * of the header. It throws or returns; it never rewrites the arguments.
+ * S1 of the #261 review: raw SQL cannot be held to the five columns, so it is refused under the schedule read even
+ * inside runRawSql. Called by the extension for every raw query in a system scope (it keeps the reason's name here,
+ * in the one file the call-site guard lists for it).
+ */
+export function assertNoRawUnderScheduleCapacity(reason: string, operation: string): void {
+  if (reason === REASON) {
+    throw new OrgScopeViolationError(
+      `${operation}: raw SQL is refused under ${REASON} (ADR 0017 section 4.7): read scheduled_windows through the model API, five columns only.`,
+    );
+  }
+}
+
+/**
+ * The relation fields that lead to scheduled_windows (`Organization.scheduledWindows`,
+ * `Invitation.scheduledWindows`, `User.requestedScheduledWindows`), derived from FK_CLASSES so a new one is
+ * refused without an edit here.
+ */
+export const SCHEDULE_BACK_RELATIONS: readonly string[] = deepFreeze(
+  [
+    ...new Set(FK_CLASSES.filter((key) => key.model === SCHEDULE_MODEL).map((key) => key.back)),
+  ].sort(),
+);
+
+/** The first key named like a relation to scheduled_windows, anywhere in `value` (objects and arrays). */
+function findRelationKey(value: unknown, depth: number): string | undefined {
+  if (depth > 64 || value === null || typeof value !== 'object') return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findRelationKey(item, depth + 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  for (const [key, inner] of Object.entries(value)) {
+    if (SCHEDULE_BACK_RELATIONS.includes(key)) return key;
+    const found = findRelationKey(inner, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Called by the extension for every query in a system scope, before the `unscoped` early return and the
+ * system-scope write check: the four rules of the header, and (b) through a relation. It throws or returns;
+ * it never rewrites the arguments.
  */
 export function assertScheduleCapacityScope(
   model: string,
@@ -155,6 +199,16 @@ export function assertScheduleCapacityScope(
     if (reason === REASON) {
       throw new OrgScopeViolationError(
         `${model}.${operation}: the ${REASON} reason reads scheduled_windows only (ADR 0017 section 4.7).`,
+      );
+    }
+    // (b) through a relation (B1 of the #261 review): a system query on another model may not name a
+    // relation that leads to scheduled_windows anywhere in its arguments (include, select, _count, where,
+    // orderBy, cursor, having, at any depth), or `invitation.findMany({ include: { scheduledWindows: true } })`
+    // would return every organisation's windows, all columns, under BACKGROUND_JOB or RETENTION_ERASURE.
+    const relation = findRelationKey(args, 0);
+    if (relation !== undefined) {
+      throw new OrgScopeViolationError(
+        `${model}.${operation}: ${relation} leads to scheduled_windows, which a system scope reads only under ${REASON}, on ScheduledWindow itself (ADR 0017 section 4.7).`,
       );
     }
     return;

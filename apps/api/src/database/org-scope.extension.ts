@@ -68,7 +68,7 @@ import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
 import { assertPlainArgs } from './plain-args';
-import { assertScheduleCapacityScope } from './schedule-capacity';
+import { assertNoRawUnderScheduleCapacity, assertScheduleCapacityScope } from './schedule-capacity';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import {
   applySessionScope,
@@ -211,6 +211,9 @@ export function orgScopeExtension(
             throw new RawQueryNotAllowedError(operation, true);
           }
           if (store?.rawSqlReason === undefined) throw new RawQueryNotAllowedError(operation);
+          // ADR 0017 section 4.7 (C-53; S1 of the #261 review): no raw SQL under the schedule read.
+          if (store.scope?.kind === 'system')
+            assertNoRawUnderScheduleCapacity(store.scope.reason, operation);
           return execute(query, args);
         }
 
@@ -234,6 +237,11 @@ export function orgScopeExtension(
         // CS-4.3 deny by default comes first, before the `unscoped` early return: a model that is
         // global on purpose is still not reachable by a candidate unless the allowlist names it.
         if (isCandidate) assertCandidateModelAllowed(model, operation, store?.grant);
+        // ADR 0017 section 4.7 (C-53): the scheduled_windows rules of system scope come before the
+        // `unscoped` early return too, so SCHEDULE_CAPACITY can read no unscoped model either (nit 2 of
+        // the #261 review), and no system query reaches scheduled_windows through a relation (B1).
+        if (scope?.kind === 'system')
+          assertScheduleCapacityScope(model, operation, scope.reason, args);
         if (rule.kind === 'unscoped') {
           if (isCandidate) {
             // On the allowlist and global: no row filter exists for it yet, so it fails closed.
@@ -246,10 +254,7 @@ export function orgScopeExtension(
 
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
-          // ADR 0017 section 4.7 (C-53): scheduled_windows is read across organisations only under
-          // SCHEDULE_CAPACITY, in five columns, and never written in system scope; the reason reads
-          // nothing else (schedule-capacity.ts).
-          assertScheduleCapacityScope(model, operation, scope.reason, args);
+          // (The scheduled_windows rules of system scope ran above, before the `unscoped` return.)
           // System scope is unfiltered, but an unknown operation, a nested relation write, an orgId
           // in an update and a change of a path model's first-hop scope key are refused here too
           // (a row is never moved to another org).

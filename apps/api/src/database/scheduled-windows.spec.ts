@@ -184,6 +184,13 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
       'scheduled_windows_times_check',
     ]);
     expect(result.rows[1]?.def).toBe('CHECK (((ends_at > starts_at) AND (ceiling_at > ends_at)))');
+    // Nit 7 of the #261 review: the kind and references CHECK is pinned by its two clauses.
+    expect(result.rows[0]?.def).toContain(
+      "(kind = 'SLOT'::scheduled_window_kind) = (invitation_id IS NOT NULL)",
+    );
+    expect(result.rows[0]?.def).toContain(
+      "(kind = 'REVIEW'::scheduled_window_kind) = (requested_by IS NOT NULL)",
+    );
   });
 
   it('TC-106 the indexes: (org_id, starts_at) and the partial unique (invitation_id) WHERE status = SCHEDULED', async () => {
@@ -383,7 +390,104 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
         }),
       ),
     );
-    expect(error).toBeDefined();
+    // S3 of the #261 review: refused by the composite key (P2003, value-free) or by the extension, nothing
+    // else; no row is written; and the same create with A's own invitation succeeds.
+    expect(
+      error instanceof OrgScopeViolationError ||
+        (error as { code?: string } | undefined)?.code === 'P2003',
+    ).toBe(true);
+    const leaked = await pg.query(
+      `SELECT 1 FROM scheduled_windows WHERE org_id = $1 AND invitation_id = $2`,
+      [A.orgId, B.chain.invitationId],
+    );
+    expect(leaked.rowCount).toBe(0);
+    const own = await orgContext.runInOrg(A.orgId, () =>
+      client.scheduledWindow.create({
+        data: {
+          orgId: A.orgId,
+          kind: 'SLOT',
+          invitationId: A.chain.invitationId,
+          startsAt: hours(0),
+          endsAt: hours(2),
+          ceilingAt: hours(4),
+          status: 'CANCELLED',
+        },
+        select: { id: true },
+      }),
+    );
+    expect(own.id).toEqual(expect.any(String));
+  });
+
+  it('TC-008 B1 (#261 review): no system query reaches scheduled_windows through a relation, before any statement', async () => {
+    const routes: Array<[string, () => Promise<unknown>]> = [
+      [
+        'an include from Invitation (BACKGROUND_JOB)',
+        () =>
+          orgContext.runSystem('BACKGROUND_JOB', () =>
+            client.invitation.findMany({ include: { scheduledWindows: true } }),
+          ),
+      ],
+      [
+        'a _count from Organization (BACKGROUND_JOB)',
+        () =>
+          orgContext.runSystem('BACKGROUND_JOB', () =>
+            client.organization.findMany({
+              select: { _count: { select: { scheduledWindows: true } } },
+            }),
+          ),
+      ],
+      [
+        'a some filter from User (AUTH_BOOTSTRAP)',
+        () =>
+          orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+            client.user.findMany({
+              select: { id: true },
+              where: { requestedScheduledWindows: { some: {} } },
+            }),
+          ),
+      ],
+      [
+        'two levels down from Session (RETENTION_ERASURE)',
+        () =>
+          orgContext.runSystem('RETENTION_ERASURE', () =>
+            client.session.findMany({
+              include: { invitation: { include: { scheduledWindows: true } } },
+            }),
+          ),
+      ],
+      [
+        'the fluent API from Invitation (BACKGROUND_JOB)',
+        () =>
+          orgContext.runSystem('BACKGROUND_JOB', () =>
+            client.invitation
+              .findUnique({ where: { id: A.chain.invitationId } })
+              .scheduledWindows(),
+          ),
+      ],
+    ];
+    for (const [what, run] of routes) {
+      const before = await statementCount();
+      const error = await failure(run());
+      expect({ what, refused: error instanceof OrgScopeViolationError }).toEqual({
+        what,
+        refused: true,
+      });
+      expect({ what, statements: await statementCount() }).toEqual({ what, statements: before });
+    }
+  });
+
+  it('TC-008 S1 (#261 review): raw SQL is refused under SCHEDULE_CAPACITY, even inside runRawSql', async () => {
+    const before = await statementCount();
+    const error = await failure(
+      orgContext.runSystem('SCHEDULE_CAPACITY', () =>
+        orgContext.runRawSql(
+          'monthly instance-hours union',
+          () => client.$queryRaw`SELECT org_id, invitation_id FROM scheduled_windows`,
+        ),
+      ),
+    );
+    expect(error).toBeInstanceOf(OrgScopeViolationError);
+    expect(await statementCount()).toBe(before);
   });
 
   it('TC-008 CANDIDATE scope cannot touch scheduled_windows', async () => {

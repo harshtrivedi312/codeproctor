@@ -7,8 +7,8 @@
 -- No CHECK on the value. A zone name is validated as an IANA name by the invite DTO (zod or class-validator,
 -- the backend track), and Postgres's own list (pg_timezone_names) differs from the one the runtime uses.
 -- It hints at the candidate's location, so it is candidate data: erasure nulls it with the other personal
--- fields of the invitation (ADR 0004 9.5), and CS-4 hides it from CANDIDATE reads (candidate-interim.ts lists
--- none of its columns by default, so the column is omitted until someone lists it).
+-- fields of the invitation (ADR 0004 9.5), and CS-4 hides it from CANDIDATE reads (candidate-interim.ts does
+-- not list time_zone among the readable Invitation columns, so the default omit hides it).
 --
 -- No GRANT is needed: app_user holds its privileges on invitations at table level (audit_append_only), and a
 -- table-level privilege covers a column added later.
