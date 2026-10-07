@@ -2,15 +2,19 @@
 import * as React from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { ApiFailure } from '@/features/admin/queries';
 import {
   formatDateTime,
   formatDuration,
   KIND_LABEL,
   playbackParts,
-  type PlaybackPart,
   type ReviewRecording,
 } from './model';
+import {
+  downloadParts,
+  ExpiredPartError,
+  PartDownloadError,
+  RecordingTooLargeError,
+} from './playback-download';
 import { fetchPlayback, isPlaybackUnavailable } from './queries';
 
 /* eslint-disable jsx-a11y/media-has-caption -- reviewer recordings carry no captions (follow-up) */
@@ -39,14 +43,13 @@ export function RecordingsPanel({
   );
 }
 
-interface Loaded {
-  parts: PlaybackPart[];
-  expiresAt: number;
-}
+type RowState = 'idle' | 'loading' | 'unavailable' | 'error' | 'toolarge';
 
 /**
- * One recording. The signed url lives only in this component's state: it is fetched on Play,
- * fetched again when it has expired, and never cached, logged or put in an address.
+ * One recording. On Play every part is downloaded in seq order into one Blob and played from an
+ * object URL (see playback-download.ts). The signed urls and the object URL live only in this
+ * component: never cached, logged, stored or put in a label. The object URL is revoked on a new
+ * Play, on error and on unmount; a late download cannot set state (AbortController).
  */
 function RecordingRow({
   sessionId,
@@ -55,49 +58,77 @@ function RecordingRow({
   sessionId: string;
   recording: ReviewRecording;
 }): React.JSX.Element {
-  const [loaded, setLoaded] = React.useState<Loaded | null>(null);
-  const [index, setIndex] = React.useState(0);
-  const [state, setState] = React.useState<'idle' | 'loading' | 'unavailable' | 'error'>('idle');
-  // One automatic refresh of an expired url per Play click, so a bad link cannot loop.
-  const [autoRefreshed, setAutoRefreshed] = React.useState(false);
+  const [objectUrl, setObjectUrl] = React.useState<string | null>(null);
+  const [state, setState] = React.useState<RowState>('idle');
+  const [progress, setProgress] = React.useState<{ done: number; total: number } | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
+  const urlRef = React.useRef<string | null>(null);
   const label = `${KIND_LABEL[recording.kind]} recording`;
 
-  const play = async (automatic = false): Promise<void> => {
-    if (!automatic) setAutoRefreshed(false);
+  const dropUrl = React.useCallback((): void => {
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    urlRef.current = null;
+    setObjectUrl(null);
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+      urlRef.current = null;
+    },
+    [],
+  );
+
+  const play = async (): Promise<void> => {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    dropUrl();
     setState('loading');
-    try {
-      const p = await fetchPlayback(sessionId, recording.id);
+    setProgress(null);
+    const onProgress = (done: number, total: number): void => {
+      if (!ctrl.signal.aborted) setProgress({ done, total });
+    };
+    const fetchAndDownload = async (): Promise<Blob> => {
+      const p = await fetchPlayback(sessionId, recording.id, ctrl.signal);
       const parts = playbackParts(p);
-      if (parts.length === 0) throw new ApiFailure(502, '');
-      setLoaded({ parts, expiresAt: Date.parse(p.expiresAt) });
-      setIndex(0);
+      if (parts.length === 0) throw new PartDownloadError('empty');
+      return downloadParts(parts, p.contentType, ctrl.signal, onProgress);
+    };
+    try {
+      let blob: Blob;
+      try {
+        blob = await fetchAndDownload();
+      } catch (e) {
+        // An expired link: one automatic refresh of the playback answer per Play click.
+        if (!(e instanceof ExpiredPartError)) throw e;
+        blob = await fetchAndDownload();
+      }
+      if (ctrl.signal.aborted) return;
+      const url = URL.createObjectURL(blob);
+      urlRef.current = url;
+      setObjectUrl(url);
       setState('idle');
+      setProgress(null);
     } catch (e) {
-      setLoaded(null);
-      setState(isPlaybackUnavailable(e) ? 'unavailable' : 'error');
+      if (ctrl.signal.aborted) return;
+      dropUrl();
+      setProgress(null);
+      setState(
+        e instanceof RecordingTooLargeError
+          ? 'toolarge'
+          : isPlaybackUnavailable(e)
+            ? 'unavailable'
+            : 'error',
+      );
     }
   };
 
-  const part = loaded?.parts[index];
-  const mediaProps = part
-    ? {
-        src: part.url,
-        controls: true,
-        autoPlay: true,
-        'aria-label': `${label}, part ${index + 1} of ${loaded?.parts.length ?? 1}`,
-        onEnded: () => setIndex((i) => (loaded && i + 1 < loaded.parts.length ? i + 1 : i)),
-        // An expired link stops the media with an error: ask for a fresh one.
-        onError: () => {
-          if (loaded && Date.now() >= loaded.expiresAt && !autoRefreshed) {
-            setAutoRefreshed(true);
-            void play(true);
-          } else {
-            setLoaded(null);
-            setState('error');
-          }
-        },
-      }
-    : null;
+  const onMediaError = (): void => {
+    dropUrl();
+    setState('error');
+  };
 
   return (
     <li className="rounded-md border bg-card p-3">
@@ -111,22 +142,50 @@ function RecordingRow({
           variant="outline"
           className="ml-auto"
           disabled={state === 'loading'}
-          aria-label={`${loaded ? 'Reload' : 'Play'} ${label}`}
+          aria-label={`${objectUrl ? 'Reload' : 'Play'} ${label}`}
           onClick={() => void play()}
         >
-          {state === 'loading' ? 'Loading…' : loaded ? 'Reload' : 'Play'}
+          {state === 'loading' ? 'Loading…' : objectUrl ? 'Reload' : 'Play'}
         </Button>
       </div>
-      {mediaProps ? (
+      {state === 'loading' ? (
+        <p role="status" className="mt-2 text-sm text-muted-foreground">
+          Loading recording…
+          {progress && progress.total > 1
+            ? ` part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`
+            : ''}
+        </p>
+      ) : null}
+      {objectUrl ? (
         recording.kind === 'AUDIO' ? (
-          <audio {...mediaProps} className="mt-2 w-full" />
+          <audio
+            src={objectUrl}
+            controls
+            autoPlay
+            aria-label={label}
+            onError={onMediaError}
+            className="mt-2 w-full"
+          />
         ) : (
-          <video {...mediaProps} className="mt-2 max-h-80 w-full rounded-md bg-black" />
+          <video
+            src={objectUrl}
+            controls
+            autoPlay
+            aria-label={label}
+            onError={onMediaError}
+            className="mt-2 max-h-80 w-full rounded-md bg-black"
+          />
         )
       ) : null}
       {state === 'unavailable' ? (
         <Alert tone="info" role="status" className="mt-2">
           Playback is not available yet. Recordings will play here once storage is connected.
+        </Alert>
+      ) : null}
+      {state === 'toolarge' ? (
+        <Alert tone="info" role="status" className="mt-2">
+          This recording is too large to play in the browser (over 500 MB). Ask an administrator to
+          export it.
         </Alert>
       ) : null}
       {state === 'error' ? (

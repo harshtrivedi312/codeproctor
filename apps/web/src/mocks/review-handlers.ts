@@ -9,7 +9,7 @@ import { mockRoleFromToken } from './auth-handlers';
  * object storage is bound, see mockPlaybackUnavailable). The scoring PATCH follows the contract. The scoring route follows
  * docs/api-contract.md section 7 (binary score, 409 ANSWER_NOT_MANUAL / SESSION_NOT_UNDER_REVIEW /
  * VERDICT_ALREADY_SET). Fake people only; in memory; a page reload resets the demo. The playback
- * url is a tiny generated WAV data url: video elements play its sound with a black picture.
+ * parts are urls served by this mock (a tiny WAV cut into 3 pieces).
  */
 
 type Bundle = Schemas['ReviewSession'];
@@ -226,7 +226,7 @@ function allowed(request: Request, permission: Permission): Response | null {
 }
 
 /** A 1-second quiet tone as a WAV data url, small and offline. */
-function sampleMedia(): string {
+function sampleBytes(): Uint8Array {
   const rate = 8000;
   const n = rate;
   const bytes = new Uint8Array(44 + n);
@@ -248,15 +248,27 @@ function sampleMedia(): string {
   view.setUint32(40, n, true);
   for (let i = 0; i < n; i += 1)
     bytes[44 + i] = 128 + Math.round(10 * Math.sin((i / rate) * 2 * Math.PI * 440));
-  let bin = '';
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return `data:audio/wav;base64,${btoa(bin)}`;
+  return bytes;
 }
+
+/** Tests count and inspect the part downloads. */
+export const MOCK_MEDIA_PARTS = 3;
+const mediaPath = (seq: number): string => `${apiBaseUrl}/mock-media/${seq}`;
 
 export function createReviewHandlers(options: { latencyMs: number }) {
   const base = `${apiBaseUrl}/v1/review`;
   const find = (id: unknown): Bundle | undefined => state.find((b) => b.session.id === id);
   return [
+    // The "storage" behind the part urls: one WAV cut into pieces. Only the first piece has the
+    // header, so the pieces play only when concatenated, like the WebM chunks of a real recording.
+    http.get(`${apiBaseUrl}/mock-media/:seq`, ({ params }) => {
+      const bytes = sampleBytes();
+      const size = Math.ceil(bytes.length / MOCK_MEDIA_PARTS);
+      const seq = Number(params.seq);
+      return new HttpResponse(bytes.slice(seq * size, (seq + 1) * size), {
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    }),
     http.get(`${base}/queue`, async ({ request }) => {
       const denied = allowed(request, 'review_queue:read');
       if (denied) return denied;
@@ -305,10 +317,13 @@ export function createReviewHandlers(options: { latencyMs: number }) {
         if (!b || !b.recordings.some((r) => r.id === params.recordingId)) {
           return problem(404, 'Not found.');
         }
-        const url = sampleMedia();
         return HttpResponse.json({
-          url,
-          parts: [0, 1, 2].map((seq) => ({ url, seq, durationMs: 1000 })),
+          url: mediaPath(0),
+          parts: Array.from({ length: MOCK_MEDIA_PARTS }, (_, seq) => ({
+            url: mediaPath(seq),
+            seq,
+            durationMs: 1000,
+          })),
           expiresAt: new Date(Date.now() + 900_000).toISOString(),
           contentType: 'audio/wav',
         });
