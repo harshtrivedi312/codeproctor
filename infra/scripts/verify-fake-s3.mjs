@@ -9,10 +9,11 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], puts: Array<{ path: string, conditional: boolean }>, close: () => Promise<void> }>} */
+/** failList: every listing answers 500; failHead: every HEAD answers a bare 403; failPut: every PUT does; precondition: every conditional PUT answers 412.
+ * @returns {Promise<{ port: number, faults: { failList: boolean, failHead: boolean, failPut: boolean, precondition: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], puts: Array<{ path: string, conditional: boolean }>, close: () => Promise<void> }>} */
 export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
-  const faults = { failList: false };
+  const faults = { failList: false, failHead: false, failPut: false, precondition: false };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
   const objects = new Map();
   /** @type {Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>} */
@@ -35,6 +36,12 @@ export async function startFakeS3({ versioned = false } = {}) {
         res.end(req.method === 'HEAD' ? undefined : body);
       };
       if (req.method === 'PUT') {
+        if (faults.failPut) return send(403);
+        // A writer that created the key between our listing and our PUT: the condition fails.
+        if (faults.precondition && req.headers['if-none-match'] === '*')
+          return send(412, xml('<Error><Code>PreconditionFailed</Code></Error>'), {
+            'content-type': 'application/xml',
+          });
         // A conditional create (If-None-Match: *): refused with 412 when the key already exists.
         if (req.headers['if-none-match'] === '*' && objects.has(path))
           return send(412, xml('<Error><Code>PreconditionFailed</Code></Error>'), {
@@ -82,6 +89,7 @@ export async function startFakeS3({ versioned = false } = {}) {
           { 'content-type': 'application/xml' },
         );
       }
+      if (req.method === 'HEAD' && faults.failHead) return send(403);
       if (req.method === 'GET' || req.method === 'HEAD') {
         const wanted = url.searchParams.get('versionId');
         const history = versions.get(path) ?? [];
