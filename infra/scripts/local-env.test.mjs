@@ -74,7 +74,8 @@ describe('local-env (local demo)', () => {
     assert.equal(env.S3_SECRET_ACCESS_KEY, env.MINIO_ROOT_PASSWORD);
     assert.equal(env.S3_ACCESS_KEY_ID, env.MINIO_ROOT_USER);
     assert.ok(env.MINIO_ROOT_PASSWORD.length >= 8);
-    assert.equal(env.S3_ENDPOINT, 'http://localhost:9000');
+    assert.equal(env.S3_ENDPOINT, 'http://127.0.0.1:9000');
+    assert.equal(env.S3_REGION, 'us-east-1');
     assert.equal(env.S3_FORCE_PATH_STYLE, 'true');
     assert.equal(env.S3_MEDIA_BUCKET, 'codeproctor-media');
   });

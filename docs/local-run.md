@@ -78,12 +78,16 @@ The stack (`infra/docker-compose.yml`) binds every port to 127.0.0.1:
 | Service  | Address                                   | What it is                                                              |
 | -------- | ----------------------------------------- | ----------------------------------------------------------------------- |
 | Mailpit  | <http://localhost:8025> (SMTP on 1025)    | Catches every email (candidate codes) so nothing leaves the machine.    |
-| MinIO    | S3 <http://localhost:9000>, console <http://localhost:9001> | Local S3-compatible object store; the buckets `codeproctor-media` and `codeproctor-backup` exist at start, CORS only for `http://localhost:3000`. Login: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`. |
+| MinIO    | S3 <http://127.0.0.1:9000>, console <http://localhost:9001> | Local S3-compatible object store; the buckets `codeproctor-media` and `codeproctor-backup` exist at start, CORS only for `http://localhost:3000`. Login: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`. |
 | Adminer  | <http://localhost:8080>                   | A database browser.                                                     |
 
 An `.env` written before MinIO was added has no `MINIO_*` or `S3_*` lines, and `pnpm dev:infra` then refuses
 to start (the MinIO image would otherwise run with a publicly known login). Delete that `.env` and run
 `pnpm demo:up` (or `node infra/scripts/local-env.mjs`) again.
+
+The API reaches MinIO through exactly these `.env` values (written by `local-env.mjs`, local only):
+`S3_ENDPOINT=http://127.0.0.1:9000`, `S3_FORCE_PATH_STYLE=true`, `S3_REGION=us-east-1`,
+`S3_MEDIA_BUCKET=codeproctor-media`, and the MinIO login as `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`.
 
 The MinIO image is a frozen Bitnami build (the official MinIO images are no longer published), which is
 fine for synthetic local data and must never be used in a shared environment.
