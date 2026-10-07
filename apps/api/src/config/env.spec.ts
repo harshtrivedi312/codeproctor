@@ -61,6 +61,9 @@ describe('NFR-04 environment validation', () => {
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@example.com',
+      // Object storage (BE-09) is required in pilot and production.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       const base = { ...valid, ...live, APP_ENV };
@@ -127,6 +130,9 @@ describe('NFR-04 environment validation', () => {
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@example.com',
+      // Object storage (BE-09) is required there too.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
     expect(validateEnv(live).JUDGE0_URL).toBe('https://judge0.example.com');
     expect(() => validateEnv({ ...live, JUDGE0_URL: undefined })).toThrow(/JUDGE0_URL/);
@@ -209,6 +215,9 @@ describe('NFR-04 environment validation', () => {
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@example.com',
+      // Object storage (BE-09) is required in pilot and production.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
     for (const APP_ENV of ['pilot', 'production']) {
       expect(() => validateEnv({ ...live, APP_ENV, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
@@ -236,6 +245,9 @@ describe('NFR-04 environment validation', () => {
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@example.com',
+      // Object storage (BE-09) is required in pilot and production too.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
 
     it('C-31: defaults to noop and us-east-1 locally', () => {
@@ -770,5 +782,8 @@ function liveExtras(appEnv: string): Record<string, string> {
     WEB_ORIGIN: 'https://app.example.com',
     TRUST_PROXY_HOPS: '1',
     REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
+    // Object storage (BE-09) is required in pilot and production.
+    S3_REGION: 'eu-west-2',
+    S3_MEDIA_BUCKET: 'cp-pilot-media',
   };
 }

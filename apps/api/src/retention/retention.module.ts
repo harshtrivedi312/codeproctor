@@ -1,4 +1,5 @@
-// RetentionModule (FR-704, NFR-05). Not imported by AppModule yet. It needs two things from outside:
+// RetentionModule (FR-704, NFR-05). AppModule imports it with MediaModule as the object store. It needs
+// two things from outside:
 // a module that exports ObjectStorePort (BE-09's MediaModule, with its S3ObjectStore adapter) and
 // a scheduler that calls RetentionService.runDaily() (the BullMQ module). The port is never bound
 // here, so a build that forgets the store cannot start a run with a fake one:
