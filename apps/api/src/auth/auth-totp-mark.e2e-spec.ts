@@ -17,7 +17,13 @@ import type { PrismaService } from '../database/prisma.service';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import type { AuthService } from './auth.service';
-import { encryptSecret, passwordVersion } from './crypto.util';
+import {
+  encryptSecret,
+  newRecoveryCode,
+  normalizeRecoveryCode,
+  passwordVersion,
+  sha256Hex,
+} from './crypto.util';
 import { ARGON2_OPTIONS } from './password.service';
 import type { TotpService } from './totp.service';
 
@@ -475,6 +481,59 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(await failedLogins(u.id)).toBe(2);
     });
 
+    it('FU-BE-208, FU-BE-220, DL-37, FR-102: plain login of a user without 2FA: a lock error from clearFailures AFTER the family INSERT returned is 503 BUSY with no refund (counter stays 1)', async () => {
+      const u = await createUser({ role: UserRole.RECRUITER, totp: false });
+      spyOnService('clearFailures').mockRejectedValueOnce(lockError());
+      const refund = spyRefund();
+      const res = await login(u.email).expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      expect(refund).not.toHaveBeenCalled();
+      expect(await failedLogins(u.id)).toBe(1);
+    });
+
+    it('FU-BE-208, FU-BE-220, DL-37, FR-102: plain login: a lock error from the family INSERT itself (before insert.done) is 503 BUSY and the attempt is refunded once (counter back to 0)', async () => {
+      const u = await createUser({ role: UserRole.RECRUITER, totp: false });
+      const base = appPrisma.client as unknown as {
+        $queryRaw: (...a: unknown[]) => Promise<unknown>;
+      };
+      const real = base.$queryRaw.bind(base);
+      jest.spyOn(base, '$queryRaw').mockImplementation(async (...args: unknown[]) => {
+        const text = JSON.stringify((args[0] as { strings?: string[] } | undefined)?.strings ?? '');
+        if (text.includes('INSERT INTO refresh_tokens')) throw lockError();
+        return real(...args);
+      });
+      const refund = spyRefund();
+      await login(u.email).expect(503);
+      expect(refund).toHaveBeenCalledTimes(1);
+      expect(await failedLogins(u.id)).toBe(0);
+    });
+
+    it.each([
+      ['the commit did not land (real rollback)', false],
+      ['the commit landed', true],
+    ])(
+      'FU-BE-208, FU-BE-220, DL-37, FR-102: recovery-code login, P2028 at COMMIT of the recovery transaction when %s: no refund (counter 1 if not landed, 0 if landed) and the code is consumed per the real DB state',
+      async (_n, landed) => {
+        const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+        const recovery = newRecoveryCode();
+        await prisma.user.update({
+          where: { id: u.id },
+          data: { recoveryCodeHashes: [sha256Hex(normalizeRecoveryCode(recovery))] },
+        });
+        const challenge = await challengeFor(u.email);
+        const refund = spyRefund();
+        if (landed) commitThenFail(p2028);
+        else failAfterCallback();
+        // Still answered 503 on this path: tracked by FU-BE-219.
+        await verify2fa(challenge, recovery).expect(503);
+        expect(refund).not.toHaveBeenCalled();
+        // Landed: the transaction's own clearFailures committed (0). Not landed: the reservation stays.
+        expect(await failedLogins(u.id)).toBe(landed ? 0 : 1);
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.recoveryCodeHashes).toHaveLength(landed ? 0 : 1);
+      },
+    );
+
     it('FU-BE-208, FR-102: a successful login keeps its mark: the same code cannot be replayed with a fresh challenge', async () => {
       const u = await createUser({ role: UserRole.REVIEWER, totp: true });
       const code = authenticator.generate(SECRET);
@@ -746,13 +805,16 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
     });
 
     it.each(unknownCases)(
-      'FU-BE-208, FU-BE-219, DL-37, FR-102: %s with the commit landed is the fixed 500; 2FA is off, the mark is kept, no refund after it, and the retry is a 409',
+      'FU-BE-208, FU-BE-219, DL-37, FR-102: %s with the commit landed is the fixed 500; 2FA is off, the mark is kept, no refund after it, and (token marker mocked) the retry is a 409',
       async (_n, make) => {
         const d = await enrolled();
         const code = authenticator.generate(SECRET);
         jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+        const refund = spyRefund();
         commitThenFail(make);
         expectFixed500(await disable(d.token, code));
+        // The password step and the pre-transaction refund; none after the unknown outcome.
+        expect(refund).toHaveBeenCalledTimes(2);
         expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(
           false,
         );
@@ -762,6 +824,17 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         await disable(d.token, code).expect(409);
       },
     );
+
+    it('FU-BE-208, FU-BE-219, DL-37, FR-102: with the REAL token marker, a landed disable ends the caller token: the retry is 401 (the real web flow)', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      commitThenFail(p2028);
+      expectFixed500(await disable(d.token, code));
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(
+        false,
+      );
+      await disable(d.token, code).expect(401);
+    });
 
     it('FU-BE-208, FU-BE-219, DL-37, FR-102: P2028 at COMMIT with nothing committed is the same fixed 500; 2FA stays on, the mark is kept, and the retry is a counted replay (403)', async () => {
       const d = await enrolled();

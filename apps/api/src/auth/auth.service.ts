@@ -260,8 +260,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // DL-37: the password was already right and opening the session hit lock contention (503,
       // retry): give back the attempt of THIS request only. startSession runs on the root client
       // here, with no transaction: the refresh-family INSERT may already have committed when
-      // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-184). Failed-guess counts (wrong
-      // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
+      // clearFailures fails, leaving a family whose token was never delivered (unusable;
+      // FU-BE-184). Failed-guess counts (wrong password, wrong code) are never refunded, so
+      // contention cannot erase an attacker's count.
       // FU-BE-220: once the INSERT returned it may be a landed commit: no refund then (the retry
       // pays one more counted attempt, which fails closed).
       if (lockContentionCode(e) !== undefined && !insert.done)
@@ -673,6 +674,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     const insert = { done: false };
     // The recovery-code path is a transaction: `finished` is set when its callback returned, so a
     // failure after that is judged like every other commit-phase failure (FU-BE-208, FU-BE-220).
+    // `started: true` from the outset on purpose: a pool wait before BEGIN of the recovery
+    // transaction is therefore not treated as "never started" (clean): that fails closed.
     const phase: TxPhase = { started: true, finished: false };
     try {
       if (/^\d{6}$/.test(code)) {
