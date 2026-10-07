@@ -101,6 +101,12 @@ for (const code of ['P2028', 'P2034']) {
   );
 }
 
+/**
+ * The real pool-wait timeout, captured through Prisma 7.10 + @prisma/adapter-pg with a pool of max 1
+ * held by a long query (database/pool-timeout.spec.ts): a bare Error, no code, no cause, no meta.
+ */
+const poolTimeout = (): Error => new Error('timeout exceeded when trying to connect');
+
 describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () => {
   let warn: jest.SpyInstance<void, unknown[]>;
   let error: jest.SpyInstance<void, unknown[]>;
@@ -271,5 +277,72 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     for (let i = 0; i < 20; i++) deep = new Error('x', { cause: deep });
     expect(lockContentionCode(deep)).toBeUndefined();
     expect(lockContentionCode(new Error('x', { cause: pgError('40P01') }))).toBe('40P01');
+  });
+
+  it('FU-BE-197, DL-42, NFR-09: a pool-wait timeout is 503 + Retry-After 2 + BUSY, body has no detail from the driver, logged at error level by name and token only', () => {
+    const { status, body, headers } = run(poolTimeout());
+    expect(status).toBe(503);
+    expect(headers['Retry-After']).toBe('2');
+    expect(body).toEqual({
+      type: 'about:blank',
+      title: 'Service Unavailable',
+      status: 503,
+      detail: 'The service is busy; retry shortly.',
+      code: 'BUSY',
+      instance: '/api/v1/x',
+      traceId: 'trace-1',
+    });
+    expect(JSON.stringify(body)).not.toMatch(/timeout exceeded|connect/);
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      { traceId: 'trace-1', errorName: 'Error', lockCode: 'POOL_TIMEOUT', pool: 'prisma' },
+      'Database pool wait timed out',
+    );
+    expect(JSON.stringify(error.mock.calls)).not.toMatch(/timeout exceeded/);
+  });
+
+  it('FU-BE-197, DL-42: the pool timeout matcher finds the shape bare, in a cause chain and as Prisma P2024, and nothing else', () => {
+    expect(lockContentionCode(poolTimeout())).toBe('POOL_TIMEOUT');
+    expect(lockContentionCode(new Error('wrapped', { cause: poolTimeout() }))).toBe('POOL_TIMEOUT');
+    expect(lockContentionCode(known('P2024'))).toBe('POOL_TIMEOUT');
+    expect(run(known('P2024')).status).toBe(503);
+    // A different message, a partial message and a non-Error carrying the text are not matches.
+    expect(lockContentionCode(new Error('Connection terminated due to connection timeout'))).toBe(
+      undefined,
+    );
+    expect(lockContentionCode(new Error('timeout exceeded when trying to connect to x'))).toBe(
+      undefined,
+    );
+    expect(lockContentionCode({ message: 'timeout exceeded when trying to connect' })).toBe(
+      undefined,
+    );
+    expect(lockContentionCode('timeout exceeded when trying to connect')).toBeUndefined();
+    // Our own errors are never reclassified, nor are their causes followed.
+    expect(
+      lockContentionCode(new ConflictException('x', { cause: poolTimeout() })),
+    ).toBeUndefined();
+    const own = new HttpException('timeout exceeded when trying to connect', 500);
+    expect(run(own).status).toBe(500);
+  });
+
+  it('FU-BE-197, DL-42, P-37: a pool timeout carried by AuditWriteAfterCommitError is still the fixed 500, never BUSY', () => {
+    const e = Object.assign(new AuditWriteAfterCommitError('USER_INVITED'), {
+      cause: poolTimeout(),
+    });
+    const { status, body, headers } = run(e);
+    expect(status).toBe(500);
+    expect(headers['Retry-After']).toBeUndefined();
+    expect(body.code).toBeUndefined();
+  });
+
+  it('FU-BE-197: a hostile getter on the message does not break detection', () => {
+    const hostile = new Error('x');
+    Object.defineProperty(hostile, 'message', {
+      get() {
+        throw new Error('boom');
+      },
+    });
+    expect(lockContentionCode(hostile)).toBeUndefined();
   });
 });
