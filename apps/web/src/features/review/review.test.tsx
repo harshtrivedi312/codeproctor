@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
 import { RequireRole } from '@/features/auth/require-role';
@@ -147,62 +147,6 @@ describe('FR-902 review session', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/scored automatically/);
   });
 
-  it('FR-701: Play fetches the signed url on click and sets it on the media element', async () => {
-    const u = userEvent.setup();
-    let calls = 0;
-    server.events.on('request:start', ({ request }) => {
-      if (request.url.endsWith('/playback')) calls += 1;
-    });
-    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
-    await screen.findByRole('heading', { name: 'Priya Nair' });
-    expect(calls).toBe(0);
-    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
-    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
-    expect(container.querySelector('audio')?.getAttribute('src')).toMatch(/^data:audio\/wav/);
-    expect(calls).toBe(1);
-    server.events.removeAllListeners();
-  });
-
-  it('FR-701: ordered parts play in sequence, advancing on ended', async () => {
-    const u = userEvent.setup();
-    server.use(
-      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
-        HttpResponse.json({
-          parts: [
-            { url: 'blob:part-1', durationMs: 1000 },
-            { url: 'blob:part-2', durationMs: 1000 },
-          ],
-          expiresAt: new Date(Date.now() + 900_000).toISOString(),
-          contentType: 'video/webm',
-        }),
-      ),
-    );
-    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
-    await screen.findByRole('heading', { name: 'Priya Nair' });
-    await u.click(screen.getByRole('button', { name: /Play Screen recording/ }));
-    await waitFor(() => expect(container.querySelector('video')).not.toBeNull());
-    const video = container.querySelector('video') as HTMLVideoElement;
-    expect(video.getAttribute('src')).toBe('blob:part-1');
-    video.dispatchEvent(new Event('ended'));
-    await waitFor(() => expect(video.getAttribute('src')).toBe('blob:part-2'));
-  });
-
-  it('FR-701: a 503 from playback is a calm "not available yet" with no retry loop', async () => {
-    const u = userEvent.setup();
-    let calls = 0;
-    server.use(
-      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () => {
-        calls += 1;
-        return HttpResponse.json({ status: 503, title: 'Service Unavailable' }, { status: 503 });
-      }),
-    );
-    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
-    await screen.findByRole('heading', { name: 'Priya Nair' });
-    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
-    expect(await screen.findByText(/Playback is not available yet/)).toBeInTheDocument();
-    expect(calls).toBe(1);
-  });
-
   it('FR-902 D-23: a 409 on scoring reloads the session so the screen shows the truth', async () => {
     const u = userEvent.setup();
     let gets = 0;
@@ -252,33 +196,243 @@ describe('FR-902 review session', () => {
     expect(screen.getByText(/only while the session is under review/)).toBeInTheDocument();
   });
 
-  it('FR-701: an expired link is refreshed once per Play click, never in a loop', async () => {
+  it('FR-701: Play downloads every part in seq order into one Blob and plays it from an object URL', async () => {
     const u = userEvent.setup();
-    let calls = 0;
+    const { blobs, revoked } = stubObjectUrls();
+    const order: string[] = [];
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.includes('/mock-media/')) order.push(request.url.split('/').pop() ?? '');
+    });
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    expect(order).toEqual([]);
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+    expect(order).toEqual(['0', '1', '2']);
+    expect(container.querySelector('audio')?.getAttribute('src')).toBe('blob:mock-1');
+    const blob = blobs[0]!;
+    expect(blob.type).toBe('audio/webm');
+    const bytes = await readBytes(blob);
+    expect(String.fromCharCode(...bytes.slice(0, 4))).toBe('RIFF');
+    expect(bytes.length).toBe(44 + 8000);
+    expect(revoked).toEqual([]);
+    server.events.removeAllListeners();
+  });
+
+  it('FR-701: the object URL is revoked on unmount and on a new Play', async () => {
+    const u = userEvent.setup();
+    const { revoked } = stubObjectUrls();
+    const view = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(view.container.querySelector('audio')).not.toBeNull());
+    await u.click(screen.getByRole('button', { name: /Reload Audio recording/ }));
+    await waitFor(() => expect(revoked).toEqual(['blob:mock-1']));
+    await waitFor(() =>
+      expect(view.container.querySelector('audio')?.getAttribute('src')).toBe('blob:mock-2'),
+    );
+    view.unmount();
+    expect(revoked).toEqual(['blob:mock-1', 'blob:mock-2']);
+  });
+
+  it('FR-701: a failing part shows the error, plays nothing and creates no object URL', async () => {
+    const u = userEvent.setup();
+    const { blobs } = stubObjectUrls();
     server.use(
-      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () => {
-        calls += 1;
-        return HttpResponse.json({
-          url: 'blob:gone',
-          parts: [{ url: 'blob:gone', seq: 0, durationMs: 1000 }],
-          expiresAt: new Date(Date.now() - 1000).toISOString(),
-          contentType: 'audio/webm',
-        });
+      http.get(`${apiBaseUrl}/mock-media/1`, () => new HttpResponse(null, { status: 500 })),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    expect(await screen.findByText(/We could not load this recording/)).toBeInTheDocument();
+    expect(container.querySelector('audio')).toBeNull();
+    expect(blobs).toHaveLength(0);
+  });
+
+  it('FR-701: an expired part triggers exactly one refresh of the playback answer', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    let playbacks = 0;
+    let firstPart = 0;
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/playback')) playbacks += 1;
+    });
+    server.use(
+      http.get(`${apiBaseUrl}/mock-media/0`, () => {
+        firstPart += 1;
+        return firstPart === 1
+          ? new HttpResponse(null, { status: 403 })
+          : new HttpResponse(new Uint8Array([1, 2]));
       }),
     );
     const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
     await screen.findByRole('heading', { name: 'Priya Nair' });
     await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
-    const audio = await waitFor(() => {
-      const el = container.querySelector('audio');
-      expect(el).not.toBeNull();
-      return el as HTMLAudioElement;
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+    expect(playbacks).toBe(2);
+    server.events.removeAllListeners();
+  });
+
+  it('FR-701: a part that stays expired stops after one refresh with an error, no loop', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    let playbacks = 0;
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/playback')) playbacks += 1;
     });
-    audio.dispatchEvent(new Event('error'));
-    await waitFor(() => expect(calls).toBe(2));
-    container.querySelector('audio')?.dispatchEvent(new Event('error'));
+    server.use(
+      http.get(`${apiBaseUrl}/mock-media/0`, () => new HttpResponse(null, { status: 403 })),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
     expect(await screen.findByText(/We could not load this recording/)).toBeInTheDocument();
-    expect(calls).toBe(2);
+    expect(playbacks).toBe(2);
+    server.events.removeAllListeners();
+  });
+
+  it('FR-701: a recording over the size cap is refused with a message', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    server.use(
+      http.get(
+        `${apiBaseUrl}/mock-media/0`,
+        () =>
+          new HttpResponse(new Uint8Array([1]), {
+            headers: { 'content-length': String(600 * 1024 * 1024) },
+          }),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    expect(await screen.findByText(/too large to play/)).toBeInTheDocument();
+  });
+
+  it('FR-701: a hostile or empty content type is refused and no part is fetched', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    for (const contentType of ['text/html', '']) {
+      let partFetches = 0;
+      server.events.on('request:start', ({ request }) => {
+        if (request.url.includes('/mock-media/')) partFetches += 1;
+      });
+      server.use(
+        http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
+          HttpResponse.json({
+            url: `${apiBaseUrl}/mock-media/0`,
+            parts: [{ url: `${apiBaseUrl}/mock-media/0`, seq: 0, durationMs: 1000 }],
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            contentType,
+          }),
+        ),
+      );
+      const view = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+      await screen.findByRole('heading', { name: 'Priya Nair' });
+      await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+      expect(await screen.findByText(/We could not load this recording/)).toBeInTheDocument();
+      expect(partFetches).toBe(0);
+      server.events.removeAllListeners();
+      view.unmount();
+    }
+  });
+
+  it('FR-701: a codecs parameter on audio/webm is accepted', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
+        HttpResponse.json({
+          url: `${apiBaseUrl}/mock-media/0`,
+          parts: [{ url: `${apiBaseUrl}/mock-media/0`, seq: 0, durationMs: 1000 }],
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          contentType: 'audio/webm;codecs=opus',
+        }),
+      ),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+  });
+
+  it('FR-701: a missing part number shows a note and still plays what exists', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
+        HttpResponse.json({
+          url: `${apiBaseUrl}/mock-media/0`,
+          parts: [
+            { url: `${apiBaseUrl}/mock-media/0`, seq: 0, durationMs: 1000 },
+            { url: `${apiBaseUrl}/mock-media/2`, seq: 2, durationMs: 1000 },
+          ],
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          contentType: 'audio/webm',
+        }),
+      ),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+    expect(screen.getByText(/Part of this recording is missing/)).toBeInTheDocument();
+  });
+
+  it('FR-701: unmounting while a part is pending never creates an object URL', async () => {
+    const u = userEvent.setup();
+    const { blobs } = stubObjectUrls();
+    server.use(
+      http.get(`${apiBaseUrl}/mock-media/1`, async () => {
+        await delay(150);
+        return new HttpResponse(new Uint8Array([1, 2, 3]));
+      }),
+    );
+    const view = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await screen.findByText(/Loading recording/);
+    view.unmount();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(blobs).toHaveLength(0);
+  });
+
+  it('FR-701: a 503 from playback is a calm "not available yet" with no retry loop', async () => {
+    const u = userEvent.setup();
+    let calls = 0;
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () => {
+        calls += 1;
+        return HttpResponse.json({ status: 503, title: 'Service Unavailable' }, { status: 503 });
+      }),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    expect(await screen.findByText(/Playback is not available yet/)).toBeInTheDocument();
+    expect(calls).toBe(1);
+  });
+
+  it('FR-701: no presigned or object url reaches the console or the page labels', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => undefined),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+    const logged = spies
+      .flatMap((s) => s.mock.calls as unknown[][])
+      .map((c) => c.map((x) => String(x)).join(' '))
+      .join(' ');
+    expect(logged).not.toMatch(/mock-media|blob:/);
+    const labels = [...container.querySelectorAll('[aria-label]')].map((e) =>
+      e.getAttribute('aria-label'),
+    );
+    expect(labels.join(' ')).not.toMatch(/mock-media|blob:/);
+    spies.forEach((s) => s.mockRestore());
   });
 
   it('FR-703: the mock playback 503 shows the calm message', async () => {
@@ -366,4 +520,32 @@ function bundleWithRun() {
       },
     ],
   };
+}
+
+/** jsdom has no object URLs: record the blobs and the revocations. */
+function stubObjectUrls() {
+  const blobs: Blob[] = [];
+  const revoked: string[] = [];
+  vi.stubGlobal(
+    'URL',
+    Object.assign(URL, {
+      createObjectURL: (b: Blob) => {
+        blobs.push(b);
+        return `blob:mock-${blobs.length}`;
+      },
+      revokeObjectURL: (u: string) => {
+        revoked.push(u);
+      },
+    }),
+  );
+  return { blobs, revoked };
+}
+
+function readBytes(blob: Blob): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(new Uint8Array(r.result as ArrayBuffer));
+    r.onerror = () => reject(new Error('read failed'));
+    r.readAsArrayBuffer(blob);
+  });
 }

@@ -66,8 +66,8 @@ describe('review read API units (FR-901, FR-703)', () => {
 
   it('FR-703: the in-memory double records the ttl', async () => {
     const s = new InMemoryRecordingStorage();
-    await s.presignGet('k', 900);
-    expect(s.calls).toEqual([{ key: 'k', ttlSeconds: 900 }]);
+    await s.presignGet('k', 'video/webm', 900);
+    expect(s.calls).toEqual([{ key: 'k', contentType: 'video/webm', ttlSeconds: 900 }]);
   });
 
   it('FR-103, FR-105: the three review routes are REVIEWER and SUPER_ADMIN only and audited', () => {

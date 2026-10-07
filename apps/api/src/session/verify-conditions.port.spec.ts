@@ -15,7 +15,6 @@ import type { MigratedDatabase } from '../database/testing/migrated-postgres';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import type { IdentityCheckStatus, MediaStream } from '../generated/prisma/enums.js';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
-import { SessionLockPort, UnwiredSessionLockPort } from './session-lock.port';
 import { SessionModule } from './session.module';
 import {
   ColumnVerifyConditions,
@@ -231,12 +230,11 @@ describe('ColumnVerifyConditions (FR-402, FR-403, FR-404, FR-605, ADR 0013 secti
 class InfraStubs {}
 
 describe('SessionModule bindings (FU-BEB-111, FR-402)', () => {
-  it('ADR 0013 5.7, FR-402: the module resolves SessionLockPort to UnwiredSessionLockPort and VerifyConditionsPort to ColumnVerifyConditions', async () => {
+  it('ADR 0013 5.7, FR-402: the module resolves VerifyConditionsPort to ColumnVerifyConditions', async () => {
     // compile() without init(): no worker or queue is started.
     const moduleRef = await Test.createTestingModule({
       imports: [InfraStubs, SessionModule],
     }).compile();
-    expect(moduleRef.get(SessionLockPort)).toBeInstanceOf(UnwiredSessionLockPort);
     expect(moduleRef.get(VerifyConditionsPort)).toBeInstanceOf(ColumnVerifyConditions);
     await moduleRef.close();
   });

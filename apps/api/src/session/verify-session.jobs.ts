@@ -30,7 +30,6 @@ import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import { bullConnection } from './bull-connection';
 import { SessionJobProcessor } from './session-job.processor';
-import { SessionLockPort } from './session-lock.port';
 import { SessionStateConflictError } from './session-state.errors';
 import { SessionStateService } from './session-state.service';
 import { VerifyConditionsPort } from './verify-conditions.port';
@@ -69,12 +68,11 @@ export class VerifySessionJobs
     private readonly config: ConfigService<Env, true>,
     prisma: PrismaService,
     orgContext: OrgContextService,
-    locks: SessionLockPort,
     private readonly states: SessionStateService,
     private readonly conditions: VerifyConditionsPort,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {
-    super(prisma, orgContext, locks);
+    super(prisma, orgContext, states);
   }
 
   onModuleInit(): void {

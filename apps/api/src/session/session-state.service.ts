@@ -21,20 +21,27 @@ import type { Env } from '../config/env';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import type { PauseReason, SessionStatus } from '../generated/prisma/enums.js';
+import { SessionNotFoundError } from '../database/errors';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 import type { Prisma } from '../generated/prisma/client.js';
+import {
+  guardLive as coreGuardLive,
+  lockForAccommodation as coreLockForAccommodation,
+  lockAnySession as coreLockAnySession,
+} from '../database/session-locks';
 import { busyLockToProblem } from './busy-lock';
 import { effectiveSectionDeadline, effectiveSessionDeadline, proctorPauseCapMs } from './deadlines';
-import { SessionLockPort, SessionNotFoundError } from './session-lock.port';
-import type { SessionLockState, SessionTx } from './session-lock.port';
 import { IllegalTransitionError, SessionStateConflictError } from './session-state.errors';
 import {
   isAllowedTransition,
   stampsRetentionAnchor,
   stampsSubmittedAt,
 } from './session-transitions';
+
+/** The transaction client a session write receives (`prisma.client.$transaction(async (tx) => ...)`). */
+export type SessionTx = Parameters<Parameters<OrgScopedPrismaClient['$transaction']>[0]>[0];
 
 /** Either the scoped client or the client a `$transaction` callback receives. */
 export type SessionDb = Pick<OrgScopedPrismaClient, 'session'>;
@@ -79,27 +86,26 @@ export class SessionStateService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
-    private readonly locks: SessionLockPort,
     private readonly config: ConfigService<Env, true>,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
 
-  // The lock call shapes (ADR 0013 section 5.7, ADR 0006 section 8.5). Thin wrappers: today they
-  // delegate to the port (fail-closed until Database A's #208 core is bound); when it lands their
-  // bodies call `database/session-locks`, the only place that imports it (FU-BEB-111).
+  // The three per-session write locks (ADR 0013 section 5.7, ADR 0006 section 8.5). Thin wrappers over the
+  // lock core of Database A (database/session-locks.ts), which only this file imports. The bodies are
+  // pinned by lock-call-sites.spec.ts: `return <core>(tx, sessionId);` and nothing else.
   /** guardLive has exactly two callers: SessionJobProcessor.withLiveSession and proctorResume (the one staff caller). */
-  guardLive(tx: SessionTx, sessionId: string): Promise<SessionLockState> {
-    return this.locks.guardLive(tx, sessionId);
+  guardLive(tx: SessionTx, sessionId: string): Promise<'LIVE' | 'ERASED'> {
+    return coreGuardLive(tx, sessionId);
   }
 
-  /** withAnySession only. */
-  lockAnySession(tx: SessionTx, sessionId: string): Promise<SessionLockState> {
-    return this.locks.lockAnySession(tx, sessionId);
+  /** withAnySession only (the erasure-compatible jobs). Answers the status read under the lock. */
+  lockAnySession(tx: SessionTx, sessionId: string): Promise<SessionStatus> {
+    return coreLockAnySession(tx, sessionId);
   }
 
   /** The ADR 0015 accommodation writers and the erasure, R-4 and R-10 jobs; never with guardLive. */
   lockForAccommodation(tx: SessionTx, sessionId: string): Promise<SessionStatus> {
-    return this.locks.lockForAccommodation(tx, sessionId);
+    return coreLockForAccommodation(tx, sessionId);
   }
 
   /**
