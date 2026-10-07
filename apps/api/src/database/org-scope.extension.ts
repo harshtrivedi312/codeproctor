@@ -68,6 +68,7 @@ import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
 import { assertPlainArgs } from './plain-args';
+import { assertScheduleCapacityScope } from './schedule-capacity';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import {
   applySessionScope,
@@ -245,6 +246,10 @@ export function orgScopeExtension(
 
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
+          // ADR 0017 section 4.7 (C-53): scheduled_windows is read across organisations only under
+          // SCHEDULE_CAPACITY, in five columns, and never written in system scope; the reason reads
+          // nothing else (schedule-capacity.ts).
+          assertScheduleCapacityScope(model, operation, scope.reason, args);
           // System scope is unfiltered, but an unknown operation, a nested relation write, an orgId
           // in an update and a change of a path model's first-hop scope key are refused here too
           // (a row is never moved to another org).

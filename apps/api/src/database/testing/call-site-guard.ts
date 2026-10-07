@@ -30,6 +30,10 @@ export const GUARDED_NAMES = [
   'claimCandidateFactsSetter',
   'setCandidateFacts',
   'detachForSessionJob',
+  // The cross-organisation read of scheduled_windows (ADR 0017 section 4.7, C-53): `runSystem('SCHEDULE_CAPACITY',
+  // ...)` is a string that is exactly the name, so a file that enters the reason needs an entry. None outside
+  // database/ today: the schedule code (backend track) adds its one file in its own reviewed PR.
+  'SCHEDULE_CAPACITY',
 ] as const;
 export type GuardedName = (typeof GUARDED_NAMES)[number];
 
