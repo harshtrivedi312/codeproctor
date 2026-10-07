@@ -3267,9 +3267,13 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     await post('/link', { invitationToken: inv.token }).expect(200);
     const text = logged.join('');
     expect(text.length).toBeGreaterThan(0);
-    // The six digits are matched as a standalone value: a random OTP can occur by chance inside a
-    // random hex request id in the log ("...80ca254745eb"), which is not a leak.
-    expect(text).not.toMatch(new RegExp(`(?<![0-9a-fA-F-])${code}(?![0-9a-fA-F-])`));
+    // Request ids are random UUIDs and can contain the six digits by chance ("...80ca254745eb"),
+    // which is not a leak: they are masked, then the OTP is checked as a plain substring.
+    const scrubbed = text.replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+      '<uuid>',
+    );
+    expect(scrubbed).not.toContain(code);
     for (const secret of [
       inv.token,
       sessionToken,
