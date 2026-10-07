@@ -219,10 +219,29 @@ async function cleanup({ cfg, staff, runId, say, log }) {
   if (manifest.runId !== runId) throw new Error('The manifest belongs to a different run id.');
   if (manifest.orgName !== cfg.orgName)
     throw new Error('The manifest belongs to a different organisation.');
-  // Refuse an unsafe sessions-file path now, before any erasure, not after the manifest says cleaned.
-  const sessionsFile = manifest.sessionsFile ? assertSafeOutPath(manifest.sessionsFile) : null;
-  if (sessionsFile && cfg.out && path.resolve(cfg.out) !== sessionsFile) {
-    throw new Error('The manifest names a different sessions file than SEED_OUT.');
+  if (
+    typeof manifest.runId !== 'string' ||
+    !Array.isArray(manifest.items) ||
+    (manifest.sessionsFile !== undefined && typeof manifest.sessionsFile !== 'string')
+  ) {
+    throw new Error('The manifest file is malformed.');
+  }
+  // Refuse an unsafe sessions-file path now, before any erasure, not after the manifest says
+  // cleaned. The file to remove must be the one this run was started with (SEED_OUT / --out), or,
+  // without it, the manifest's own base name: a hand-edited manifest cannot name another file.
+  let sessionsFile = null;
+  if (manifest.sessionsFile) {
+    sessionsFile = assertSafeOutPath(manifest.sessionsFile);
+    const expected = cfg.out
+      ? path.resolve(cfg.out)
+      : cfg.manifest.endsWith('.manifest.json')
+        ? cfg.manifest.slice(0, -'.manifest.json'.length)
+        : null;
+    if (expected === null || path.resolve(expected) !== sessionsFile) {
+      throw new Error(
+        'The manifest names a different sessions file than SEED_OUT or its own name.',
+      );
+    }
   }
   await staff.login();
   let removed = 0;

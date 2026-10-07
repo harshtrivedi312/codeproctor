@@ -674,3 +674,52 @@ test('TC-094 seed: --cleanup refuses an unsafe sessions-file path from the manif
     await m.close();
   }
 });
+
+test('TC-094 seed: --cleanup with only --manifest removes the sessions file named like the manifest, nothing else', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    const mfFile = `${env.SEED_OUT}.manifest.json`;
+    const noOut = { ...env };
+    delete noOut.SEED_OUT;
+    // a hand-edited manifest naming another file outside the repo is refused before any erasure
+    const mf = JSON.parse(fs.readFileSync(mfFile, 'utf8'));
+    const victim = path.join(dir, 'other.json');
+    fs.writeFileSync(victim, '{}');
+    fs.writeFileSync(mfFile, JSON.stringify({ ...mf, sessionsFile: victim }));
+    const before = m.st.requests.length;
+    const bad = await run(['--cleanup', '--run-id', mf.runId, '--manifest', mfFile], noOut);
+    assert.equal(bad.code, 1);
+    assert.ok(fs.existsSync(victim));
+    assert.ok(!m.st.requests.slice(before).some((q) => q.key.includes('erasure')));
+    // the genuine manifest cleans up and removes its own sessions file
+    fs.writeFileSync(mfFile, JSON.stringify(mf));
+    const ok = await run(['--cleanup', '--run-id', mf.runId, '--manifest', mfFile], noOut);
+    assert.equal(ok.code, 0, ok.all);
+    assert.ok(!fs.existsSync(env.SEED_OUT));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-094 seed: a malformed manifest is refused with a fixed message', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    const mfFile = `${env.SEED_OUT}.manifest.json`;
+    const mf = JSON.parse(fs.readFileSync(mfFile, 'utf8'));
+    fs.writeFileSync(mfFile, JSON.stringify({ ...mf, sessionsFile: 12345 }));
+    const r = await run(['--cleanup', '--run-id', mf.runId], env);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /manifest file is malformed/);
+    assert.ok(!r.all.includes('12345'));
+  } finally {
+    await m.close();
+  }
+});
