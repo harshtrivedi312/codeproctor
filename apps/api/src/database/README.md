@@ -152,8 +152,16 @@ cannot be filtered by the extension, so the SQL itself must filter by `org_id`. 
 ### System scope
 
 `runSystem(reason, fn)` runs without an org filter, only for a reason in `SYSTEM_SCOPE_REASONS`
-(`AUTH_BOOTSTRAP`, `BACKGROUND_JOB`, `RETENTION_ERASURE`). A new reason is an architect-reviewed
-change. `BACKGROUND_JOB` is for **scheduled cross-org discovery only**: job payloads carry `orgId`
+(`AUTH_BOOTSTRAP`, `BACKGROUND_JOB`, `RETENTION_ERASURE`, `SCHEDULE_CAPACITY`). A new reason is an architect-reviewed
+change. **`SCHEDULE_CAPACITY`** (ADR 0017 §4.7, C-53) is the one cross-organisation read of `scheduled_windows`
+(capacity, FR-306; the stale-ceiling rule; the monthly instance-hours): `schedule-capacity.ts` holds it, before any
+statement, to `findMany` (with an explicit `select`), `count`, `aggregate` and `groupBy` of `ScheduledWindow`, naming
+only `startsAt`, `endsAt`, `ceilingAt`, `status` and `kind` anywhere (select, by, where, orderBy, distinct, having,
+the aggregates; no include, omit, cursor, relation filter or field reference). It writes nothing and reads no other
+model, and every other system reason is refused on `ScheduledWindow`, reads included: writes, and the retention and
+erasure deletes of SLOT rows, run in an org scope. The reason is a guarded name in `call-sites.spec.ts`: no file
+outside `database/` may enter it until the schedule code adds its one reviewed entry.
+`BACKGROUND_JOB` is for **scheduled cross-org discovery only**: job payloads carry `orgId`
 and `sessionId` (stamped by the enqueuer from its scope), and a processor runs
 `runInOrg(payload.orgId, ...)` and loads the session inside it; a miss is a poison job. It cannot be entered from inside an org scope (work that has an org never widens to all
 orgs), but code in a system scope may narrow to one org with `runInOrg`. An org scope cannot switch
