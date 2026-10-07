@@ -10,7 +10,9 @@
 //
 // Local development only. It refuses unless APP_ENV is "development" and every database URL is on
 // this machine (the same localhost guard as pnpm db:seed), and connects as the owner role with
-// MIGRATION_DATABASE_URL through `pg`. Synthetic seed data only; it never prints a URL or password.
+// MIGRATION_DATABASE_URL through `pg`. Synthetic seed data only (it only picks a candidate at the seed's
+// @candidates.example domain); it never prints a URL or password. It writes as the owner role with no
+// audit row, which is fine for a development database.
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -77,6 +79,7 @@ try {
        JOIN sessions s ON s.invitation_id = i.id AND s.org_id = i.org_id
        JOIN candidates c ON c.id = i.candidate_id AND c.org_id = i.org_id
       WHERE s.status = 'INVITED'
+        AND c.email LIKE '%@candidates.example'
       ORDER BY i.created_at, i.id
       LIMIT 1
       FOR UPDATE OF i`,

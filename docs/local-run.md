@@ -75,7 +75,7 @@ proctor events and one completed review. Running `pnpm db:seed` again inserts no
 
 ## 4. Start the apps
 
-Three terminals (or run each in the background), from the repository root:
+Two terminals (or run each in the background), from the repository root:
 
 ```bash
 pnpm --filter @codeproctor/api dev    # builds, then serves http://localhost:4000/api/v1
@@ -98,8 +98,8 @@ node infra/scripts/demo-totp.mjs <the manual key shown on the page>
 ```
 
 It prints the current 6 digit code. Type it in, then save the recovery codes shown. Later sign-ins ask
-for a fresh code from the same command (the key stays on the enrolment page only once: keep it, or
-use one of the recovery codes).
+for a fresh code from the same command (the manual key is shown only while you enrol: keep it, or use
+one of the recovery codes).
 
 **A candidate link**: the seed's invitation links are placeholders and cannot open. This gives one
 seeded invitation (Avery Stone's, still INVITED) a real link, valid for seven days:

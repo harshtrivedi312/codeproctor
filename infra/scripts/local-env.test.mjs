@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,6 +40,8 @@ describe('local-env (local demo)', () => {
       readFileSync(join(dir, 'apps/web/.env.local'), 'utf8'),
       'NEXT_PUBLIC_API_URL=http://localhost:4000/api\n',
     );
+    if (process.platform !== 'win32')
+      assert.equal(statSync(join(dir, '.env')).mode & 0o777, 0o600, '.env is private to the user');
     const before = readFileSync(join(dir, '.env'), 'utf8');
     const again = run('--dir', dir);
     assert.equal(again.status, 1);

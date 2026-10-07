@@ -71,6 +71,8 @@ describe('demo-invite against a throwaway database (local demo)', { skip }, () =
     pg = startPostgres();
     applyMigrations(pg, 'demo');
     loadFixture(pg, 'demo');
+    // The script only picks the seed's synthetic candidates (@candidates.example).
+    pg.psql('demo', "UPDATE candidates SET email = id || '@candidates.example'");
     const url = `postgresql://postgres:${pg.env.PGPASSWORD}@127.0.0.1:${pg.port}/demo`;
     env = { APP_ENV: 'development', DATABASE_URL: url, MIGRATION_DATABASE_URL: url };
   });
@@ -107,10 +109,10 @@ describe('demo-invite against a throwaway database (local demo)', { skip }, () =
 
   it('says so when no seeded session is still INVITED, and changes nothing', async () => {
     pg.psql('demo', "UPDATE sessions SET status = 'EXPIRED'");
-    const before = hashOf();
+    const hashBefore = hashOf();
     const r = await run(env);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /no seeded invitation is still INVITED/);
-    assert.equal(hashOf(), before);
+    assert.equal(hashOf(), hashBefore);
   });
 });
