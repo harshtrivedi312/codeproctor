@@ -673,7 +673,9 @@ describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
 
   // Each of these is a way the runtime driver (pg) would still end up with a change-me password.
   const bypasses: Record<string, string> = {
-    'raw password when decoding fails': 'postgresql://u:change-me%ZZ@db.internal/secretdb',
+    'undecodable password refused': 'postgresql://u:change-me%ZZ@db.internal/secretdb',
+    'encoded letter plus an invalid escape (pg restores %63)':
+      'postgresql://u:%63hange-me%ZZ@db.internal/secretdb',
     'password query parameter, no userinfo password':
       'postgresql://app_user@db.internal:5432/secretdb?password=change-me',
     'password query parameter over a strong userinfo password':
@@ -711,6 +713,14 @@ describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
       expect(() =>
         validateEnv({ ...base, DATABASE_URL: `${generated}?sslmode=require` }),
       ).not.toThrow();
+      expect(() =>
+        validateEnv({
+          ...base,
+          DATABASE_URL: `${generated}?sslmode=require&application_name=x`,
+        }),
+      ).not.toThrow();
+      // pg matches the parameter name case-sensitively, so Password=x is not a password override.
+      expect(() => validateEnv({ ...base, DATABASE_URL: `${generated}?Password=x` })).not.toThrow();
     });
 
     it('DL-55 FU-BE-225: refuses a change-me PGPASSWORD, naming only the variable', () => {
@@ -724,6 +734,12 @@ describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
       expect(message).not.toContain('Change-Me');
       expect(() => validateEnv({ ...base, PGPASSWORD: 'x7Kq9ZpL2mVw' })).not.toThrow();
     });
+  });
+
+  it('DL-55 FU-BE-225: an invalid APP_ENV (fails closed) also reports a bad DATABASE_URL by name', () => {
+    expect(() =>
+      validateEnv({ ...good, APP_ENV: 'prod', DATABASE_URL: 'postgresql://u:change-me@/d' }),
+    ).toThrow(/DATABASE_URL/);
   });
 
   it('DL-55 FU-BE-225: an invalid APP_ENV (fails closed) still refuses a change-me PGPASSWORD by name', () => {

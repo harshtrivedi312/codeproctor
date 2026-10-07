@@ -387,7 +387,8 @@ function isPlaceholderText(value: string): boolean {
  * - an unparseable URL is refused (pg has fallbacks, such as a dummy host, that `new URL` lacks);
  * - any `password` query parameter is refused (pg copies search params first, so it would override
  *   the userinfo password);
- * - the password in the userinfo is checked decoded, and raw when decoding fails.
+ * - the userinfo password is checked decoded; one that is not valid percent-encoding is refused;
+ * - a Unix-socket DATABASE_URL (starts with `/`) is refused, as `new URL` cannot parse it.
  * Returns a fixed message; never any part of the URL.
  */
 function databaseUrlProblem(url: string): string | undefined {
@@ -400,13 +401,15 @@ function databaseUrlProblem(url: string): string | undefined {
   if (parsed.searchParams.has('password')) {
     return 'must not carry a password query parameter in staging, pilot and production; put the password in the userinfo';
   }
-  let decoded: string | undefined;
+  // pg re-encodes a URL with a bad % sequence (restoring two-digit escapes such as %63 for c), so
+  // a password that does not decode cleanly cannot be judged here: refuse it outright.
+  let decoded: string;
   try {
     decoded = decodeURIComponent(parsed.password);
   } catch {
-    decoded = undefined;
+    return 'the password is not valid percent-encoding, refused in staging, pilot and production';
   }
-  if (isPlaceholderText(parsed.password) || (decoded !== undefined && isPlaceholderText(decoded))) {
+  if (isPlaceholderText(decoded)) {
     return 'has a local placeholder password, refused in staging, pilot and production';
   }
   return undefined;
@@ -457,6 +460,10 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     if (isSharedEnv({ APP_ENV: appEnv, NODE_ENV: nodeEnv })) {
       for (const name of [...placeholderSessionKeys(raw), ...placeholderPgPassword(raw)])
         problems.push(`${name}: ${PLACEHOLDER_MESSAGE}`);
+      const url = raw['DATABASE_URL'];
+      const urlProblem =
+        typeof url === 'string' && url !== '' ? databaseUrlProblem(url) : undefined;
+      if (urlProblem !== undefined) problems.push(`DATABASE_URL: ${urlProblem}`);
     }
     throw new Error(`Invalid environment: ${problems.join('; ')}`);
   }
