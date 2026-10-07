@@ -26,6 +26,7 @@ import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
+import { IdentityModule } from './identity/identity.module';
 import { MediaModule } from './media/media.module';
 import { RetentionModule } from './retention/retention.module';
 import { ipBucket } from './client-errors/ip-bucket';
@@ -131,6 +132,7 @@ function areaOf(context: ExecutionContext): Area {
     CandidateModule,
     ProctorEventsModule,
     MediaModule,
+    IdentityModule,
     RetentionModule.forRoot({ objectStore: MediaModule }),
     SubmissionsModule,
     GradingModule,
