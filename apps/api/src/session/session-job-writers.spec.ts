@@ -2,7 +2,7 @@
 // transaction or enters the SERVICE scope. This scan reads every non-test source file outside
 // database/ and fails for any other file that calls runAsSessionJob or detachForSessionJob, or
 // that runs a BullMQ Worker and opens a $transaction itself. The existing offenders are listed
-// below as follow-ups (FU-BEB-112); a new one needs a reviewed entry here.
+// below as follow-ups (FU-BEB-112; identity: FU-INB-29); a new one needs a reviewed entry here.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { ANY_SESSION_CALLERS, ANY_SESSION_JOBS } from './session-job.processor';
@@ -12,7 +12,14 @@ const OWNER = 'session/session-job.processor.ts';
 
 /** Worker files that still use the org scope instead of the processor (FU-BEB-112). */
 // grading/grading-worker.ts (BE-11, P-24 D-68) moves onto the processor with the CS-4 PR 2 adoption.
-const RUNS_IN_ORG_SCOPE_TODAY = ['candidate/session-jobs.service.ts', 'grading/grading-worker.ts'];
+// identity/identity-jobs.service.ts (BE-08b, D-67 demo exception, DL-64): FU-INB-29: moves onto
+// SessionJobProcessor before the pilot, B-05 (a pre-pilot blocker; remove this entry then). It uses
+// runSystem('BACKGROUND_JOB') for the reconcile read and runInOrg per row; FU-INB-29 covers both.
+const RUNS_IN_ORG_SCOPE_TODAY = [
+  'candidate/session-jobs.service.ts',
+  'grading/grading-worker.ts',
+  'identity/identity-jobs.service.ts',
+];
 
 function sources(dir: string): Array<{ path: string; text: string }> {
   return readdirSync(dir).flatMap((name) => {
