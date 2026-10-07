@@ -76,6 +76,7 @@ case "$cmd" in
     cat "$WORK/parsed"
     ;;
   prune)
+    [ "$BACKUP_MODE" = timestamped ] || die "prune is for BACKUP_MODE=timestamped only; in versioned mode the owner-applied expiry function prunes the list."
     before=${2:-}
     is_stamp "$before" || die "prune needs a UTC stamp."
     # Only entries whose completion marker is older than the stamp. Entries without a marker stay.
