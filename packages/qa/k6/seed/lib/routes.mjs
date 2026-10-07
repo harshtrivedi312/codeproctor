@@ -9,7 +9,7 @@ export const ROUTES = {
   login: '/auth/login', // REAL (apps/api/src/auth); body { email, password } -> { status, session?, challengeToken? }
   verify2fa: '/auth/2fa/verify', // REAL; body { challengeToken, code } -> { accessToken, user }
   invite: (testId) => `/tests/${testId}/invitations`, // DOC path; ASSUMED single-invite body below
-  erase: (candidateId) => `/candidates/${candidateId}/erasure`, // ASSUMED (TC-094, ADR 0004 R-6: no route in fsd 4)
+  erase: (candidateId) => `/candidates/${encodeURIComponent(candidateId)}/erasure`, // ASSUMED (TC-094, ADR 0004 R-6: no route in fsd 4)
   // REAL, public, no token. Body { invitationToken } -> 200 { state, ... }; sends nothing (TC-021).
   link: '/candidate/session/link',
   // REAL, public. Body { invitationToken } -> 200 { state: 'OTP_SENT', maskedEmail, expiresInSeconds }.

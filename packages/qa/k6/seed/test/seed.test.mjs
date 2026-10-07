@@ -674,3 +674,102 @@ test('TC-094 seed: --cleanup refuses an unsafe sessions-file path from the manif
     await m.close();
   }
 });
+
+test('TC-094 seed: --cleanup with only --manifest removes the sessions file named like the manifest, nothing else', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    const mfFile = `${env.SEED_OUT}.manifest.json`;
+    const noOut = { ...env };
+    delete noOut.SEED_OUT;
+    // a hand-edited manifest naming another file outside the repo is refused before any erasure
+    const mf = JSON.parse(fs.readFileSync(mfFile, 'utf8'));
+    const victim = path.join(dir, 'other.json');
+    fs.writeFileSync(victim, '{}');
+    fs.writeFileSync(mfFile, JSON.stringify({ ...mf, sessionsFile: victim }));
+    const before = m.st.requests.length;
+    const bad = await run(['--cleanup', '--run-id', mf.runId, '--manifest', mfFile], noOut);
+    assert.equal(bad.code, 1);
+    assert.ok(fs.existsSync(victim));
+    assert.ok(!m.st.requests.slice(before).some((q) => q.key.includes('erasure')));
+    // the genuine manifest cleans up and removes its own sessions file
+    fs.writeFileSync(mfFile, JSON.stringify(mf));
+    const ok = await run(['--cleanup', '--run-id', mf.runId, '--manifest', mfFile], noOut);
+    assert.equal(ok.code, 0, ok.all);
+    assert.ok(!fs.existsSync(env.SEED_OUT));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-094 seed: a malformed manifest is refused with a fixed message', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    const mfFile = `${env.SEED_OUT}.manifest.json`;
+    const mf = JSON.parse(fs.readFileSync(mfFile, 'utf8'));
+    fs.writeFileSync(mfFile, JSON.stringify({ ...mf, sessionsFile: 12345 }));
+    const r = await run(['--cleanup', '--run-id', mf.runId], env);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /manifest file is malformed/);
+    assert.ok(!r.all.includes('12345'));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-094 seed: a manifest item with a path-like candidate id is refused before any request', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const first = await run(['--count', '1'], env);
+    assert.equal(first.code, 0, first.all);
+    const mfFile = `${env.SEED_OUT}.manifest.json`;
+    const mf = JSON.parse(fs.readFileSync(mfFile, 'utf8'));
+    mf.items[0].candidateId = '../users/x/role?';
+    fs.writeFileSync(mfFile, JSON.stringify(mf));
+    const before = m.st.requests.length;
+    const r = await run(['--cleanup', '--run-id', mf.runId], env);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /manifest file is malformed/);
+    assert.equal(m.st.requests.length, before);
+    fs.writeFileSync(mfFile, 'null');
+    const n = await run(['--cleanup', '--run-id', mf.runId], env);
+    assert.equal(n.code, 1);
+    assert.match(n.err, /malformed/);
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-094 seed: a custom --manifest name needs SEED_OUT to clean up, and says so', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const env = envFor(m, dir);
+    const custom = path.join(dir, 'custom.json');
+    const first = await run(['--count', '1', '--manifest', custom], env);
+    assert.equal(first.code, 0, first.all);
+    const runId = JSON.parse(fs.readFileSync(custom, 'utf8')).runId;
+    const noOut = { ...env };
+    delete noOut.SEED_OUT;
+    const before = m.st.requests.length;
+    const bad = await run(['--cleanup', '--run-id', runId, '--manifest', custom], noOut);
+    assert.equal(bad.code, 1);
+    assert.match(bad.err, /Set SEED_OUT/);
+    assert.equal(m.st.requests.length, before);
+    assert.ok(fs.existsSync(env.SEED_OUT));
+    const ok = await run(['--cleanup', '--run-id', runId, '--manifest', custom], env);
+    assert.equal(ok.code, 0, ok.all);
+    assert.ok(!fs.existsSync(env.SEED_OUT));
+  } finally {
+    await m.close();
+  }
+});
