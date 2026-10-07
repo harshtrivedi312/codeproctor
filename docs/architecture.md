@@ -19,7 +19,7 @@ Heavy media never passes through the API: browsers upload recording chunks strai
 | Analysis worker | Voice activity, keystroke analytics, code similarity, risk scoring | Python, FastAPI, Silero VAD, OpenCV |
 | Queue | Async jobs: grading, analysis, emails, retention cleanup | Redis + BullMQ |
 | Database | All relational data; JSONB for event payloads | PostgreSQL 16 |
-| Object storage | Recordings, ID images, room scans | S3-compatible object storage behind one S3-compatible interface, so only configuration differs between environments. Staging uses Cloudflare R2 with synthetic data only. Pilot and production use AWS S3 (ADR 0001 D-11, section 2.1). |
+| Object storage | Recordings, ID images, room scans | S3-compatible object storage behind one S3-compatible interface, so only configuration differs between environments. Staging is local only (C-65) and uses no hosted bucket. Pilot and production use AWS S3 (ADR 0001 D-11, section 2.1). |
 | Lockdown client | Kiosk mode, OS-level blocking, process checks (Phase 3) | Electron |
 
 ## Candidate session sequence
@@ -73,7 +73,7 @@ sequenceDiagram
 | Environment | Where | Notes |
 | --- | --- | --- |
 | Local | Docker Compose on developer machine | Postgres, Redis, Judge0, API, worker, web. Synthetic data only. The local object store (a dev bucket or a local S3-compatible service) is decided in ARC-03 or ARC-05 (review A-20). |
-| Staging | Local Docker Compose with synthetic data (C-43; ADR 0017). There is no AWS staging. Object storage: Cloudflare R2. Postgres: a Supabase or Neon free tier is allowed (D-11). Web: Cloudflare Pages. | Synthetic data only; never real candidate data (D-10). Red-team work (QA-02) and the OWASP baseline (TC-093) run against the local stack. |
+| Staging | Local Docker Compose with synthetic data (C-43; ADR 0017). Staging is local only (C-65): there is no hosted staging database, no staging deploy job, no staging secrets, no AWS staging and no Cloudflare R2 bucket; the database is rebuilt from seed. Object storage: whatever the local stack provides, never a hosted bucket. | Synthetic data only; never real candidate data (D-10). Red-team work (QA-02) and the OWASP baseline (TC-093) run against the local stack. |
 | Pilot | One scheduled m7i.large instance running Docker Compose (api, worker, Postgres, Redis, Caddy) and one small dedicated Judge0 instance, both started and stopped around recruiter-picked slots and a daily maintenance wake (C-43..C-48, ADR 0017). Recordings and backups in AWS S3 under one customer-managed key (D-11, C-48). Web: Cloudflare Pages. | Real candidate data. Postgres runs on the instance (no RDS); the deploy mechanism, backups and S3 settings are in ADR 0017 (ARC-05). The task that builds this stack is DEP-03 (PA-07, D-16; scope per ADR 0017). Budget about $12 a month; the 5-candidate load test is the gate (C-49). |
 | Production | Same as the pilot: AWS compute, database and AWS S3, with web on Cloudflare Pages (D-11). It may split API, worker and Judge0 onto separate hosts. | Judge0 needs an x86 host with privileged containers and a cgroup setup its sandbox supports; confirm before choosing an instance type and OS image. RDS versus Postgres on EC2 and the AWS S3 settings: ARC-05. |
 
@@ -82,7 +82,7 @@ sequenceDiagram
 - TLS everywhere; HSTS; strict Content Security Policy on the candidate app.
 - Short-lived JWTs; candidate session token bound to the session ID and a device fingerprint.
 - All proctor events signed with a per-session HMAC key issued at start, so forged event batches are rejected.
-- Object storage buckets private (Cloudflare R2 on staging, AWS S3 on pilot and production, one S3-compatible interface); only presigned PUT (upload, 60 s) and GET (playback, 15 min) URLs.
+- Object storage buckets private (AWS S3 on pilot and production, one S3-compatible interface; staging is local only, C-65); only presigned PUT (upload, 60 s) and GET (playback, 15 min) URLs.
 - Judge0 isolated on a private network, no internet egress, resource limits per submission.
 - Secrets in environment variables loaded from a vault (Doppler free tier or GitHub Actions secrets).
 - Audit log is append-only; database role for the app cannot update, delete or truncate it (ADR 0006).
@@ -137,4 +137,4 @@ Pinned versions and the reasons for them are in ADR 0009.
 - **`db:reset`.** It also refuses AI-agent sessions, and any port other than the one Docker Compose publishes for the local Postgres.
 - **`dev:infra:reset`.** It stops the local stack and deletes its volumes. It refuses a Docker engine that is not local: `DOCKER_HOST` and the current Docker context must both be `unix://` sockets.
 - **Who runs them.** Only a human runs `db:reset` and `dev:infra:reset`, at a terminal with a typed confirmation. Agents verify the refusals only through `pnpm test`.
-- **Shared environments.** Staging and pilot use their own Compose project names, and their database credentials never exist on developer machines or in agent sessions (D-38).
+- **Shared environments.** The pilot uses its own Compose project name (staging is local only, C-65), and its database credentials never exist on developer machines or in agent sessions (D-38).

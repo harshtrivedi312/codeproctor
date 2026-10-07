@@ -17,7 +17,7 @@
 - The recruiter picks the slot when inviting (C-46). An automated schedule starts the instances 45 minutes before each slot, with a health check and an alarm (C-49), and stops them after the last session ends and its uploads are confirmed. The identity face match stays live before the test (C-44). Audio checks, code similarity and other heavy analysis are queued and run after the sessions end, in the same window (C-43, C-44).
 - A daily maintenance wake of about 15 minutes runs retention, erasure, backups and reminders (C-47). One customer-managed KMS key with S3 Bucket Keys encrypts the data buckets (C-48). DNS is a Route 53 zone for `assess.thebigbraintech.com`, with the API record updated on boot by the instance role and no Elastic IP (C-49, C-52). Interactive access is Session Manager only (C-50), the owner is the only reviewer of each pilot release (C-51), and the schedule storage and `invitations.time_zone` are approved (C-53).
 - The accepted budget is about $12 a month. The 5-candidate load test on the real instances is the gate before the first candidate (C-49).
-- Staging is not on AWS. It stays local in Docker and on free tiers, with synthetic data (C-43; ADR 0009).
+- Staging is not on AWS. It is local only in Docker, with synthetic data and no hosted service or secret (C-43, C-65; ADR 0009).
 - Recordings go to S3, email to SES, logs to CloudWatch. The web front end stays on Cloudflare Pages and shows a clear "the test opens at ..." page while the instances are off (C-43, C-46).
 - Backend A's template `infra/aws/github-oidc-roles.yaml` (branch `infra/dep01-oidc-roles`) already scopes a deploy role to the pilot. This ADR narrows what that role may do (section 7).
 
@@ -25,7 +25,7 @@
 
 | # | Topic | Decision | Basis |
 | --- | --- | --- | --- |
-| 1 | Environments | Local (Docker, synthetic data) and the pilot. There is no AWS staging. Staging media stays on Cloudflare R2 and may use a Supabase or Neon free tier (ADR 0001 OI-5 as it stands); red-team and OWASP work (QA-02, TC-093) run against the local stack | C-43 |
+| 1 | Environments | Local (Docker, synthetic data) and the pilot. There is no AWS staging and no hosted staging service at all: staging is local only (C-65), so no Supabase or Neon database and no Cloudflare R2 bucket; red-team and OWASP work (QA-02, TC-093) run against the local stack | C-43 |
 | 2 | Compute | The main instance: m7i.large in us-east-1 (C-03), a public subnet, an encrypted gp3 volume. The Judge0 instance: a small x86 instance with a minimal role (section 3). Prices are **Not verified** (section 10) | C-49, C-45 |
 | 3 | Lifecycle | EventBridge Scheduler starts both instances 45 minutes before a booked slot and stops them at a hard ceiling (section 4). The main host stops itself when idle (4.2); the Judge0 host stops itself when the main host stops pinging it | C-49; mechanics: architect detail |
 | 4 | Maintenance | A daily wake of about 15 minutes, with an alarm to the owner if it does not run (4.5) | C-47 |
@@ -246,7 +246,7 @@ The total is close to $12. The hours are the lever: the monthly budget guard (4.
 
 ## 12. Updates to other documents (on acceptance)
 
-- **docs/architecture.md, Deployment.** Staging row: "Local Docker Compose with synthetic data; a free-tier Supabase or Neon database is allowed; media on Cloudflare R2 (C-43). There is no AWS staging." Pilot row: "One scheduled x86 EC2 instance (m7i.large) running Docker Compose (api, worker, Postgres, Redis, Caddy) and one small dedicated Judge0 instance, both started and stopped around recruiter-picked slots (ADR 0017); real candidate data; recordings in AWS S3 under one customer-managed key; web on Cloudflare Pages." Production row: unchanged until the owner decides it.
+- **docs/architecture.md, Deployment.** Staging row: "Staging is local only (C-43, C-65): Docker Compose with synthetic data, no hosted staging database, no staging deploy job, no staging secrets and no Cloudflare R2 bucket." Pilot row: "One scheduled x86 EC2 instance (m7i.large) running Docker Compose (api, worker, Postgres, Redis, Caddy) and one small dedicated Judge0 instance, both started and stopped around recruiter-picked slots (ADR 0017); real candidate data; recordings in AWS S3 under one customer-managed key; web on Cloudflare Pages." Production row: unchanged until the owner decides it.
 - **ARC-05.** Decided here: Postgres on the instance (no RDS), S3 settings (5.1, 5.2), backups (5.3), the deploy mechanism, DNS and the IP approach. Still open: Cloudflare Pages CSP (R-08), the cookie domain (Q-44), the vault choice (the secrets store of section 6).
 - **ADR 0001 OI-5.** "Decided (D-11, C-43..C-48, ADR 0017): the pilot runs on one scheduled instance with Postgres on it plus a dedicated Judge0 instance; S3 settings as ADR 0017 section 5; backups to S3; no AWS staging. Still open: the instance type and OS image of the Judge0 host (spike), the production layout." ST-6 is decided by 5.2.
 - **ADR 0016.** Section 1 and row 3 of section 2: the pilot's Judge0 host is the small dedicated instance of ADR 0017 section 9. Row 4 (staging): "no AWS staging; Judge0 runs in the local stack". Owner question 1 is answered by C-45 (option B).
