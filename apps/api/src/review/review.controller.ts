@@ -13,7 +13,13 @@ import {
 import { Audited } from '../audit/audited.decorator';
 import { Roles } from '../common/auth/decorators';
 import { UserRole } from '../generated/prisma/client';
-import { PlaybackDto, QueueDto, QueueQueryDto, ReviewBundleDto } from './dto/review.dto';
+import {
+  PlaybackDto,
+  PlaybackParamsDto,
+  QueueDto,
+  QueueQueryDto,
+  ReviewBundleDto,
+} from './dto/review.dto';
 import { ReviewService } from './review.service';
 
 const NO_STORE = 'no-store';
@@ -55,13 +61,10 @@ export class ReviewController {
   @Audited('REVIEW_PLAYBACK_ISSUED', 'session', { idParam: 'id' })
   @ApiOperation({ summary: 'A presigned GET for one recording, valid for 15 minutes (FR-703)' })
   @ApiOkResponse({ type: PlaybackDto })
-  @ApiBadRequestResponse({ description: 'Not a UUID' })
+  @ApiBadRequestResponse({ description: 'Not a UUID, or a malformed recording id' })
   @ApiNotFoundResponse({ description: 'No such session or recording in your organization' })
   @ApiServiceUnavailableResponse({ description: 'Object storage is not configured' })
-  playback(
-    @Param('id', new ParseUUIDPipe()) id: string,
-    @Param('recordingId') recordingId: string,
-  ): Promise<PlaybackDto> {
-    return this.review.playback(id, recordingId);
+  playback(@Param() params: PlaybackParamsDto): Promise<PlaybackDto> {
+    return this.review.playback(params.id, params.recordingId);
   }
 }

@@ -1,6 +1,16 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Length,
+  Matches,
+  Max,
+  Min,
+} from 'class-validator';
 import { SessionStatus } from '../../generated/prisma/enums';
 
 export class QueueQueryDto {
@@ -140,4 +150,14 @@ export class PlaybackDto {
     description: 'All parts in order; play them in sequence.',
   })
   parts!: PlaybackPartDto[];
+}
+
+export class PlaybackParamsDto {
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  id!: string;
+
+  @ApiProperty({ pattern: '^(SCREEN|WEBCAM|AUDIO)-\\d{1,9}$', example: 'SCREEN-0' })
+  @Matches(/^(SCREEN|WEBCAM|AUDIO)-\d{1,9}$/)
+  recordingId!: string;
 }

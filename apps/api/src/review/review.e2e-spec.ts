@@ -7,6 +7,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { passwordVersion } from '../auth/crypto.util';
+import type { CandidateTokenService } from '../candidate/candidate-token.service';
 import type { TokenService } from '../common/auth/token.service';
 import { createPrismaClient } from '../database/create-prisma-client';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
@@ -28,6 +29,7 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
   let orgA: string;
   let orgB: string;
   let tokens: TokenService;
+  let candidateTokens: CandidateTokenService;
   let storage: InMemoryRecordingStorage;
   let seq = 0;
 
@@ -39,7 +41,12 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
     await pg.connect();
     await pg.query(`ALTER ROLE app_user PASSWORD '${appPassword}'`);
     const url = `postgresql://app_user:${appPassword}@${infra.postgres.getHost()}:${infra.postgres.getMappedPort(5432)}/${infra.postgres.getDatabase()}`;
-    applyEnv(infra, { DATABASE_URL: url, LOG_LEVEL: 'silent', THROTTLE_DEFAULT_LIMIT: '100000' });
+    applyEnv(infra, {
+      DATABASE_URL: url,
+      LOG_LEVEL: 'silent',
+      THROTTLE_DEFAULT_LIMIT: '100000',
+      JWT_CANDIDATE_SECRET: randomBytes(32).toString('base64'),
+    });
     owner = createPrismaClient(infra.postgres.getConnectionUri());
     orgA = (await owner.organization.create({ data: { name: 'Org A' } })).id;
     orgB = (await owner.organization.create({ data: { name: 'Org B' } })).id;
@@ -68,6 +75,10 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
       typeof import('../common/auth/token.service')
     >('../common/auth/token.service');
     tokens = app.get(Tokens);
+    const { CandidateTokenService: CTokens } = jest.requireActual<
+      typeof import('../candidate/candidate-token.service')
+    >('../candidate/candidate-token.service');
+    candidateTokens = app.get(CTokens);
   });
 
   afterAll(async () => {
@@ -231,13 +242,16 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
       expect(storage.calls.filter((c) => c.key.includes(sessionId))).toHaveLength(0);
     });
 
-    it('FR-103: a bogus token and no token are refused', async () => {
+    it('FR-103: a candidate token and no token are refused', async () => {
       const { sessionId } = await seedSession();
       await http().get(`${API}/review/queue`).expect(401);
       await http().get(bundleUrl(sessionId)).expect(401);
       await http().get(playUrl(sessionId, 'SCREEN-0')).expect(401);
-      const candToken = { Authorization: 'Bearer not-a-real-candidate-token' };
-      await http().get(`${API}/review/queue`).set(candToken).expect(401);
+      const real = candidateTokens.sign({ sid: sessionId, oid: orgA, epoch: 1 }).token;
+      const cand = { Authorization: `Bearer ${real}` };
+      await http().get(`${API}/review/queue`).set(cand).expect(401);
+      await http().get(bundleUrl(sessionId)).set(cand).expect(401);
+      await http().get(playUrl(sessionId, 'SCREEN-0')).set(cand).expect(401);
     });
 
     it('FR-901: REVIEWER and SUPER_ADMIN can read all three, with no-store', async () => {
@@ -330,7 +344,8 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
       const who = await make(UserRole.REVIEWER);
       await http().get(playUrl(mine.sessionId, 'SCREEN-1')).set(who.auth).expect(404);
       await http().get(playUrl(mine.sessionId, 'WEBCAM-0')).set(who.auth).expect(404);
-      await http().get(playUrl(mine.sessionId, 'bogus')).set(who.auth).expect(404);
+      await http().get(playUrl(mine.sessionId, 'bogus')).set(who.auth).expect(400);
+      await http().get(playUrl(mine.sessionId, 'ROOM_SCAN-0')).set(who.auth).expect(400);
     });
   });
 

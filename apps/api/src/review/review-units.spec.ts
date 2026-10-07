@@ -51,6 +51,8 @@ describe('review read API units (FR-901, FR-703)', () => {
       enc({ t: 5, id: ID }),
       enc({ t: null, id: 'nope' }),
       enc(null),
+      enc({ t: '-271821-04-20T00:00:00.000Z', id: ID }),
+      enc({ t: '+275760-09-13T00:00:00.000Z', id: ID }),
     ]) {
       expect(() => decodeCursor(bad)).toThrow(BadRequestException);
     }

@@ -107,6 +107,7 @@ describe('matrix edge cases (FR-103, FR-105)', () => {
       );
     } finally {
       if (saved === undefined) delete (ROUTE_PERMISSIONS as Record<string, unknown>)[key];
+      else (ROUTE_PERMISSIONS as Record<string, unknown>)[key] = saved;
     }
   });
 
