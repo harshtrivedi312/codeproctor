@@ -93,6 +93,12 @@ Description: >-
 #     metadata in place: there versioning, the lock and version-aware expiry are the control), nor to
 #     db/dump/latest.dump (overwriting it is the design). The restore and the expiry prune rule treat an
 #     entry as present if ANY version of it, current or noncurrent, was ever non-empty.
+#     Residual: not verified against real S3; If-None-Match succeeds when the current version is a delete
+#     marker (a plain DeleteObject by the expiry function); multipart and copies without the header are
+#     denied by design; the owner's principal is not subject to it; s3:PutObjectTagging on these prefixes
+#     is intentionally not denied (no lifecycle rule on the backup bucket filters on tags).
+#     ROLLOUT: do not apply this stack for pilot use until erasure-list.sh sends --if-none-match and treats
+#     412 as success (FU-QA-18).
 #   - WRITE CONFINEMENT: the backup bucket policy denies the instance role s3:PutObject* on every
 #     key but
 #     db/dump/latest.dump, db/wal/*, db/erasure-list/* and db/erasure-completed/*. A dump under another

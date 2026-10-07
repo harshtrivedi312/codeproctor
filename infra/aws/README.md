@@ -193,7 +193,7 @@ access instance-role-only.
   non-empty (the union of versions, not the current one).
 - **Write confinement (backup bucket).** The bucket policy denies the instance role `s3:PutObject*` on every key
   except `db/dump/latest.dump`, `db/wal/*`, `db/erasure-list/*` and `db/erasure-completed/*`. Without it, a dump
-  put under any other key (the planned `BACKUP_MODE`, FU-QA-18: a mis-set `timestamped` mode, or a compromised host) would never expire: a
+  put under any other key (the `BACKUP_MODE` of `infra/backup/lib.sh`, FU-QA-18: a mis-set `timestamped` mode, or a compromised host) would never expire: a
   current version never expires, the expiry role is denied under `db/dump/`, and outside those prefixes
   nothing deletes anything.
 - **Alarms** (CloudWatch; they notify `AlarmTopicArn`, the owner's SNS email and SMS topic; with no topic the
@@ -216,7 +216,7 @@ access instance-role-only.
   `cloudwatch:PutMetricData` carries `cloudwatch:namespace` = `codeproctor-pilot-instance`, so none can inflate
   an alarmed metric. The metrics are published **with no dimensions** (the alarms have none: with dimensions
   the `notBreaching` anomaly alarms would never see data and would fail silent). All Lambda-fed alarms use a
-  period of 1 day, matching the daily producer schedule (a test checks it). The Lambda is a dependency outside this template (database track): until it exists the
+  period of 1 day, matching the daily producer schedule (a test checks the period). The Lambda is a dependency outside this template (database track): until it exists the
   freshness and age alarms sit in ALARM (missing data breaches), so the first email is expected. The
   anomaly alarms' design is not verified. **The freshness alarms will fire whenever the pilot instance is
   stopped for more than 2 days** (nothing is written while it is off, ADR 0017 5.3). That is intended; the owner
@@ -292,8 +292,17 @@ presigned URLs; whether `ec2messages` is needed.
 
 - **Deviations from the ADR, honestly:** there is **no general overwrite deny** on the backup bucket (replaced by
   versioning plus the 12 day lock plus version-aware expiry, ADR 0017 5.3 as amended in #244), **except on the
-  two erasure prefixes**, where an overwrite without `If-None-Match` is denied. Residual risk: an overwritten
-  erasure-list entry is recoverable only from the noncurrent version.
+  two erasure prefixes**, where an overwrite without `If-None-Match` is denied. Residual risks of that
+  deny: (i) it is not verified against real S3 (first-apply checks); (ii) `If-None-Match` succeeds when the key's
+  current version is a delete marker, so after the expiry function does a plain `DeleteObject` a compromised host
+  could write a new version under a pruned key (the union-of-versions rule and FU-QA-19's delete-by-version-id rule
+  cover it); (iii) multipart uploads and copies without the header are denied, by design; (iv) the owner's own
+  principal is not subject to the deny.
+- **Rollout order (privacy risk):** `infra/backup/erasure-list.sh` writes through `aws s3 cp`, which cannot send
+  `If-None-Match`, so once this stack is live every erasure append and complete would get AccessDenied, and an erasure
+  done in the database but not recorded in the list would come back on a restore. `append` is idempotent and re-puts
+  the same `<stamp>-<uuid>.json` key, so a retry returns 412. **The data stack must not be applied for pilot use until
+  `erasure-list.sh` writes with `s3api put-object --if-none-match '*'` and treats 412 as success** (FU-QA-18).
 - **Owner:** please confirm that freshness alarms firing while the instance is stopped for more than 2 days is
   intended.
 

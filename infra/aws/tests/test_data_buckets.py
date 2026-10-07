@@ -112,6 +112,9 @@ def main():
     dump = br["keep-newest-dump-versions"]
     chk("backup: dump lifecycle is NewerNoncurrentVersions 2, NoncurrentDays 1, no current-version expiry", dump["Prefix"] == "db/dump/" and dump["NoncurrentVersionExpiration"] == {"NoncurrentDays": 1, "NewerNoncurrentVersions": 2} and "ExpirationInDays" not in dump and "Expiration" not in dump)
     chk("backup: NO lifecycle rule on db/wal/ (the expiry function owns the physical repository)", not any(r.get("Prefix", "").startswith("db/wal") for r in br.values()))
+    _bst = {st["Sid"]: st for st in res["BackupBucketPolicy"]["Properties"]["PolicyDocument"]["Statement"]}
+    _ov = _bst.get("DenyOverwritingErasureEntries", {})
+    chk("backup policy: DenyOverwritingErasureEntries covers exactly db/erasure-list/* and db/erasure-completed/*, s3:PutObject only, Null s3:if-none-match true, scoped to the instance role (not db/wal/ or db/dump/latest.dump)", _ov.get("Effect") == "Deny" and _ov.get("Action") == "s3:PutObject" and sorted(str(x).split("/", 1)[1] if "/" in str(x) else str(x) for x in [str(r["Fn::Sub"]) if isinstance(r, dict) else str(r) for r in _ov.get("Resource", [])]) == sorted(["db/erasure-completed/*", "db/erasure-list/*"]) and _ov.get("Condition", {}).get("Null") == {"s3:if-none-match": "true"} and "ArnEquals" in _ov.get("Condition", {}))
     chk("backup: NO age rule on db/erasure-list/ or db/erasure-completed/", not any(r.get("Prefix", "").startswith("db/erasure") for r in br.values()) and set(br) == {"abort-incomplete-multipart", "keep-newest-dump-versions"})
     chk("no rule anywhere has a current-version expiration on the backup bucket", all("ExpirationInDays" not in r for r in br.values()))
     cors = res["MediaBucket"]["Properties"]["CorsConfiguration"]["CorsRules"][0]
@@ -218,6 +221,9 @@ def main():
     add("backup: instance role overwrites an erasure-list entry (no If-None-Match)", "app", "s3:PutObject", ERA, {}, "DENY", "backup")
     add("backup: instance role writes an erasure-completed entry for the first time (If-None-Match sent)", "app", "s3:PutObject", ERC, {"s3:if-none-match": "*"}, "ALLOW", "backup")
     add("backup: instance role overwrites an erasure-completed entry (no If-None-Match)", "app", "s3:PutObject", ERC, {}, "DENY", "backup")
+    add("backup: owner puts under db/erasure-list/ without If-None-Match (the deny is scoped to the instance role)", "owner", "s3:PutObject", ERA, {}, "ALLOW", "backup")
+    add("backup: instance role overwrites an erasure-list entry with s3:if-match only (no If-None-Match)", "app", "s3:PutObject", ERA, {"s3:if-match": "abc"}, "DENY", "backup")
+    add("backup: instance role multipart under db/erasure-list/ (CreateMultipartUpload/UploadPart are authorised as s3:PutObject and never carry If-None-Match: denied by design)", "app", "s3:PutObject", B + "/db/erasure-list/20261005T020000Z-mp.json", {}, "DENY", "backup")
     add("backup: the conditional-write deny does not apply to db/dump/latest.dump (no If-None-Match needed)", "app", "s3:PutObject", DUMP, {}, "ALLOW", "backup")
     add("backup: the conditional-write deny does not apply to the physical repository metadata (rewritten in place)", "app", "s3:PutObject", B + "/db/wal/archive/x/archive.info", {}, "ALLOW", "backup")
     add("backup: instance role can abort a multipart upload of db/dump/latest.dump", "app", "s3:AbortMultipartUpload", DUMP, {}, "ALLOW", "backup")
