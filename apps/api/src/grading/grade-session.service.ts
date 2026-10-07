@@ -34,6 +34,7 @@ import {
   mcqCorrect,
   toHundredths,
 } from './scoring';
+import { isLocalStub, LOCAL_STUB_NOTE } from './local-stub';
 import { loadCases } from './test-data';
 
 export { GradingInvariantError };
@@ -56,6 +57,8 @@ interface QuestionOutcome {
   /** Hundredths; null while a reviewer has to decide. */
   readonly score: bigint | null;
   readonly scoring: Extract<QuestionScoring, 'AUTO' | 'MANUAL_PENDING'>;
+  /** scoring_note to store (the local stub marker); otherwise the column is left alone. */
+  readonly note?: string;
   /** The graded close snapshot (coding), to compare with final_code at store time. */
   readonly snapshot?: { readonly sourceCode: string; readonly language: string };
   readonly submission?: {
@@ -300,7 +303,10 @@ export class GradeSessionService {
     }
     let run;
     try {
-      run = await this.execution.run({
+      // `mode: 'submit'` (PR #298) makes a local-stub result say it was not graded. It is built
+      // outside an object literal so this compiles before and after #298 adds the option (until
+      // then the service ignores it): FU-BEB-113.
+      const request = {
         language,
         sourceCode: snapshot.sourceCode,
         limits: q.limits,
@@ -310,12 +316,38 @@ export class GradeSessionService {
           expectedOutput: t.expectedOutput,
           reveal: false,
         })),
-      });
+        mode: 'submit' as const,
+      };
+      run = await this.execution.run(request);
     } catch (e) {
       if (e instanceof InvalidLimitsError) {
         throw new GradingInvariantError('A question has invalid limits');
       }
       throw e;
+    }
+    const stubbed = run.results.some((r) => isLocalStub(r));
+    if (stubbed) {
+      // All or nothing per question: any stub result means nothing real ran, so the question is
+      // "not graded (local stub)": no score (never 0), MANUAL_PENDING, and the job succeeds.
+      return {
+        sessionQuestionId: q.id,
+        score: null,
+        scoring: 'MANUAL_PENDING',
+        note: LOCAL_STUB_NOTE,
+        snapshot,
+        submission: {
+          id: snapshot.id,
+          results: run.results.map((r) => ({
+            testCaseId: r.testId,
+            passed: false,
+            status: r.verdict,
+            timeMs: r.timeMs,
+            memoryKb: r.memoryKb,
+          })),
+          passed: 0,
+          total: run.results.length,
+        },
+      };
     }
     if (run.results.some((r) => r.verdict === 'INTERNAL_ERROR')) {
       // The runner failed, not the candidate: retry, never a silent 0.
@@ -414,6 +446,7 @@ export class GradeSessionService {
             data: {
               score: o.score === null ? null : formatHundredths(o.score),
               scoring: o.scoring,
+              ...(o.note !== undefined ? { scoringNote: o.note } : {}),
             },
             select: { id: true },
           });

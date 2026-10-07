@@ -21,6 +21,7 @@ import type { CloseSectionService } from '../grading/close-section.service';
 import type { GradeSessionService } from '../grading/grade-session.service';
 import type { GradingWorker } from '../grading/grading-worker';
 import type { ManualScoringService } from '../grading/manual-scoring.service';
+import type { ExecutionService } from '../execution/execution.service';
 import type { GradingQueue } from '../grading/grading-queue';
 import type { SubmitFlowService } from '../grading/submit-flow.service';
 
@@ -105,6 +106,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
   let manual: ManualScoringService;
   let flow: SubmitFlowService;
   let queue: GradingQueue;
+  let execution: ExecutionService;
   let main: World;
   let foreign: World;
   const judge = new FakeJudge0();
@@ -378,6 +380,10 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
     );
     worker = app.get(
       actual<typeof import('../grading/grading-worker')>('../grading/grading-worker').GradingWorker,
+    );
+    execution = app.get(
+      actual<typeof import('../execution/execution.service')>('../execution/execution.service')
+        .ExecutionService,
     );
     queue = app.get(
       actual<typeof import('../grading/grading-queue')>('../grading/grading-queue').GradingQueue,
@@ -2035,6 +2041,116 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       const stored = await owner.submission.findMany({ where: { sessionQuestionId: s.q.code } });
       const all = JSON.stringify([run.body, submit.body, stored.map((r) => r.results)]);
       expect(all).not.toMatch(/WRONG|"h[1-5]"|expectedOutput|stdin/);
+    });
+  });
+
+  describe('local stub runner (DL-54, DL-58, Backend A PR #298), FR-502, FR-506', () => {
+    type Run = ExecutionService['run'];
+    const stubRun = (verdicts: string[], seen: unknown[] = []): Run =>
+      ((request: { tests: ReadonlyArray<{ id: string }>; mode?: string }) => {
+        seen.push(request.mode);
+        return Promise.resolve({
+          clampedLimits: false,
+          results: request.tests.map((t, i) => {
+            const verdict = verdicts[i % verdicts.length] as string;
+            const stub = verdict === 'LOCAL_STUB';
+            return {
+              testId: t.id,
+              verdict,
+              passed: verdict === 'PASSED',
+              timeMs: null,
+              memoryKb: null,
+              ...(stub ? { stub: true as const, message: 'not graded (local stub)' } : {}),
+            };
+          }),
+        });
+      }) as unknown as Run;
+
+    it('FR-506, TC-048: hidden tests answered by the local stub leave the question not graded (no score, MANUAL_PENDING), total_score null, and the job succeeds without a retry count', async () => {
+      const s = await live();
+      await call('put', `/answers/${s.q.code}/draft`, s.token, {
+        code: 'ECHO',
+        language: 'python',
+      }).expect(200);
+      await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
+        answer: { optionIds: ['b'] },
+      }).expect(200);
+      await call('post', '/session/finish', s.token).expect(200);
+      const seen: unknown[] = [];
+      const spy = jest.spyOn(execution, 'run').mockImplementation(stubRun(['LOCAL_STUB'], seen));
+      try {
+        await worker.process({
+          name: 'grade-session',
+          data: { orgId: main.tenant.orgId, sessionId: s.inv.sessionId },
+        });
+      } finally {
+        spy.mockRestore();
+      }
+      const code = await questionRow(s.q.code);
+      expect(code.score).toBeNull();
+      expect(code).toMatchObject({
+        scoring: 'MANUAL_PENDING',
+        scoringNote: 'not graded (local stub)',
+      });
+      // Mixed with a real question: the MCQ is scored, the total waits for the pending one.
+      expect((await questionRow(s.q.mcq)).score?.toFixed(2)).toBe('10.00');
+      const session = await sessionRow(s.inv.sessionId);
+      expect(session.status).toBe('GRADED');
+      expect(session.totalScore).toBeNull();
+      expect(await redis.get(`grade-failures:${s.inv.sessionId}`)).toBeNull();
+      // Grading asks for submit mode; results are stored without stdout.
+      expect(seen).toContain('submit');
+      const snap = await owner.submission.findFirstOrThrow({
+        where: { sessionQuestionId: s.q.code, kind: 'SUBMIT' },
+      });
+      expect(snap.score).toBeNull();
+      expect(JSON.stringify(snap.results)).toContain('LOCAL_STUB');
+      expect(JSON.stringify(snap.results)).not.toMatch(/stdout|"h[1-5]"/);
+    });
+
+    it('FR-506: one stub result among real ones makes the whole question not graded (all or nothing)', async () => {
+      const s = await live();
+      await call('put', `/answers/${s.q.code}/draft`, s.token, {
+        code: 'ECHO',
+        language: 'python',
+      }).expect(200);
+      await call('post', '/session/finish', s.token).expect(200);
+      const spy = jest
+        .spyOn(execution, 'run')
+        .mockImplementation(stubRun(['PASSED', 'LOCAL_STUB']));
+      try {
+        expect(await grading.grade(main.tenant.orgId, s.inv.sessionId)).toBe('graded');
+      } finally {
+        spy.mockRestore();
+      }
+      const code = await questionRow(s.q.code);
+      expect(code.score).toBeNull();
+      expect(code.scoring).toBe('MANUAL_PENDING');
+    });
+
+    it('FR-502, TC-040: Run returns the LOCAL_STUB verdict through unchanged and stores the RUN row', async () => {
+      const s = await live();
+      const spy = jest.spyOn(execution, 'run').mockImplementation(stubRun(['LOCAL_STUB']));
+      let res;
+      try {
+        res = await call('post', `/answers/${s.q.code}/run`, s.token, {
+          code: 'ECHO',
+          language: 'python',
+        }).expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(res.body).toMatchObject({ passed: 0, total: 1 });
+      expect((res.body as { results: Array<Record<string, unknown>> }).results[0]).toMatchObject({
+        verdict: 'LOCAL_STUB',
+        passed: false,
+        message: 'not graded (local stub)',
+      });
+      const rows = await owner.submission.findMany({
+        where: { sessionQuestionId: s.q.code, kind: 'RUN' },
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ passed: 0, total: 1 });
     });
   });
 

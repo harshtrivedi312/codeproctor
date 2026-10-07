@@ -64,6 +64,7 @@ export class SampleResultDto {
       'OUTPUT_LIMIT',
       'RUNTIME_ERROR',
       'INTERNAL_ERROR',
+      'LOCAL_STUB',
     ],
   })
   verdict!: string;
