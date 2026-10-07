@@ -75,6 +75,14 @@ export const envSchema = z
     HTTP_TIMEOUT_CHECK_INTERVAL_MS: positiveInt.default(2_000),
     THROTTLE_TTL_MS: positiveInt.default(60_000),
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
+    // Prisma's pg pool (FU-BE-194). pg's own defaults wait forever for a connection (timeout 0), so
+    // an unreachable or full Postgres hung requests with no error. The connect timeout bounds one
+    // connection attempt; max bounds the pool. Postgres max_connections must stay above max plus
+    // the health pool (2) plus the worker's share.
+    DB_POOL_MAX: positiveInt.max(100).default(10),
+    DB_CONNECT_TIMEOUT_MS: positiveInt.max(60_000).default(5_000),
+    // Upper bound of the best-effort start-up warm-up query; it never fails boot (NFR-09).
+    DB_WARMUP_TIMEOUT_MS: positiveInt.max(60_000).default(5_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.
     // Pilot and production (APP_ENV pilot/production, or NODE_ENV production) must set it to at
     // least 1: with 0 every client shares the proxy address and the per-IP throttles collapse into

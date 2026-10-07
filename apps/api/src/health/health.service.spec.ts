@@ -3,6 +3,7 @@ import type { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
 import type { Pool } from 'pg';
 import type { Env } from '../config/env';
+import type { PrismaService } from '../database/prisma.service';
 import { HealthService } from './health.service';
 
 class ConnectingRedis extends EventEmitter {
@@ -20,7 +21,9 @@ describe('HealthService Redis probe (NFR-03, QA-D-04)', () => {
     const r = new ConnectingRedis();
     const pool = { query: () => Promise.resolve() } as unknown as Pool;
     const config = { get: () => 500 } as unknown as ConfigService<Env, true>;
-    const svc = new HealthService(pool, r as unknown as Redis, config);
+    const svc = new HealthService(pool, r as unknown as Redis, config, {
+      ping: () => Promise.resolve(),
+    } as unknown as PrismaService);
     const report = svc.check();
     process.nextTick(() => {
       r.status = 'ready';

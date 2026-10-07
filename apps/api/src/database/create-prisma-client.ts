@@ -8,9 +8,24 @@
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
 
-export function createPrismaClient(connectionString: string): PrismaClient {
+/** pg's own defaults are max 10 and connectionTimeoutMillis 0 (wait forever): FU-BE-194. */
+export const DEFAULT_POOL_MAX = 10;
+export const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
+
+export interface PoolOptions {
+  /** Most connections the pool opens. */
+  max?: number;
+  /** Longest wait for one new connection, in ms. Never 0: pg reads 0 as "wait forever". */
+  connectionTimeoutMillis?: number;
+}
+
+export function createPrismaClient(connectionString: string, pool: PoolOptions = {}): PrismaClient {
   return new PrismaClient({
-    adapter: new PrismaPg({ connectionString }),
+    adapter: new PrismaPg({
+      connectionString,
+      max: pool.max ?? DEFAULT_POOL_MAX,
+      connectionTimeoutMillis: pool.connectionTimeoutMillis || DEFAULT_CONNECT_TIMEOUT_MS,
+    }),
     // No code frame in error messages (FU-DB-70). Never add `log: ['query']` or a query event
     // listener here: they print every query with its parameters. 'minimal' still leaves values in
     // some errors, so the org-scoped client scrubs them (error-scrub.ts). Both are tested in
