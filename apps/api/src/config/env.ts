@@ -211,17 +211,17 @@ export const envSchema = z
     // Analysis worker (BE-08b, ADR 0014 section 4): the API calls it over HMAC-signed HTTP. Unset
     // means the identity match answers MANUAL_REVIEW (the candidate continues, D-05). The key id is
     // short and the key is a secret (32 random bytes, base64; never log).
-    WORKER_BASE_URL: z.url().optional(),
-    WORKER_HMAC_KEY_ID: z
-      .string()
-      .regex(/^[A-Za-z0-9_-]{1,32}$/)
-      .optional(),
-    WORKER_HMAC_KEY: z
-      .string()
-      .refine((v) => /^[A-Za-z0-9+/_-]+={0,2}$/.test(v) && Buffer.from(v, 'base64').length >= 32, {
-        message: 'must be at least 32 bytes, base64 encoded',
-      })
-      .optional(),
+    // Empty counts as unset (a copied .env template line, DL-52), like the SES and S3 settings.
+    WORKER_BASE_URL: emptyAsUnset(z.url()),
+    WORKER_HMAC_KEY_ID: emptyAsUnset(z.string().regex(/^[A-Za-z0-9_-]{1,32}$/)),
+    WORKER_HMAC_KEY: emptyAsUnset(
+      z
+        .string()
+        .refine(
+          (v) => /^[A-Za-z0-9+/_-]+={0,2}$/.test(v) && Buffer.from(v, 'base64').length >= 32,
+          { message: 'must be at least 32 bytes, base64 encoded' },
+        ),
+    ),
   })
   .superRefine((env, ctx) => {
     const live = isLiveEnv(env);

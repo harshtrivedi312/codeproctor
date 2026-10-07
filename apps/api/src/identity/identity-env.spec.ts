@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { validateEnv } from '../config/env';
 
 const base = {
+  APP_ENV: 'development',
   DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
   REDIS_URL: 'redis://127.0.0.1:6379',
   WEB_ORIGIN: 'http://localhost:3000',
