@@ -17,7 +17,6 @@ export const VERDICT_LABEL: Record<string, string> = {
   INTERNAL_ERROR: 'Runner error',
   MISSING_REFERENCE: 'No reference solution',
   LOCAL_STUB: 'local stub, not real execution',
-  LOCAL_STUB: 'local stub, not real execution',
 };
 
 /** What the author can do about a failure; a hidden slot never shows its expected or actual output. */
