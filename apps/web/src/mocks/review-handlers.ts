@@ -49,10 +49,10 @@ function answers(pendingShort: boolean): Answer[] {
           passed: 2,
           total: 4,
           tests: [
-            { name: 'Sample 1', status: 'passed' },
-            { name: 'Sample 2', status: 'passed' },
-            { name: 'Touching intervals', status: 'failed' },
-            { name: 'Empty input', status: 'failed' },
+            { name: 'Sample 1', status: 'PASSED' },
+            { name: 'Sample 2', status: 'PASSED' },
+            { name: 'Touching intervals', status: 'FAILED' },
+            { name: 'Empty input', status: 'FAILED' },
           ],
         },
         {
@@ -60,10 +60,10 @@ function answers(pendingShort: boolean): Answer[] {
           passed: 4,
           total: 4,
           tests: [
-            { name: 'Sample 1', status: 'passed' },
-            { name: 'Sample 2', status: 'passed' },
-            { name: 'Touching intervals', status: 'passed' },
-            { name: 'Empty input', status: 'passed' },
+            { name: 'Sample 1', status: 'PASSED' },
+            { name: 'Sample 2', status: 'PASSED' },
+            { name: 'Touching intervals', status: 'PASSED' },
+            { name: 'Empty input', status: 'PASSED' },
           ],
         },
       ],
@@ -174,6 +174,8 @@ function seed(): Bundle[] {
       false,
     ),
   ];
+  // One session whose review row does not exist at all (verdict: null, not an empty object).
+  list[2]!.verdict = null;
   for (const b of list) recompute(b);
   return list;
 }

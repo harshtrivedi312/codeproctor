@@ -144,3 +144,20 @@ export function playbackParts(p: ReviewPlayback): PlaybackPart[] {
   }
   return p.url ? [{ url: p.url, durationMs: null }] : [];
 }
+
+/**
+ * One test of a run. The API sends a free string: stored verdicts are uppercase (PASSED, FAILED,
+ * TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB) and a missing one becomes PASSED, FAILED or
+ * UNKNOWN. A local stub run is not real execution, so it is neutral, never a pass or a fail.
+ */
+export function runTestStatus(status: string): {
+  label: string;
+  tone: 'success' | 'error' | 'neutral';
+} {
+  const key = status.toUpperCase();
+  if (key === 'PASSED') return { label: 'Passed', tone: 'success' };
+  if (key === 'LOCAL_STUB') return { label: 'local stub, not real execution', tone: 'neutral' };
+  if (key === 'UNKNOWN') return { label: 'Unknown', tone: 'neutral' };
+  if (key === 'FAILED') return { label: 'Failed', tone: 'error' };
+  return { label: eventLabel(status), tone: 'error' };
+}

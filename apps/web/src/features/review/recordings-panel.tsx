@@ -2,7 +2,6 @@
 import * as React from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { BUSY_CODE } from '@/lib/api/busy';
 import { ApiFailure } from '@/features/admin/queries';
 import {
   formatDateTime,
@@ -75,11 +74,7 @@ function RecordingRow({
       setState('idle');
     } catch (e) {
       setLoaded(null);
-      setState(
-        isPlaybackUnavailable(e) && !(e instanceof ApiFailure && e.code === BUSY_CODE)
-          ? 'unavailable'
-          : 'error',
-      );
+      setState(isPlaybackUnavailable(e) ? 'unavailable' : 'error');
     }
   };
 
@@ -96,7 +91,10 @@ function RecordingRow({
           if (loaded && Date.now() >= loaded.expiresAt && !autoRefreshed) {
             setAutoRefreshed(true);
             void play(true);
-          } else setState('error');
+          } else {
+            setLoaded(null);
+            setState('error');
+          }
         },
       }
     : null;

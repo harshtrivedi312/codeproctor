@@ -87,7 +87,7 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
     ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createTestHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createInvitationHandlers({ latencyMs: opts.adminLatencyMs }),
-    // Review workspace (FR-901, FR-902): PROVISIONAL queue, bundle and playback shapes.
+    // Review workspace (FR-901, FR-902): mirrors the reviewer read API (apps/api/src/review).
     ...createReviewHandlers({ latencyMs: opts.adminLatencyMs }),
     // The candidate flow (FE-09, FE-09b): provisional mocks owned by Frontend B in ./candidate.
     ...createCandidateHandlers(),

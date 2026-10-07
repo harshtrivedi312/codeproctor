@@ -3507,7 +3507,11 @@ components:
             required: [name, status]
             properties:
               name: { type: string }
-              status: { type: string, enum: [passed, failed] }
+              status:
+                {
+                  type: string,
+                  description: 'Free string. Stored verdicts are uppercase: PASSED, FAILED, TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB; the API maps a missing one to PASSED, FAILED or UNKNOWN.',
+                }
     ReviewAnswer:
       type: object
       required:

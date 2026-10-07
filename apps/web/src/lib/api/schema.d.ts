@@ -1782,8 +1782,8 @@ export interface components {
       total: number;
       tests: {
         name: string;
-        /** @enum {string} */
-        status: 'passed' | 'failed';
+        /** @description Free string. Stored verdicts are uppercase: PASSED, FAILED, TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB; the API maps a missing one to PASSED, FAILED or UNKNOWN. */
+        status: string;
       }[];
     };
     ReviewAnswer: {

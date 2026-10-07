@@ -298,6 +298,18 @@ describe('FR-902 review session', () => {
     expect(screen.queryByText('Answers')).not.toBeInTheDocument();
   });
 
+  it('FR-902 TC-077: run tests render PASSED, TIME_LIMIT and LOCAL_STUB with their own labels', async () => {
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/rs-2`, () => HttpResponse.json(bundleWithRun())),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-2" />, U);
+    await screen.findByRole('heading', { name: 'Marco Silva' });
+    expect(screen.getByText('Passed')).toBeInTheDocument();
+    expect(screen.getByText('Time limit')).toBeInTheDocument();
+    expect(screen.getByText('local stub, not real execution')).toBeInTheDocument();
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
+  });
+
   it('FR-902: an unknown session id is a calm not-found with a way back', async () => {
     renderAsStaff(<ReviewSessionPage sessionId="nope" />, U);
     expect(await screen.findByText('This session does not exist')).toBeInTheDocument();
@@ -321,5 +333,37 @@ function bundleNoPending() {
     events: [],
     recordings: [],
     verdict: null,
+  };
+}
+
+function bundleWithRun() {
+  const b = bundleNoPending();
+  return {
+    ...b,
+    answers: [
+      {
+        sessionQuestionId: 'sq-9',
+        type: 'CODING',
+        title: 'Run demo',
+        statement: 's',
+        points: 10,
+        score: 5,
+        scoring: 'AUTO',
+        scoringNote: null,
+        answer: { language: 'python', code: 'print(1)' },
+        runResults: [
+          {
+            at: '2026-10-05T09:10:00.000Z',
+            passed: 1,
+            total: 3,
+            tests: [
+              { name: 't1', status: 'PASSED' },
+              { name: 't2', status: 'TIME_LIMIT' },
+              { name: 't3', status: 'LOCAL_STUB' },
+            ],
+          },
+        ],
+      },
+    ],
   };
 }

@@ -9,6 +9,7 @@ import { ApiFailure } from '@/features/admin/queries';
 import {
   answerBody,
   canScoreManually,
+  runTestStatus,
   formatDateTime,
   formatScore,
   scoringState,
@@ -178,9 +179,7 @@ function RunResults({ results }: { results: NonNullable<ReviewAnswer['runResults
       <ul className="mt-1 grid gap-1 text-sm sm:grid-cols-2">
         {last.tests.map((t) => (
           <li key={t.name} className="flex items-center gap-2">
-            <Badge tone={t.status === 'passed' ? 'success' : 'error'}>
-              {t.status === 'passed' ? 'Passed' : 'Failed'}
-            </Badge>
+            <Badge tone={runTestStatus(t.status).tone}>{runTestStatus(t.status).label}</Badge>
             {t.name}
           </li>
         ))}
