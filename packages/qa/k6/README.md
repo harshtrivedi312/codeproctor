@@ -7,7 +7,7 @@ Owner: QA B (ops). Covers NFR-01, NFR-02, FR-609, FR-701, FR-608, FR-801 and the
 | `tc-090-load.js`     | TC-090 | P1  | 200 simulated candidates at the real client cadence | API p95 under 300 ms, no errors    |
 | `tc-091-code-run.js` | TC-091 | P2  | 50 concurrent code runs                             | run p95 under 5 s                  |
 
-Nothing here runs until DEP-01 (staging) exists. Staging only, synthetic data only. Never point it at pilot or production.
+Nothing here runs until a target exists. Staging, or the owner-run pilot capacity gate on synthetic-only data before go-live (ADR 0017, qa.md section 23); synthetic data only. Never point it at production or at an instance holding real candidates.
 
 The routes, limits and 412 handling follow **Proposed** ADR 0013 (not yet accepted). Re-check the scripts against the code when BE-09 and BE-10 merge.
 
@@ -54,7 +54,7 @@ Storage PUTs treat 2xx and 412 as expected (`responseCallback`), so an "already 
 
 ADR 0013 section 5.3 also sets a design target of heartbeat p95 under 50 ms. It is not a TC criterion, so it is not a threshold; read it in the per-endpoint results of the summary.
 
-A failed threshold makes k6 exit non-zero, so the CI job fails.
+A failed threshold makes k6 exit non-zero, so the run fails (k6 exits non-zero).
 
 ## Seeding the sessions
 
@@ -74,7 +74,7 @@ Each virtual user needs its own IN_PROGRESS candidate session on staging with sy
 - `token`: the candidate access token for that session. It lives for the session token lifetime; renewal through the heartbeat is not followed (a long run needs a token that outlives it).
 - `sessionQuestionId`: used in keystroke batches and in the run route (BE-11 resolves it under the token's session; main's `test/start` returns no other question id). A file made with `seed.mjs --stop-at ...` has no `sessionQuestionId` and is refused here.
 - `keyB64` and `counters` are optional. Without them the script calls `POST /candidate/session/proctor-key` once per user. That route answers 409 `KEY_ALREADY_ISSUED` for the same epoch the second time, so **seed fresh sessions for every run** (or store the key and counters yourself).
-- The file holds bearer tokens and keys. Keep it outside the repository (the folder's `.gitignore` excludes `sessions*.json`, `.local/` and `results/` as a second guard), never paste it into an issue or chat, and delete it after the run. In CI it comes from a secret, never from a file in git.
+- The file holds bearer tokens and keys. Keep it outside the repository (the folder's `.gitignore` excludes `sessions*.json`, `.local/` and `results/` as a second guard), never paste it into an issue or chat, and delete it after the run. On the runner it comes from the runner's own secret store, never from GitHub (C-63) and never from a file in git.
 
 Seeding assumptions to confirm with the backend when BE-09 and BE-10 merge: the question has a Python language option, and sample tests exist for the run route.
 
@@ -88,7 +88,7 @@ k6 run -e API_BASE_URL=https://<staging-host>/api/v1 -e ALLOWED_HOSTS=<staging-h
        -e SESSIONS_FILE=/absolute/path/to/sessions.json \
        packages/qa/k6/tc-090-load.js
 
-# Docker (the image CI pins by digest in .github/workflows/qa.yml)
+# Docker (the k6 image is pinned by digest in the "CI (C-63)" section below)
 docker run --rm -v "$PWD/packages/qa/k6:/k6" -v /absolute/path/to:/seed:ro -w /k6 \
   grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
   run -e API_BASE_URL=https://<staging-host>/api/v1 -e ALLOWED_HOSTS=<staging-host> -e SESSIONS_FILE=/seed/sessions.json tc-090-load.js
@@ -130,7 +130,7 @@ Do a smoke run first, for example `-e VUS=5 -e RAMP_UP=10s -e HOLD=1m -e RAMP_DO
 
 ## Staging limits to check before a full run
 
-Cloudflare R2 free tier (check the current limits before the run): about 10 GB stored and 1 million class A operations (PUT) a month. Chunks are zero bytes, which may break BE-12 media ingest (it may probe, transcode or thumbnail the object); if the object-store clean-up or the ingest worker runs on these objects, expect errors there and note it in the clean-up. A full 200-candidate run is about 3,600 PUTs a minute, about 45,000 over the 13 minutes, and with the default chunk sizes about 8 GB of objects. Lower `CHUNK_BYTES_VIDEO` (for example 65536, about 2 GB) for the first runs, and delete the run's objects afterwards through the admin deletion flow (TC-094). Also note the load generator's upload bandwidth (the default sizes are about 100 Mbit/s at 200 candidates) and that a GitHub-hosted runner is a different network path from a candidate's.
+Cloudflare R2 free tier (check the current limits before the run): about 10 GB stored and 1 million class A operations (PUT) a month. Chunks are zero bytes, which may break BE-12 media ingest (it may probe, transcode or thumbnail the object); if the object-store clean-up or the ingest worker runs on these objects, expect errors there and note it in the clean-up. A full 200-candidate run is about 3,600 PUTs a minute, about 45,000 over the 13 minutes, and with the default chunk sizes about 8 GB of objects. Lower `CHUNK_BYTES_VIDEO` (for example 65536, about 2 GB) for the first runs, and delete the run's objects afterwards through the admin deletion flow (TC-094). Also note the load generator's upload bandwidth (the default sizes are about 100 Mbit/s at 200 candidates) and that a laptop or other non-gate runner is a different network path from a candidate's.
 
 ## Checking the scripts without staging
 
@@ -153,11 +153,16 @@ Result of the last check (2026-10-05, k6 from the pinned image, 60 candidates ag
 No CI job runs these scripts: the owner decided (C-63) on no GitHub environments and no Actions secrets, so the `k6` job and its dispatch options were removed from `.github/workflows/qa.yml`. TC-090, TC-091 and TC-105 run from the k6 runner instance in the pilot setup (ADR 0017), started by the owner, with the seeded sessions and the test mailbox (C-57) kept inside AWS. Run command (the runner pulls the image by digest; bump it deliberately):
 
 ```sh
+set -o pipefail   # keep k6's exit code through the redaction pipe
+mkdir -p k6-out && chmod 777 k6-out   # the k6 image runs as a non-root user
 docker run --rm -e SESSIONS_JSON -v "$PWD/packages/qa/k6:/k6:ro" -v "$PWD/k6-out:/out:rw" -w /k6 \
-  -e ALLOWED_HOSTS="$TARGET_HOST" \
+  -e ALLOWED_HOSTS="$TARGET_HOST" -e STORAGE_ALLOWED_HOSTS="$STORAGE_HOST" \
+  -e API_BASE_URL="https://$TARGET_HOST/api/v1" \
   grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
-  run -e API_BASE_URL="https://$TARGET_HOST/api/v1" --summary-export=/out/summary.json tc-090-load.js 2>&1 \
+  run --summary-export=/out/summary.json "$SCRIPT" 2>&1 \
   | sed -E 's#https?://[^" ]*#<url-redacted>#g'
 ```
+
+`SCRIPT` is `tc-090-load.js`, `tc-091-code-run.js` or `tc-105-pilot-capacity.js` (the last once it exists). `STORAGE_HOST` is the S3 endpoint host of the load-test bucket.
 
 `-e SESSIONS_JSON` with no value makes Docker copy it from the shell environment (never on the command line). Do not keep the raw k6 log unless it went through the `sed` redaction above (section "Logs and outputs"); keep `summary.json`.

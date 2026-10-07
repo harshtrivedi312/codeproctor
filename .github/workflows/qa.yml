@@ -153,7 +153,7 @@ jobs:
 
   zap-baseline:
     name: OWASP ZAP baseline (TC-093)
-    # Dispatch from main only: a branch must not run unreviewed code with the staging secret.
+    # Dispatch from main only: a branch must not run unreviewed code against a staging host.
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.scan == 'zap-baseline'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
