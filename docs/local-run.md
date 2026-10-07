@@ -32,6 +32,7 @@ From the repository root:
 pnpm install
 node infra/scripts/local-env.mjs      # writes .env and apps/web/.env.local with random local secrets
 pnpm dev:infra                        # PostgreSQL 16, Redis 8.8, Adminer; waits until healthy
+pnpm --filter @codeproctor/shared build   # the shared types the API and web import (needed on a fresh checkout)
 pnpm db:generate
 pnpm db:migrate                       # applies the migrations and sets the local app_user password
 pnpm db:seed                          # the demo data (section 3)
@@ -85,6 +86,11 @@ pnpm dev:web                          # http://localhost:3000
 Check the API: <http://localhost:4000/api/v1/health> answers `{"status":"ok", ...}` with PostgreSQL and
 Redis `up`. The API log will repeat `Job consent-pdf failed`: the seeded consents have no PDF and there
 is no object store locally yet. That is expected until the local object store exists (section 7).
+
+**Browser**: use **Chrome or Firefox**, and always open the web app as `http://localhost:3000` (not
+`127.0.0.1`: the API's allowed web origin is exactly that). Safari does not keep the staff sign-in
+cookie over plain `http://localhost` (it is `Secure`), so staff sign-in and refresh break there until the
+local-only fix (FU-BE-222, Backend A) is merged; this note will then be dropped.
 
 **Sign in as the recruiter**: open <http://localhost:3000/admin/login>, `recruiter@demo-corp.example`
 and the development password. You land on the staff dashboard. Questions (8) and Tests (2) show the
@@ -179,4 +185,5 @@ on a local database; agents never run it). Then `pnpm db:migrate` and `pnpm db:s
   or change the port in `.env` and in `infra/docker-compose.yml` together.
 - **API refuses to boot**: it names the missing or invalid `.env` value. A secret shorter than 32
   characters, or a leftover `change-me`, is refused. Delete `.env` and run `local-env.mjs` again.
+- **Signed in, then thrown out at once (Safari)**: see the Browser note in section 4; use Chrome or Firefox.
 - **Node version**: the install may work on other versions, but only Node 24 is supported.
