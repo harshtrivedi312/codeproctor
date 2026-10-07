@@ -52,7 +52,8 @@ describe('FU-BE-193 ProblemCode enum matches the contract', () => {
     expect(start, 'the contract preamble names its codes').toBeGreaterThan(-1);
     const end = contract.indexOf('Candidate-route codes', start);
     // The preamble also writes other backticked uppercase words that are not problem codes: the API
-    // constant `PROBLEM_CODES`, HTTP methods (`PATCH`) and the ADR 0015 waiver reason value
+    // constant `PROBLEM_CODES`, an HTTP method written on its own (`PATCH` today; a method inside a
+    // path such as `POST /tests/:id` never matches) and the ADR 0015 waiver reason value
     // `REFUSED_BIOMETRIC_PROCESSING`. They are excluded here, by name, so a new real code still counts.
     const NOT_CODES = new Set([
       'PROBLEM_CODES',
