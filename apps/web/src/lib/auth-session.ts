@@ -10,6 +10,7 @@ import {
 } from '@/lib/api/busy';
 import { apiBaseUrl } from '@/lib/env';
 import { mockingReady } from '@/lib/mock-ready';
+import { coordinateRefresh, type RefreshOutcome } from '@/lib/refresh-coordination';
 
 /*
  * Silent refresh (FR-104). The refresh token is an httpOnly cookie the browser sends on its own;
@@ -236,10 +237,52 @@ export function refreshSession(): Promise<AuthSession | null> {
   return mine;
 }
 
+/**
+ * One refresh across all tabs (FR-104, TC-005): the tab that wins the cross-tab lock sends the
+ * request, the others reuse its outcome (see refresh-coordination.ts). Either way the outcome goes
+ * through the same guards here before it touches this tab's session.
+ */
 async function doRefresh(): Promise<AuthSession | null> {
   const startedIn = generation;
   try {
     await mockingReady;
+    const outcome = await coordinateRefresh(() => sendRefresh(startedIn));
+    if (!outcome || startedIn !== generation) return null;
+    return applyOutcome(startedIn, outcome);
+  } catch {
+    if (startedIn === generation) publishSession(null);
+    return null;
+  }
+}
+
+function applyOutcome(startedIn: number, outcome: RefreshOutcome): AuthSession | null {
+  // A sign-out here or in another tab since the refresh began: never restore the session.
+  if (startedIn !== generation || isSignOutPending()) return null;
+  if (outcome.kind === 'busy') {
+    // Still busy: the session is exactly as it was. Not a sign-out; the screen says so.
+    busyStore.setRefreshBusy(true);
+    return null;
+  }
+  busyStore.setRefreshBusy(false);
+  if (outcome.kind !== 'session') {
+    // 401 (cookie cleared or invalid) or a failed request: signed out, no retry.
+    publishSession(null);
+    return null;
+  }
+  const session = outcome.session;
+  if (currentUserId && currentUserId !== session.user.id) {
+    // Another tab signed in as someone else through the shared cookie. Do not switch users
+    // silently: this tab signs out and goes to login (FR-103, FR-104).
+    publishSession(null);
+    return null;
+  }
+  publishSession(session);
+  return session;
+}
+
+/** Sends the one refresh request, with the bounded 503 BUSY wait. Null: abandoned (sign-out here). */
+async function sendRefresh(startedIn: number): Promise<RefreshOutcome | null> {
+  try {
     const send = () =>
       fetch(`${apiBaseUrl}/v1/auth/refresh`, {
         method: 'POST',
@@ -269,29 +312,11 @@ async function doRefresh(): Promise<AuthSession | null> {
       response = await send();
     }
     if (startedIn !== generation) return null;
-    if (await isBusyResponse(response)) {
-      // Still busy: the session is exactly as it was. Not a sign-out; the screen says so.
-      busyStore.setRefreshBusy(true);
-      return null;
-    }
-    busyStore.setRefreshBusy(false);
-    if (!response.ok) {
-      publishSession(null);
-      return null;
-    }
-    const session = (await response.json()) as AuthSession;
-    if (startedIn !== generation) return null;
-    if (currentUserId && currentUserId !== session.user.id) {
-      // Another tab signed in as someone else through the shared cookie. Do not switch users
-      // silently: this tab signs out and goes to login (FR-103, FR-104).
-      publishSession(null);
-      return null;
-    }
-    publishSession(session);
-    return session;
+    if (await isBusyResponse(response)) return { kind: 'busy' };
+    if (!response.ok) return { kind: 'signed-out' };
+    return { kind: 'session', session: (await response.json()) as AuthSession };
   } catch {
-    if (startedIn === generation) publishSession(null);
-    return null;
+    return startedIn === generation ? { kind: 'error' } : null;
   }
 }
 
