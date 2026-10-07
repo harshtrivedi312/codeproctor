@@ -162,6 +162,7 @@ Decision: **unsigned, token-authenticated, advisory input, flagged as unsigned**
   - `TOKEN_EXPIRED`: the token's `exp` has passed.
   - `SESSION_TAKEN_OVER`: the token's epoch is below `sessions.auth_epoch`, because another device passed the OTP.
   - Any other 401 carries no code.
+  - **Token lifetime and inactivity (architect detail, owner to confirm; A11Y OQ-A11Y-5, WCAG 2.2.1).** The candidate token lives `CANDIDATE_TOKEN_TTL_SECONDS` (default 900, 15 minutes). In the test the heartbeat renews it. Before the test (the identity and system gate) the web app renews it on each authenticated call, so a candidate who pauses between steps is not signed out silently: the app shows a polite status warning 2 minutes before the token would expire, with one action ("Stay signed in") that renews it, and a token that expires anyway sends the candidate back through the OTP without losing the step already passed. The gate has no other inactivity limit than the invitation window (`window_end`, ADR 0002). The renewal route and the warning are for the backend (BE-07 follow-up) and frontend tracks to build.
 - **SDK mapping.**
   - 2xx: OK.
   - 408, 429, 5xx and network errors: retry with capped backoff.
