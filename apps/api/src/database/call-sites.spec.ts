@@ -82,10 +82,13 @@ const SRC = resolve(__dirname, '..');
  *                         erasure, R-4 and R-10; why names those jobs; R-4 has no SERVICE caller). Database B adds
  *                         that entry in its own PR, not before.
  * In the state file each core is imported by name under an alias, by an `import { x as alias } from` statement and no
- * other form (a namespace import, `import x = require`, `require(`, `import(` and a re-export are refused), and called
+ * other form (a namespace or default import, `import x = require`, a re-export, and any `require`, `createRequire`,
+ * `import(`, `_load`, `getBuiltinModule`, `node:module` or `node:vm` token or escaped specifier are refused), and called
  * exactly once, inside the wrapper method of the same name in the SessionStateService class, whose whole body is
- * `return <alias>(<param1>, <param2>);`; the alias is used nowhere else. The wrappers are counted with any receiver:
- * `.lockAnySession(`, `.lockForAccommodation(` and `.proctorResume(` are allowed zero times in the state file. In every
+ * `return <alias>(<param1>, <param2>);` with plain parameters (no default, not optional) and no decorator; the alias
+ * is used nowhere else. The wrappers are counted with any receiver: `.lockAnySession(` and `.lockForAccommodation(`
+ * are allowed zero times in the state file, and `proctorResume` is treated like a lock name (no member mention at all;
+ * the processor may not mention it in either state). In every
  * other listed file each mention of a lock name is a member call (`this.state.guardLive(`); in the state and processor
  * files a lock name in a string or a log message fails too (the scan is fail-closed). The import guard is separate:
  * ONLY the state file imports database/session-locks. No file outside database/ may export a lock, an alias, or a

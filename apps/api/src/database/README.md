@@ -567,11 +567,13 @@ orgContext.withGrant<T>(
 field names (`hmacKeyEnc`, `legalApprovedAt`), `ids` are primary keys. **Private to the grant sites below**:
 `call-sites.spec.ts` pins them (a slice of FU-DB-67, FU-DB-189): it scans every non-test file under
 `apps/api/src` (`.ts`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`; any other extension fails the scan) for a USE of
-`withGrant`, `claimCandidateFactsSetter`, `setCandidateFacts` and `detachForSessionJob` (a call, a definition, a
-member access, a bracket access, an exact string, or the name inside braces; a mention in a comment or in prose is
-not a use), and a file that is not on its per-file list fails. **Today the list holds the two database files that
-define them**: BE-07's guard, `SessionJobProcessor` and the grant-site services are added to `CALL_SITES` in the PR
-that builds them, one entry per file, with the CS-4.4 grant site(s) it holds. **The guard pins files, not grants**:
+`withGrant`, `claimCandidateFactsSetter`, `setCandidateFacts` and `detachForSessionJob`, and the three session-lock
+names `guardLive`, `lockForAccommodation` and `lockAnySession` (their own rules are in "Session write locks"; a call,
+a definition, a member access, a bracket access, an exact string, or the name inside braces; a mention in a comment
+or in prose is not a use), and a file that is not on its per-file list fails. **Today the list holds the database
+files that define them** (`org-context.ts`, `candidate-facts.ts`, `session-locks.ts`) **and BE-07's
+`candidate/candidate-scope.ts`**: `SessionJobProcessor`, the state file and the grant-site services are added to
+`CALL_SITES` in the PR that builds them, one entry per file, with the CS-4.4 grant site(s) it holds. **The guard pins files, not grants**:
 PR 3 adds an AST check (each `withGrant(` takes an object literal whose `model` and `columns` match the file's
 declared `sites`, and no function forwards a parameter as the request), and no BE-07 grant site merges before
 it exists (a hard gate, FU-DB-189 and FU-DB-190); until then a run-time name, a unicode escape, `require` and
@@ -736,12 +738,25 @@ Five tests pin it, all with an **empty** list outside the defining file today:
       `import(` token at all** (SF-2 of the r3 review), in either state: any of them fails, even in a string or a log
       message that says "require", and so does a `typeof import(...)` type query. A file that reaches the module in a
       form the scan can read is never skipped by the export check.
+    - **No default import, and no loader route** (N-4 of the r3 review, SF-1 of the r4 review): `import core from` and
+      `import core, { ... } from` the module are refused (a default import holds the whole module), and so are
+      `_load`, `getBuiltinModule`, an import of `module`, `node:module`, `vm` or `node:vm`, and a specifier with an
+      escape in it (`session-locks`: TypeScript resolves the decoded string, the scan reads the raw text). **Write
+      the import on its own line, in prettier's layout**: the statement is parsed by a strict clause grammar, so a
+      statement the grammar does not know fails (OTHERS) instead of passing. No file under `apps/api/src` may hold an
+      escaped specifier at all (`import-guard.spec.ts`).
     - **The wrapper.** Each core is **called exactly once, inside the wrapper method of the same name**, a method of
       the `SessionStateService` class (a method of another class in the file does not count), and the alias is used
       nowhere else (not passed, returned, stored, or called in another method or an exported function). The wrapper
       is **thin**: its whole body is `return <alias>(<param1>, <param2>);` (an `await` and any whitespace are fine),
       with exactly two plain parameters handed on in order. A body that stores a closure, adds a statement or changes
-      the arguments fails.
+      the arguments fails. **The parameters take no `=` default and no `?`** (N-1): a default such as
+      `sessionId = this.lastSessionId` would lock a session the caller did not name.
+    - **No decorator on the three wrappers or on `proctorResume`** (N-2): what stands above a pinned method's header
+      must end the previous member or open the class (`}`, `;` or `{`), so a decorator, also one over several lines,
+      fails (it can take `descriptor.value` and hand the method out under no name). A **class** decorator
+      (`@Injectable()`) is allowed: Nest builds the service with it, and a class decorator that hands methods out by a
+      computed lookup is in the computed-name class of misses that the AST gate closes (FU-DB-189).
     - **Every other mention.** A mention of a lock name is the wrapper's definition or a member call, nothing else:
       `const { lockAnySession } = this`, `Reflect.apply(this.lockAnySession, ...)`, `const f = this.lockAnySession`,
       `.guardLive.bind(this)` and an optional-call or bracket form all fail. **A string or a log message that names a
@@ -756,14 +771,19 @@ Five tests pin it, all with an **empty** list outside the defining file today:
       into an ERASED session; one that called `proctorResume` would be a second door to `guardLive`).
     - **`proctorResume` is treated like a lock name in this file** (SF-1 of the r3 review): every bare mention is its
       method definition (`const { proctorResume } = this`, a string or a log message that says it fails), and **every
-      member mention is refused, called or not** (`{ resume: this.proctorResume }`, `Reflect.apply(this.proctorResume,
-...)`, `.call`, `.apply`, `.bind`, a read through any receiver). The scan sees only this file: **who calls
+      member mention is refused, called or not** (`{ resume: this.proctorResume }`,
+      `Reflect.apply(this.proctorResume, this, args)`, `.call`, `.apply`, `.bind`, a read through any receiver). The
+      scan sees only this file and the processor (below): **who calls
       `proctorResume` from OTHER files is a review point until FU-DB-189's AST gate, not a pin**.
     - **Write the wrappers as methods with a body** (the scan looks for `async name(...) {`), and keep inline object
       types out of their return types.
   - **The processor file** (`session-job.processor.ts`), once it names a lock: `.guardLive(` **exactly once, inside `withLiveSession`**;
     `.lockAnySession(` **exactly once, inside `withAnySession`**; every mention of a lock name is a member call
     (`this.state.guardLive(...)`). A string or a log message that names a lock fails here as well (fail closed).
+    The two methods are **the `SessionJobProcessor` class's own** (N-3: a method of another class in the file does
+    not count, and a file with no such class fails), they take **no decorator** (N-2), and the file makes **no
+    `.lockForAccommodation(` call**. **The processor never mentions `proctorResume`, in either state** (SF-2 of the
+    r4 review): it is the STAFF transition, and a job that called it would be a second door to `guardLive`.
   - **The accommodations and retention files:** every mention of a lock name is a member call
     (`this.state.lockForAccommodation(...)`); nothing is held, bound or passed.
 - **The export check** (`findLockExports`, **no allowlist**, the state file included): no file outside `database/`

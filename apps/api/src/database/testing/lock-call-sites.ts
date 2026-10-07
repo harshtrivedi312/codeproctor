@@ -96,10 +96,13 @@ export const LOCK_CALLER_RULES = {
     `import x = require, require(, import( or re-export of the module) and called exactly once, inside the wrapper ` +
     `method of the same name in the ${SESSION_STATE_CLASS} class, whose whole body is return <alias>(<param1>, ` +
     `<param2>); nowhere else; member calls counted with any receiver: one .guardLive( call, inside proctorResume, ` +
-    `and no .lockAnySession( or .lockForAccommodation( call; proctorResume is treated like a lock name: every bare mention is its definition and every member mention is refused`,
+    `and no .lockAnySession( or .lockForAccommodation( call; proctorResume is treated like a lock name: every bare mention is its definition and every member mention is refused; ` +
+    `in either state no require, createRequire, import(, _load, getBuiltinModule, node:module or node:vm, and no escaped specifier; ` +
+    `no default import of the core; wrapper parameters take no default and are not optional; no decorator on the wrappers or proctorResume`,
   processorFile:
-    'no lock named at all (before the switch-over), or: .guardLive( exactly once, inside withLiveSession, and ' +
-    '.lockAnySession( exactly once, inside withAnySession, every mention of a lock name a member call',
+    'no mention of proctorResume in either state; no lock named at all (before the switch-over), or: .guardLive( ' +
+    `exactly once, inside withLiveSession, and .lockAnySession( exactly once, inside withAnySession, both methods of the ` +
+    `${SESSION_PROCESSOR_CLASS} class and with no decorator, no .lockForAccommodation( call, every mention of a lock name a member call`,
   otherFiles: 'every mention of a lock name is a member call (`this.state.guardLive(`)',
   exports: 'no export of a lock, an alias, or a function or static property that wraps one',
 } as const;
@@ -501,6 +504,17 @@ export function stateFileProblems(path: string, code: string): string[] {
       `${path}: require, createRequire or import( appears in the state file: it needs none, so any loader is refused (a string that says require too)`,
     );
   }
+  // SF-1 (review r4 of #208): the module loader reached another way (`Module._load`, `process.getBuiltinModule`),
+  // an import of the loader or vm modules, and a specifier with an escape in it (TypeScript resolves the decoded
+  // string, the scan reads the raw text) are refused too. The state file needs none of them.
+  if (
+    indexesOf(code, /(?<![\w$])(?:_load|getBuiltinModule)(?![\w$])/).length > 0 ||
+    specifiersOf(code).some((s) => s.includes('\\') || /^(?:node:)?(?:module|vm)$/.test(s))
+  ) {
+    out.push(
+      `${path}: the module loader (_load, getBuiltinModule, node:module or node:vm) or an escaped specifier appears in the state file: it needs none, so it is refused`,
+    );
+  }
   const imports = parseLockImports(code);
   if (imports.ranges.length === 0 && imports.others === 0) {
     return [
@@ -658,8 +672,22 @@ export function stateFileProblems(path: string, code: string): string[] {
  * for both. The processor never imports the core: the import guard allows only the state file.
  */
 export function processorFileProblems(path: string, code: string): string[] {
-  if (namedLocks(code).length === 0) return [];
-  const out: string[] = [];
+  // SF-2 (review r4 of #208): proctorResume is the STAFF door to guardLive, and a SERVICE job that called it would be a
+  // second one, so the processor may not mention it at all, in either state.
+  const resume = new RegExp('(?<![\\w$])proctorResume(?![\\w$])').test(code)
+    ? [
+        `${path}: proctorResume is mentioned in the processor: it is the STAFF transition, never a job's door to guardLive`,
+      ]
+    : [];
+  if (namedLocks(code).length === 0) return resume;
+  const out: string[] = [...resume];
+  // Nit 6 (review r4): the processor takes no accommodation lock (the STAFF routes and retention do).
+  const accommodationCalls = indexesOf(code, /\.\s*lockForAccommodation\s*\(/).length;
+  if (accommodationCalls > 0) {
+    out.push(
+      `${path}: ${accommodationCalls} .lockForAccommodation( calls in the processor, none are allowed`,
+    );
+  }
   const entries: Array<[LockName, string]> = [
     ['guardLive', 'withLiveSession'],
     ['lockAnySession', 'withAnySession'],

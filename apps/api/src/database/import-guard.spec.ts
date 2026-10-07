@@ -125,6 +125,15 @@ describe('import guard: nothing new reaches Postgres around the org scope (NFR-0
     expect(paths.some((p) => p.startsWith('generated/'))).toBe(false);
   });
 
+  it('TC-008 SF-1 (review r4 of #208): no specifier in the real tree has an escape in it (TypeScript resolves the decoded string, every rule here reads the raw text)', () => {
+    const escaped = files.flatMap((f) =>
+      specifiersOf(f.text)
+        .filter((s) => s.includes('\\'))
+        .map((s) => `${f.path}: ${s}`),
+    );
+    expect(escaped).toEqual([]);
+  });
+
   it.each(RULES)('TC-008 only the listed files use $name', (rule) => {
     const offenders = findViolations(files, rule);
     expect({ rule: rule.name, offenders, why: rule.why }).toEqual({

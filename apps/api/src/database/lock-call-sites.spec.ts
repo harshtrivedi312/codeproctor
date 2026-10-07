@@ -179,6 +179,34 @@ describe('the real paths and the rules in words (S-B of the re-review of #208): 
     expect(LOCK_CALLER_RULES.stateFile).toContain('no lock named at all');
     expect(LOCK_CALLER_RULES.processorFile).toContain('no lock named at all');
     expect(LOCK_CALLER_RULES.processorFile).toContain('withAnySession');
+    // SF-3 (review r4): the rules in words carry every rule the scan enforces.
+    for (const phrase of [
+      'createRequire',
+      'getBuiltinModule',
+      'escaped specifier',
+      'no default import',
+      'no default and are not optional',
+      'no decorator',
+    ]) {
+      expect({ phrase, inStateRules: LOCK_CALLER_RULES.stateFile.includes(phrase) }).toEqual({
+        phrase,
+        inStateRules: true,
+      });
+    }
+    for (const phrase of [
+      'no mention of proctorResume',
+      SESSION_PROCESSOR_CLASS,
+      'no decorator',
+      '.lockForAccommodation(',
+    ]) {
+      expect({
+        phrase,
+        inProcessorRules: LOCK_CALLER_RULES.processorFile.includes(phrase),
+      }).toEqual({
+        phrase,
+        inProcessorRules: true,
+      });
+    }
     expect(LOCK_CALLER_RULES.otherFiles).toContain('member call');
     expect(LOCK_CALLER_RULES.exports).toContain('wraps');
   });
@@ -677,6 +705,25 @@ export class S {
     expect(state(PRE_STATE_TEXT + '\n' + extra)).toEqual([LOADER]);
   });
 
+  const MODULE_LOADER = `${SESSION_STATE_FILE}: the module loader (_load, getBuiltinModule, node:module or node:vm) or an escaped specifier appears in the state file: it needs none, so it is refused`;
+
+  it.each([
+    [
+      'Module._load',
+      "import { Module } from 'node:module';\nconst core = (Module as unknown as { _load(r: string, p: unknown): object })._load('../database/session-locks', module);",
+    ],
+    [
+      'module.constructor._load',
+      "const core: unknown = (module.constructor as never as { _load: (r: string) => object })._load('x');",
+    ],
+    ['process.getBuiltinModule', "const m: unknown = process.getBuiltinModule('module');"],
+    ['an import of node:vm', "import { runInThisContext } from 'node:vm';"],
+    ['an import of module', "import * as m from 'module';"],
+    ['an escaped specifier', "import * as core from '../database/session\\u002dlocks';"],
+  ])('TC-008 SF-1 (review r4) %s in a pre-switch-over state file is refused', (_what, extra) => {
+    expect(state(PRE_STATE_TEXT + '\n' + extra)).toContain(MODULE_LOADER);
+  });
+
   it('TC-008 SF-2 words that only contain the token, and import statements, are not loaders', () => {
     const text = PRE_STATE_TEXT.replace(
       "const note = 'the compare-and-set below is the only write';",
@@ -851,7 +898,12 @@ export class S {
 
   it('TC-008 N-4 an import statement inside a string is not an import, so it is a finding', () => {
     const extra = 'const s = "import { guardLive as g } from \'../database/session-locks\'";';
-    expect(state(STATE_TEXT + '\n' + extra)).not.toEqual([]);
+    // Nit 5 (review r4): the exact findings: the specifier in the string is not a parsed import (OTHERS), and the
+    // lock name in it is a bare mention.
+    expect(state(STATE_TEXT + '\n' + extra)).toEqual([
+      OTHERS,
+      `${SESSION_STATE_FILE}: guardLive is mentioned other than as its wrapper definition or a member call`,
+    ]);
   });
 
   it('TC-008 N-5 a comma inside a parameter type does not split the parameter (the depth tracking of parameterNames)', () => {
@@ -1228,6 +1280,37 @@ describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lo
 
   it('TC-008 the file as Backend B writes it passes', () => {
     expect(processor(PROCESSOR_TEXT)).toEqual([]);
+  });
+
+  // ---- SF-2 and nit 6 (review r4 of #208): no job reaches proctorResume, and the processor takes no accommodation lock ----
+
+  const RESUME_IN_PROCESSOR = `${SESSION_PROCESSOR_FILE}: proctorResume is mentioned in the processor: it is the STAFF transition, never a job's door to guardLive`;
+
+  it('TC-008 SF-2 a processor that calls proctorResume fails, before and after the switch-over', () => {
+    const call = '\n      await this.state.proctorResume(sid);';
+    const pre = PRE_PROCESSOR_TEXT.replace('await fn();', `await fn();${call}`);
+    expect(pre).not.toEqual(PRE_PROCESSOR_TEXT);
+    expect(processor(pre)).toEqual([RESUME_IN_PROCESSOR]);
+    const full = PROCESSOR_TEXT.replace(
+      'await this.state.lockAnySession(tx, sid);',
+      `await this.state.lockAnySession(tx, sid);${call}`,
+    );
+    expect(full).not.toEqual(PROCESSOR_TEXT);
+    expect(processor(full)).toEqual([RESUME_IN_PROCESSOR]);
+    // A held reference counts too: any mention.
+    expect(processor(`${PRE_PROCESSOR_TEXT}\nconst r = 'proctorResume';\n`)).toEqual([
+      RESUME_IN_PROCESSOR,
+    ]);
+  });
+
+  it('TC-008 nit 6 a .lockForAccommodation( call in the processor fails: a job takes no accommodation lock', () => {
+    const text = PROCESSOR_TEXT.replace(
+      'await this.state.lockAnySession(tx, sid);',
+      'await this.state.lockAnySession(tx, sid);\n      await this.state.lockForAccommodation(tx, sid);',
+    );
+    expect(processor(text)).toContain(
+      `${SESSION_PROCESSOR_FILE}: 1 .lockForAccommodation( calls in the processor, none are allowed`,
+    );
   });
 
   // ---- N-3 (review r3 of #208): the two methods are the SessionJobProcessor class's own ------------------------------
