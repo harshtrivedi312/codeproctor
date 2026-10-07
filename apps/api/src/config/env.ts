@@ -13,8 +13,7 @@ const aesKey = z
   });
 // HMAC/JWT secrets: at least 32 characters. Length alone does not refuse placeholders (the local
 // template in .env.example uses long change-me-local-... values); shared environments also refuse
-// a value that matches change-me anywhere, ignoring case; this applies to the secrets, the keys and
-// the Judge0 tokens (see isSharedEnv and the superRefine below).
+// the change-me prefix (see isSharedEnv and the superRefine below).
 const secret = z.string().min(32, 'must be at least 32 characters');
 
 /** True for http(s) URLs with no credentials, path (other than "/"), query or fragment. */
@@ -41,10 +40,14 @@ function emptyAsUnset<T extends z.ZodType>(schema: T) {
 
 export const envSchema = z
   .object({
+    // NODE_ENV is a library hint only (it can add strictness, never remove it): APP_ENV is the one
+    // authority for what the deployment is (DL-55). It has a default and can only add strictness.
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-    APP_ENV: z
-      .enum(['development', 'test', 'staging', 'pilot', 'production'])
-      .default('development'),
+    // Required, no default (DL-55, FU-BE-224, NFR-04): an unset, empty or misspelled value refuses
+    // to boot, so a forgotten APP_ENV cannot make a shared deployment behave like development.
+    APP_ENV: z.enum(['development', 'test', 'staging', 'pilot', 'production'], {
+      error: 'is required and must be one of development, test, staging, pilot, production',
+    }),
     API_PORT: port.default(4000),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
@@ -235,6 +238,10 @@ export const envSchema = z
           });
         }
       }
+      const urlProblem = databaseUrlProblem(env.DATABASE_URL);
+      if (urlProblem !== undefined) {
+        ctx.addIssue({ code: 'custom', path: ['DATABASE_URL'], message: urlProblem });
+      }
       if (isPlaceholderKey(env.ENCRYPTION_KEY)) {
         ctx.addIssue({
           code: 'custom',
@@ -365,16 +372,47 @@ export function isSharedEnv(env: { APP_ENV?: string; NODE_ENV?: string }): boole
   );
 }
 
-/**
- * Matches change-me anywhere, ignoring case. The trim and quote strip are defensive only: includes()
- * already ignores surrounding spaces and quotes.
- */
+/** Matches change-me anywhere, ignoring case, surrounding spaces and leading quotes. */
 function isPlaceholderText(value: string): boolean {
   return value
     .trim()
     .replace(/^['"]+/, '')
     .toLowerCase()
     .includes('change-me');
+}
+
+/**
+ * Why a DATABASE_URL is refused in a shared environment, or undefined when it is acceptable. It
+ * mirrors what the runtime driver (pg via pg-connection-string) would use, and fails closed:
+ * - an unparseable URL is refused (pg has fallbacks, such as a dummy host, that `new URL` lacks);
+ * - any `password` query parameter is refused (pg copies search params first, so it would override
+ *   the userinfo password);
+ * - the userinfo password is checked decoded; one that is not valid percent-encoding is refused;
+ * - a Unix-socket DATABASE_URL (starts with `/`) is refused, as `new URL` cannot parse it.
+ * Returns a fixed message; never any part of the URL.
+ */
+function databaseUrlProblem(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 'cannot be parsed as a URL, which is refused in staging, pilot and production';
+  }
+  if (parsed.searchParams.has('password')) {
+    return 'must not carry a password query parameter in staging, pilot and production; put the password in the userinfo';
+  }
+  // pg re-encodes a URL with a bad % sequence (restoring two-digit escapes such as %63 for c), so
+  // a password that does not decode cleanly cannot be judged here: refuse it outright.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(parsed.password);
+  } catch {
+    return 'the password is not valid percent-encoding, refused in staging, pilot and production';
+  }
+  if (isPlaceholderText(decoded)) {
+    return 'has a local placeholder password, refused in staging, pilot and production';
+  }
+  return undefined;
 }
 
 /** A base64 key whose bytes spell a change-me placeholder (the .env.example values). */
@@ -396,6 +434,15 @@ function placeholderSessionKeys(raw: Record<string, unknown>): string[] {
     .map(([name]) => name);
 }
 
+/**
+ * PGPASSWORD is not in the schema, but pg falls back to it when the DATABASE_URL has no password,
+ * so a change-me value there is the same hazard. Names only, never the value.
+ */
+function placeholderPgPassword(raw: Record<string, unknown>): string[] {
+  const value = raw['PGPASSWORD'];
+  return typeof value === 'string' && isPlaceholderText(value) ? ['PGPASSWORD'] : [];
+}
+
 const PLACEHOLDER_MESSAGE =
   'is a local placeholder and is refused in staging, pilot and production';
 
@@ -406,12 +453,17 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     const problems = result.error.issues.map(
       (i) => `${i.path.join('.') || '(root)'}: ${i.message}`,
     );
-    // An invalid APP_ENV is not local, so it is shared; an unset one takes the schema default.
-    const appEnv = typeof raw['APP_ENV'] === 'string' ? raw['APP_ENV'] : 'development';
+    // Fails closed (DL-55, FU-BE-224): an unset, empty or misspelled APP_ENV is not a local value,
+    // so it counts as shared and the placeholder checks still run before this throws.
+    const appEnv = typeof raw['APP_ENV'] === 'string' ? raw['APP_ENV'] : undefined;
     const nodeEnv = typeof raw['NODE_ENV'] === 'string' ? raw['NODE_ENV'] : undefined;
     if (isSharedEnv({ APP_ENV: appEnv, NODE_ENV: nodeEnv })) {
-      for (const name of placeholderSessionKeys(raw))
+      for (const name of [...placeholderSessionKeys(raw), ...placeholderPgPassword(raw)])
         problems.push(`${name}: ${PLACEHOLDER_MESSAGE}`);
+      const url = raw['DATABASE_URL'];
+      const urlProblem =
+        typeof url === 'string' && url !== '' ? databaseUrlProblem(url) : undefined;
+      if (urlProblem !== undefined) problems.push(`DATABASE_URL: ${urlProblem}`);
     }
     throw new Error(`Invalid environment: ${problems.join('; ')}`);
   }
@@ -419,11 +471,10 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   // list it. Pilot and production must not start without a valid one: without it every test start
   // would fail at the candidate's first click (ADR 0013 section 2). Names only, never values.
   const env = result.data;
-  // The parsed APP_ENV is never undefined: an unset one defaults to development, which is local,
-  // so an unset APP_ENV does NOT fail closed here (FU-BE-224).
+  // The parsed APP_ENV is always one of the five values (it has no default, DL-55).
   if (isSharedEnv(env)) {
     // Every configured wrapping key, not only the active kid: an old kid is still used to unwrap.
-    const bad = placeholderSessionKeys(raw);
+    const bad = [...placeholderSessionKeys(raw), ...placeholderPgPassword(raw)];
     if (bad.length > 0) {
       throw new Error(
         `Invalid environment: ${bad.map((n) => `${n}: ${PLACEHOLDER_MESSAGE}`).join('; ')}`,
