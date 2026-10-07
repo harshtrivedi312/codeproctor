@@ -46,8 +46,16 @@ export class CandidateTokenService {
     return secret;
   }
 
-  sign(claims: { sid: string; oid: string; epoch: number }, now: Date = new Date()): IssuedToken {
-    const ttl = this.ttlSeconds;
+  /**
+   * `lifetimeSeconds` shortens one token below the configured TTL (the gate renewal caps it at
+   * window_end). It can never lengthen it: the smaller of the two wins.
+   */
+  sign(
+    claims: { sid: string; oid: string; epoch: number },
+    now: Date = new Date(),
+    lifetimeSeconds?: number,
+  ): IssuedToken {
+    const ttl = Math.min(this.ttlSeconds, lifetimeSeconds ?? this.ttlSeconds);
     const iat = Math.floor(now.getTime() / 1000);
     const token = jwt.sign(
       { typ: 'candidate', sid: claims.sid, oid: claims.oid, epoch: claims.epoch, iat },

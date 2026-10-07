@@ -119,6 +119,13 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_session:heartbeat',
   },
+  // Gate-stage token renewal rides candidate_session:heartbeat on purpose: it is the counterpart of
+  // the heartbeat's renewal in the test (ADR 0013 section 5.10), uses the same candidate token
+  // capability, and avoids a new shared permission string. The route enforces its own state.
+  'POST /candidate/session/token/renew': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:heartbeat',
+  },
   'POST /candidate/session/proctor-key': {
     principal: 'CANDIDATE',
     permission: 'candidate_session:key',

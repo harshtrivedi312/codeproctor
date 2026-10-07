@@ -144,6 +144,19 @@ export class SessionStateDto {
   @ApiProperty({ type: [String] }) pauseReasons!: string[];
 }
 
+export class TokenRenewedDto {
+  @ApiProperty({
+    description:
+      'Fresh candidate session JWT for the same session and epoch; keep it in memory. Never logged.',
+  })
+  sessionToken!: string;
+  @ApiProperty({
+    format: 'date-time',
+    description: 'min(now + CANDIDATE_TOKEN_TTL_SECONDS, window_end)',
+  })
+  sessionTokenExpiresAt!: string;
+}
+
 export class HeartbeatResultDto extends SessionStateDto {
   @ApiPropertyOptional({ description: 'Present only when the server renews the token' })
   sessionToken?: string;

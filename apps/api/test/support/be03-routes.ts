@@ -1599,6 +1599,7 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'GET /candidate/session', permission: 'candidate_session:read' },
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
+  { key: 'POST /candidate/session/token/renew', permission: 'candidate_session:heartbeat' },
   { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
   // BE-09 media (Backend B, PR #119): confirm reuses the presign permission.
   { key: 'POST /candidate/session/media/presign', permission: 'candidate_media:presign' },

@@ -17,12 +17,24 @@ import {
   proctorPauseCapMs,
 } from '../session/deadlines';
 import type { DeadlineSession } from '../session/deadlines';
+import { SessionStateConflictError } from '../session/session-state.errors';
+import { SessionStateService } from '../session/session-state.service';
 import { SessionKeyConfigError, SessionKeyService } from '../session/session-key.service';
-import { LIVE_STATUSES } from '../session/session-transitions';
+import { LIVE_STATUSES, PRE_START_STATUSES } from '../session/session-transitions';
 import { sessionNotActive } from '../session/session-write-gate';
 import { CandidateTokenService } from './candidate-token.service';
 import type { CandidateContext } from './candidate.types';
 import { SessionJobsService } from './session-jobs.service';
+
+/** Gate renewals come on the candidate's action or the expiry warning (ADR 0013 section 5.10). */
+export const TOKEN_RENEW_LIMIT_PER_MINUTE = 6;
+/** Statuses in which the gate renewal route may mint a token (before the test starts). */
+const GATE_STATUSES: readonly SessionStatus[] = ['OPENED', 'CONSENTED', 'VERIFIED'];
+
+export interface RenewedToken {
+  readonly sessionToken: string;
+  readonly sessionTokenExpiresAt: Date;
+}
 
 /** Beats arrive every 10 s; 12 per minute per session (ADR 0013 section 5.3). */
 export const HEARTBEAT_LIMIT_PER_MINUTE = 12;
@@ -66,6 +78,7 @@ export class CandidateSessionService {
     private readonly keys: SessionKeyService,
     private readonly tokens: CandidateTokenService,
     private readonly jobs: SessionJobsService,
+    private readonly states: SessionStateService,
     private readonly config: ConfigService<Env, true>,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
@@ -172,6 +185,56 @@ export class CandidateSessionService {
       return { ...view, sessionToken: renewed.token, sessionTokenExpiresAt: renewed.expiresAt };
     }
     return view;
+  }
+
+  /**
+   * POST /candidate/session/token/renew (ADR 0013 section 5.10, "Renewal is bounded"). The guard
+   * already proved the token is unexpired and its epoch current. Here: the session must still be
+   * OPENED, CONSENTED or VERIFIED (read fresh, so a start that just happened wins) and
+   * now < window_end on this very request, not only through the expiry job. The new token lives
+   * min(now + TTL, window_end), so a stolen gate token has a hard ceiling. Once the test runs, the
+   * heartbeat renews instead and window_end never limits it.
+   */
+  async renewToken(ctx: CandidateContext, now: Date = new Date()): Promise<RenewedToken> {
+    if (!GATE_STATUSES.includes(ctx.status)) throw sessionNotActive(ctx.status);
+    // The invitation is not readable in candidate scope: this read runs in the org scope.
+    const { status, windowEnd } = await this.scope.asOrg(ctx, async () => {
+      const row = await this.prisma.client.session.findUnique({
+        where: { id: ctx.sessionId },
+        select: { status: true, invitation: { select: { windowEnd: true } } },
+      });
+      if (row === null) throw sessionNotActive(ctx.status);
+      return { status: row.status, windowEnd: row.invitation.windowEnd };
+    });
+    if (!GATE_STATUSES.includes(status)) throw sessionNotActive(status);
+
+    // Whole seconds left, rounded down, so the token never outlives window_end. Under one second
+    // left there is nothing to mint.
+    const secondsLeft = Math.floor((windowEnd.getTime() - now.getTime()) / 1000);
+    if (secondsLeft < 1) {
+      if (now.getTime() > windowEnd.getTime()) {
+        // Same as the start gate (ADR 0002 L-4): the unstarted session is EXPIRED now.
+        try {
+          await this.scope.asOrg(ctx, () =>
+            this.states.transition({
+              sessionId: ctx.sessionId,
+              from: PRE_START_STATUSES,
+              to: 'EXPIRED',
+              now,
+            }),
+          );
+        } catch (e) {
+          if (!(e instanceof SessionStateConflictError)) throw e;
+        }
+      }
+      throw new CodedHttpException(HttpStatus.CONFLICT, 'This link has expired.', 'LINK_EXPIRED');
+    }
+    const issued = this.tokens.sign(
+      { sid: ctx.sessionId, oid: ctx.orgId, epoch: ctx.epoch },
+      now,
+      secondsLeft,
+    );
+    return { sessionToken: issued.token, sessionTokenExpiresAt: issued.expiresAt };
   }
 
   /** `rec:{sessionId}` holds the latest recorder and queue health for the review (ADR 0013 5.3). */

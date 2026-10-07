@@ -27,11 +27,12 @@ import {
   ProctorKeyDto,
   SessionStateDto,
   SignConsentDto,
+  TokenRenewedDto,
   TestStartedDto,
 } from './dto/candidate.dto';
 import { SessionRateLimiter } from './session-rate-limiter';
 import { TestStartService } from './test-start.service';
-import { HEARTBEAT_LIMIT_PER_MINUTE } from './candidate-session.service';
+import { HEARTBEAT_LIMIT_PER_MINUTE, TOKEN_RENEW_LIMIT_PER_MINUTE } from './candidate-session.service';
 
 const NO_STORE = 'no-store';
 
@@ -188,6 +189,34 @@ export class CandidateSessionController {
             sessionTokenExpiresAt: view.sessionTokenExpiresAt?.toISOString(),
           }
         : {}),
+    };
+  }
+
+  @CandidateRoute('candidate_session:heartbeat')
+  @Post('token/renew')
+  @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({
+    summary: 'Renew the session token in the gate (OPENED, CONSENTED, VERIFIED); ADR 0013 section 5.10',
+    description:
+      'Needs a valid, unexpired token with the current epoch (an expired token needs the OTP again). The new token lives min(now + CANDIDATE_TOKEN_TTL_SECONDS, window_end); at or after window_end the session is EXPIRED and the answer is 409 LINK_EXPIRED. From IN_PROGRESS on the heartbeat renews instead. Never logged: the response carries a token.',
+  })
+  @ApiOkResponse({ type: TokenRenewedDto })
+  @ApiConflictResponse({
+    description: 'SESSION_NOT_ACTIVE with the current status; LINK_EXPIRED after window_end',
+  })
+  @ApiTooManyRequestsResponse({ description: 'RATE_LIMITED: 6 per minute per session' })
+  async renewToken(@Candidate() ctx: CandidateContext): Promise<TokenRenewedDto> {
+    const renewed = await this.limiter.guarded(
+      'token-renew',
+      ctx.sessionId,
+      TOKEN_RENEW_LIMIT_PER_MINUTE,
+      60,
+      () => this.session.renewToken(ctx),
+    );
+    return {
+      sessionToken: renewed.sessionToken,
+      sessionTokenExpiresAt: renewed.sessionTokenExpiresAt.toISOString(),
     };
   }
 
