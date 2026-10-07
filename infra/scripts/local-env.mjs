@@ -74,7 +74,7 @@ export function detectSupport(root) {
   } catch {
     // No API sources: nothing is switched on.
   }
-  return { smtpDev: schema.includes("'smtp-dev'"), execStub: schema.includes('JUDGE0_MODE') };
+  return { smtpDev: schema.includes("'smtp-dev'"), execStub: /JUDGE0_MODE\s*:/.test(schema) };
 }
 
 export const WEB_ENV_LOCAL = 'NEXT_PUBLIC_API_URL=http://localhost:4000/api\n';

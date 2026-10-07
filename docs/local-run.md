@@ -38,7 +38,8 @@ pnpm demo:up
 `pnpm demo:up` writes `.env` if it is missing, starts the stack, builds the shared package, migrates,
 seeds, gives the seeded invitation a real link, starts the API and the web app in the background (logs in
 `.demo/`), waits until both answer, and prints the links, the accounts and where the password is. It is safe
-to run again. `pnpm demo:down` stops the two apps (`pnpm demo:down --infra` stops the containers too; the
+to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
+its own pnpm dev commands). `pnpm demo:down` stops the two apps (`pnpm demo:down --infra` stops the containers too; the
 data stays in Docker volumes). `pnpm demo:up --dry-run` lists the steps without running them, and
 `--no-apps` starts everything except the API and the web app.
 
@@ -79,6 +80,10 @@ The stack (`infra/docker-compose.yml`) binds every port to 127.0.0.1:
 | Mailpit  | <http://localhost:8025> (SMTP on 1025)    | Catches every email (candidate codes) so nothing leaves the machine.    |
 | MinIO    | S3 <http://localhost:9000>, console <http://localhost:9001> | Local S3-compatible object store; the buckets `codeproctor-media` and `codeproctor-backup` exist at start, CORS only for `http://localhost:3000`. Login: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`. |
 | Adminer  | <http://localhost:8080>                   | A database browser.                                                     |
+
+An `.env` written before MinIO was added has no `MINIO_*` or `S3_*` lines, and `pnpm dev:infra` then refuses
+to start (the MinIO image would otherwise run with a publicly known login). Delete that `.env` and run
+`pnpm demo:up` (or `node infra/scripts/local-env.mjs`) again.
 
 The MinIO image is a frozen Bitnami build (the official MinIO images are no longer published), which is
 fine for synthetic local data and must never be used in a shared environment.

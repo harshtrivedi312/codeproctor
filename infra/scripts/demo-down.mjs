@@ -26,6 +26,21 @@ export function parsePids(text) {
   return out;
 }
 
+/**
+ * Does `ps -o pgid=,command= -p <pid>` output show a process group leader that we started (a pnpm
+ * dev command)? A recorded pid can be stale after a reboot or a crash and belong to something else.
+ */
+export function looksLikeOurs(psOutput, pid) {
+  const m = /^\s*(\d+)\s+(.*)$/.exec(psOutput.trim());
+  if (m === null) return false;
+  return Number(m[1]) === pid && /\bpnpm\b/.test(m[2]) && /\bdev:(api|web)\b|\bdev\b/.test(m[2]);
+}
+
+function ownsPid(pid) {
+  const r = spawnSync('ps', ['-o', 'pgid=,command=', '-p', String(pid)], { encoding: 'utf8' });
+  return r.status === 0 && looksLikeOurs(r.stdout, pid);
+}
+
 function main() {
   const args = process.argv.slice(2);
   if (args.some((a) => a !== '--infra')) {
@@ -36,6 +51,10 @@ function main() {
   const file = join(root, '.demo/pids.json');
   if (existsSync(file)) {
     for (const [name, pid] of Object.entries(parsePids(readFileSync(file, 'utf8')))) {
+      if (!ownsPid(pid)) {
+        console.log(`${name}: the recorded process is gone or is not ours; nothing killed.`);
+        continue;
+      }
       try {
         process.kill(-pid, 'SIGTERM'); // the whole process group: pnpm and the server under it
         console.log(`stopped ${name}.`);

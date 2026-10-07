@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { parsePids } from './demo-down.mjs';
+import { looksLikeOurs, parsePids } from './demo-down.mjs';
 import { planSteps, summary } from './demo-up.mjs';
 import { REPO_ROOT } from './test-support.mjs';
 
@@ -78,6 +78,14 @@ describe('demo:down (local demo)', () => {
     assert.deepEqual(parsePids('not json'), {});
   });
 
+  it('only a process group leader whose command is a pnpm dev command counts as ours', () => {
+    assert.equal(looksLikeOurs('  4242 pnpm dev:api', 4242), true);
+    assert.equal(looksLikeOurs('4242 node /x/pnpm.cjs --filter @codeproctor/api dev', 4242), true);
+    assert.equal(looksLikeOurs('  4242 /usr/bin/zsh -l', 4242), false, 'a shell is not ours');
+    assert.equal(looksLikeOurs('  1 pnpm dev:api', 4242), false, 'not the group leader');
+    assert.equal(looksLikeOurs('', 4242), false);
+  });
+
   it('refuses unknown arguments', () => {
     const r = spawnSync('node', [`${REPO_ROOT}infra/scripts/demo-down.mjs`, '--all'], {
       encoding: 'utf8',
@@ -101,6 +109,11 @@ describe('local compose stack (D-67)', () => {
     assert.doesNotMatch(compose, /^\s+- (\.|\/|~)[^\n]*:/m, 'only named volumes');
     assert.match(compose, /image: axllent\/mailpit@sha256:[0-9a-f]{64}/);
     assert.match(compose, /image: bitnamilegacy\/minio@sha256:[0-9a-f]{64}/);
+  });
+
+  it('MinIO refuses to start without its login in .env (no known default password)', () => {
+    assert.match(compose, /- MINIO_ROOT_PASSWORD=\$\{MINIO_ROOT_PASSWORD:\?/);
+    assert.match(compose, /- MINIO_ROOT_USER=\$\{MINIO_ROOT_USER:\?/);
   });
 
   it('MinIO allows browser uploads from the local web origin only', () => {

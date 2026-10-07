@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'no
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseEnv } from 'node:util';
+import { parsePids } from './demo-down.mjs';
 
 export const API_HEALTH = 'http://localhost:4000/api/v1/health';
 export const WEB_LOGIN = 'http://localhost:3000/admin/login';
@@ -63,8 +64,8 @@ export function summary({ invite, appsStarted }) {
     '',
     'Local demo is ready.',
     '',
-    `  Web app (staff sign-in) ${WEB_LOGIN.replace('/admin/login', '/admin/login')}`,
-    '  API health              http://localhost:4000/api/v1/health',
+    `  Web app (staff sign-in) ${WEB_LOGIN}`,
+    `  API health              ${API_HEALTH}`,
     '  Mailpit (email inbox)   http://localhost:8025',
     '  MinIO console           http://localhost:9001   (login: MINIO_ROOT_USER / MINIO_ROOT_PASSWORD in .env)',
     '  Adminer (database)      http://localhost:8080',
@@ -139,7 +140,7 @@ function startApp(root, name, cmd) {
   });
   child.unref();
   const file = join(dir, 'pids.json');
-  const pids = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  const pids = existsSync(file) ? parsePids(readFileSync(file, 'utf8')) : {};
   pids[name] = child.pid;
   writeFileSync(file, JSON.stringify(pids));
 }
@@ -178,6 +179,12 @@ async function main() {
       const env = parseEnv(readFileSync(join(root, '.env'), 'utf8'));
       if (env.APP_ENV !== 'development') {
         console.error('demo-up: .env must say APP_ENV=development. This is for a local run only.');
+        process.exit(1);
+      }
+      if (!env.MINIO_ROOT_PASSWORD || env.MINIO_ROOT_PASSWORD.includes('change-me')) {
+        console.error(
+          'demo-up: .env has no real MINIO_ROOT_PASSWORD (it is from before the local object store, or hand-copied). Delete .env and run demo:up again to write a fresh one, or set MINIO_ROOT_USER, MINIO_ROOT_PASSWORD and the S3_* values by hand.',
+        );
         process.exit(1);
       }
       continue;
