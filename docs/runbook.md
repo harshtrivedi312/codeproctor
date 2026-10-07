@@ -6,8 +6,8 @@ need them run in GitHub Actions or on the server.
 
 ## Database backups and restore
 
-Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`,
-no scheduled workflow (C-63: staging is not backed up; the pilot backup runs on the pilot host, DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
+Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`.
+No scheduled workflow: staging is not backed up (C-63); the pilot backup runs on the pilot host (DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
 
 ### What runs
 
@@ -134,8 +134,8 @@ backup note (C-63) and the pilot restore drill.
 In GitHub, create the `staging` environment and allow deployments from the `main` branch only, with no
 required reviewers (they would stall the schedule). Only then create secrets. Until this is done, a
 branch pushed by any session could run a workflow that names the environment and read its secrets.
-Every workflow job that uses a staging secret must also guard on `github.ref == 'refs/heads/main'`, (for
-example the deploy job); the restriction on the environment is what stops a different workflow file.
+Every workflow job that uses a staging secret must also guard on `github.ref == 'refs/heads/main'` (for
+example, the deploy job); the restriction on the environment is what stops a different workflow file.
 
 ### 1. The database and its owner role (a person, once)
 
@@ -160,7 +160,7 @@ example the deploy job); the restriction on the environment is what stops a diff
 
 Every connection must use TLS **with certificate verification**, for each client separately:
 `PGSSLMODE=verify-full` with a trusted root certificate (`PGSSLROOTCERT=system` or a CA from a secret)
-for psql and `pg_dump` (the backup and the drill), and the equivalent parameters in the two database URLs
+for psql (manual sessions), and the equivalent parameters in the two database URLs
 for Prisma's migration engine (`STAGING_MIGRATION_DATABASE_URL`) and the API's node-postgres driver
 (`STAGING_DATABASE_URL`). `PGSSLMODE` does not reach those two clients, and `sslmode=require` encrypts
 without checking the server, so a man-in-the-middle could capture the owner or `app_user` login. The
@@ -215,7 +215,10 @@ Owner decision C-63: staging is synthetic and rebuilt from seed and migrations, 
 staging backup, no backup workflow and no backup secrets. Pilot backups and restores are the section
 "Database backups and restore" above (`BACKUP_MODE=versioned`, run on the pilot host, DEP-03). The
 `timestamped` mode of `backup.sh` stays for local drills and the tests (`verify-backup.test.mjs`) only.
-The `staging` GitHub environment is the owner's to keep or delete.
+The `staging` GitHub environment is the owner's to keep or delete. If backup secrets were already created
+(the earlier plan asked for them), the owner deletes them: any `STAGING_S3_BACKUP_*`, `STAGING_S3_ENDPOINT` and
+`STAGING_BACKUP_PG*` secrets in the `staging` environment, the R2 backup token, the read-only backup database
+role, and the staging backup bucket (synthetic data only).
 
 ### 7. The restore drill (pilot)
 
