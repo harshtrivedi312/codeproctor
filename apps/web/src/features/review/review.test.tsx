@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
 import { RequireRole } from '@/features/auth/require-role';
@@ -211,7 +211,7 @@ describe('FR-902 review session', () => {
     expect(order).toEqual(['0', '1', '2']);
     expect(container.querySelector('audio')?.getAttribute('src')).toBe('blob:mock-1');
     const blob = blobs[0]!;
-    expect(blob.type).toBe('audio/wav');
+    expect(blob.type).toBe('audio/webm');
     const bytes = await readBytes(blob);
     expect(String.fromCharCode(...bytes.slice(0, 4))).toBe('RIFF');
     expect(bytes.length).toBe(44 + 8000);
@@ -307,6 +307,94 @@ describe('FR-902 review session', () => {
     await screen.findByRole('heading', { name: 'Priya Nair' });
     await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
     expect(await screen.findByText(/too large to play/)).toBeInTheDocument();
+  });
+
+  it('FR-701: a hostile or empty content type is refused and no part is fetched', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    for (const contentType of ['text/html', '']) {
+      let partFetches = 0;
+      server.events.on('request:start', ({ request }) => {
+        if (request.url.includes('/mock-media/')) partFetches += 1;
+      });
+      server.use(
+        http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
+          HttpResponse.json({
+            url: `${apiBaseUrl}/mock-media/0`,
+            parts: [{ url: `${apiBaseUrl}/mock-media/0`, seq: 0, durationMs: 1000 }],
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            contentType,
+          }),
+        ),
+      );
+      const view = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+      await screen.findByRole('heading', { name: 'Priya Nair' });
+      await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+      expect(await screen.findByText(/We could not load this recording/)).toBeInTheDocument();
+      expect(partFetches).toBe(0);
+      server.events.removeAllListeners();
+      view.unmount();
+    }
+  });
+
+  it('FR-701: a codecs parameter on audio/webm is accepted', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
+        HttpResponse.json({
+          url: `${apiBaseUrl}/mock-media/0`,
+          parts: [{ url: `${apiBaseUrl}/mock-media/0`, seq: 0, durationMs: 1000 }],
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          contentType: 'audio/webm;codecs=opus',
+        }),
+      ),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+  });
+
+  it('FR-701: a missing part number shows a note and still plays what exists', async () => {
+    const u = userEvent.setup();
+    stubObjectUrls();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () =>
+        HttpResponse.json({
+          url: `${apiBaseUrl}/mock-media/0`,
+          parts: [
+            { url: `${apiBaseUrl}/mock-media/0`, seq: 0, durationMs: 1000 },
+            { url: `${apiBaseUrl}/mock-media/2`, seq: 2, durationMs: 1000 },
+          ],
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          contentType: 'audio/webm',
+        }),
+      ),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await waitFor(() => expect(container.querySelector('audio')).not.toBeNull());
+    expect(screen.getByText(/Part of this recording is missing/)).toBeInTheDocument();
+  });
+
+  it('FR-701: unmounting while a part is pending never creates an object URL', async () => {
+    const u = userEvent.setup();
+    const { blobs } = stubObjectUrls();
+    server.use(
+      http.get(`${apiBaseUrl}/mock-media/1`, async () => {
+        await delay(150);
+        return new HttpResponse(new Uint8Array([1, 2, 3]));
+      }),
+    );
+    const view = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    await screen.findByText(/Loading recording/);
+    view.unmount();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(blobs).toHaveLength(0);
   });
 
   it('FR-701: a 503 from playback is a calm "not available yet" with no retry loop', async () => {

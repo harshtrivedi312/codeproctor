@@ -225,7 +225,7 @@ function allowed(request: Request, permission: Permission): Response | null {
   return hasPermission(role, permission) ? null : problem(403, 'Your role does not allow this.');
 }
 
-/** A 1-second quiet tone as a WAV data url, small and offline. */
+/** A 1-second quiet tone as WAV bytes, small and offline (the mock calls it audio/webm; browsers sniff). */
 function sampleBytes(): Uint8Array {
   const rate = 8000;
   const n = rate;
@@ -325,7 +325,7 @@ export function createReviewHandlers(options: { latencyMs: number }) {
             durationMs: 1000,
           })),
           expiresAt: new Date(Date.now() + 900_000).toISOString(),
-          contentType: 'audio/wav',
+          contentType: 'audio/webm',
         });
       },
     ),

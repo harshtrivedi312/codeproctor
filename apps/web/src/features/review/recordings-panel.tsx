@@ -6,6 +6,7 @@ import {
   formatDateTime,
   formatDuration,
   KIND_LABEL,
+  partsComplete,
   playbackParts,
   type ReviewRecording,
 } from './model';
@@ -60,6 +61,7 @@ function RecordingRow({
 }): React.JSX.Element {
   const [objectUrl, setObjectUrl] = React.useState<string | null>(null);
   const [state, setState] = React.useState<RowState>('idle');
+  const [incomplete, setIncomplete] = React.useState(false);
   const [progress, setProgress] = React.useState<{ done: number; total: number } | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
   const urlRef = React.useRef<string | null>(null);
@@ -87,12 +89,15 @@ function RecordingRow({
     dropUrl();
     setState('loading');
     setProgress(null);
+    setIncomplete(false);
+    let complete = true;
     const onProgress = (done: number, total: number): void => {
       if (!ctrl.signal.aborted) setProgress({ done, total });
     };
     const fetchAndDownload = async (): Promise<Blob> => {
       const p = await fetchPlayback(sessionId, recording.id, ctrl.signal);
       const parts = playbackParts(p);
+      complete = partsComplete(p);
       if (parts.length === 0) throw new PartDownloadError('empty');
       return downloadParts(parts, p.contentType, ctrl.signal, onProgress);
     };
@@ -109,6 +114,7 @@ function RecordingRow({
       const url = URL.createObjectURL(blob);
       urlRef.current = url;
       setObjectUrl(url);
+      setIncomplete(!complete);
       setState('idle');
       setProgress(null);
     } catch (e) {
@@ -176,6 +182,11 @@ function RecordingRow({
             className="mt-2 max-h-80 w-full rounded-md bg-black"
           />
         )
+      ) : null}
+      {objectUrl && incomplete ? (
+        <p role="status" className="mt-2 text-sm text-muted-foreground">
+          Part of this recording is missing. What exists is playing.
+        </p>
       ) : null}
       {state === 'unavailable' ? (
         <Alert tone="info" role="status" className="mt-2">

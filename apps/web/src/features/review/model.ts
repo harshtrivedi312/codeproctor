@@ -145,6 +145,15 @@ export function playbackParts(p: ReviewPlayback): PlaybackPart[] {
   return p.url ? [{ url: p.url, durationMs: null }] : [];
 }
 
+/** False when a part number is missing or the numbers are not consecutive after sorting. */
+export function partsComplete(p: ReviewPlayback): boolean {
+  if (!p.parts || p.parts.length === 0) return true;
+  const seqs = p.parts.map((x) => x.seq);
+  if (seqs.some((q) => typeof q !== 'number')) return false;
+  const sorted = (seqs as number[]).sort((a, b) => a - b);
+  return sorted.every((q, i) => i === 0 || q === (sorted[i - 1] ?? 0) + 1);
+}
+
 /**
  * One test of a run. The API sends a free string: stored verdicts are uppercase (PASSED, FAILED,
  * TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB) and a missing one becomes PASSED, FAILED or
