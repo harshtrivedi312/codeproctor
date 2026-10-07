@@ -1,6 +1,8 @@
 import { validateEnv } from './env';
 
 const valid = {
+  // APP_ENV has no default (DL-55, FU-BE-224): every fixture sets it.
+  APP_ENV: 'development',
   DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
   REDIS_URL: 'redis://127.0.0.1:6379',
   WEB_ORIGIN: 'http://localhost:3000',
