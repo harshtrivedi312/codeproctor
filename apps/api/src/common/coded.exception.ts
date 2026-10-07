@@ -45,12 +45,19 @@ export const CANDIDATE_PROBLEM_CODES = [
   'RATE_LIMITED',
   'CANDIDATE_PORTAL_UNCONFIGURED',
   'MAIL_UNAVAILABLE',
+  // Proctor batch routes (BE-10, ADR 0013 section 2 and 5.2).
+  'VALIDATION_FAILED',
+  'SIGNATURE_INVALID',
+  'KEY_EPOCH_STALE',
   // SESSION_ERASED and LOCK_BUSY are also returned on staff routes (the proctor resume): the list
   // is named for its first users, the candidate routes, and is the one list of CodedHttpException codes.
   'SESSION_ERASED',
   'LOCK_BUSY',
-  // Media presign and confirm (BE-09, ADR 0013 section 5.5).
   'SEQ_CONFLICT',
+  'PAYLOAD_TOO_LARGE',
+  'UNSUPPORTED_MEDIA_TYPE',
+  'NOT_FOUND',
+  // Media presign and confirm (BE-09, ADR 0013 section 5.5).
   'CHUNK_NOT_PRESIGNED',
   'UPLOAD_NOT_FOUND',
   'UPLOAD_MISMATCH',
