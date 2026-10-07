@@ -8,6 +8,7 @@ import { createCandidateHandlers } from './candidate/handlers';
 import { createQuestionHandlers } from './question-handlers';
 import { createInvitationHandlers } from './invitation-handlers';
 import { createTestHandlers } from './test-handlers';
+import { createReviewHandlers } from './review-handlers';
 import { mockSession } from './data';
 
 export interface MockOptions {
@@ -86,6 +87,8 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
     ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createTestHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createInvitationHandlers({ latencyMs: opts.adminLatencyMs }),
+    // Review workspace (FR-901, FR-902): mirrors the reviewer read API (apps/api/src/review).
+    ...createReviewHandlers({ latencyMs: opts.adminLatencyMs }),
     // The candidate flow (FE-09, FE-09b): provisional mocks owned by Frontend B in ./candidate.
     ...createCandidateHandlers(),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),

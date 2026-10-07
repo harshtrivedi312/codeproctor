@@ -36,6 +36,11 @@ describe('.env.example (DL-52, NFR-04)', () => {
     expect(() => validateEnv({ ...active })).not.toThrow();
   });
 
+  it('DL-55 FU-BE-225 the template DATABASE_URL uses change-me, so a shared env refuses it by name', () => {
+    expect(active['DATABASE_URL']).toMatch(/change-me/);
+    expect(() => validateEnv({ ...active })).not.toThrow();
+  });
+
   it('DL-52 the wrapping key for the active kid is a valid 32-byte key', () => {
     const kid = active['SESSION_KEY_ENC_ACTIVE_KID'] ?? 'k1';
     const key = active[`SESSION_KEY_ENC_KEY_${kid}`] ?? '';
@@ -54,7 +59,7 @@ describe('.env.example (DL-52, NFR-04)', () => {
   describe.each(['staging', 'pilot', 'production', 'prod', 'Production'])(
     'NFR-04 template refused with APP_ENV=%s',
     (appEnv) => {
-      it(`DL-52 NFR-04 names all eight placeholder variables and echoes no value (${appEnv})`, () => {
+      it(`DL-52 NFR-04 names all six placeholder variables and echoes no value (${appEnv})`, () => {
         let message = '';
         try {
           validateEnv({ ...active, APP_ENV: appEnv });
@@ -70,8 +75,6 @@ describe('.env.example (DL-52, NFR-04)', () => {
           'OTP_PEPPER',
           'ENCRYPTION_KEY',
           `SESSION_KEY_ENC_KEY_${kid}`,
-          'JUDGE0_AUTH_TOKEN',
-          'JUDGE0_AUTHZ_TOKEN',
         ];
         expect(message).not.toBe('');
         if (['staging', 'pilot', 'production'].includes(appEnv)) {
@@ -87,10 +90,14 @@ describe('.env.example (DL-52, NFR-04)', () => {
     },
   );
 
-  it('DL-52 an unset APP_ENV takes the schema default (development) and is local', () => {
+  it('DL-55 FU-BE-224 the template sets APP_ENV and an unset one refuses to boot (no default)', () => {
+    expect(active['APP_ENV']).toBe('development');
+    expect(requiredNames()).toContain('APP_ENV');
     const { APP_ENV: _unused, ...rest } = active;
     void _unused;
-    expect(() => validateEnv(rest)).not.toThrow();
+    expect(() => validateEnv(rest)).toThrow(/APP_ENV/);
+    for (const APP_ENV of ['', 'prod', 'dev', 'Development'])
+      expect(() => validateEnv({ ...active, APP_ENV })).toThrow(/APP_ENV/);
     expect(isSharedEnv({ APP_ENV: 'prod' })).toBe(true);
     expect(isSharedEnv({ APP_ENV: 'development', NODE_ENV: 'production' })).toBe(true);
   });

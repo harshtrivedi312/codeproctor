@@ -114,6 +114,13 @@ export const CALL_SITES: CallSiteList = {
     names: ['setCandidateFacts'],
     why: 'CandidateScope: the guard path and every asCandidate step set the facts first (DL-31)',
   },
+  // BE-07 session-job layer (ADR 0013 5.7, CS-4.7). The ONE caller of detachForSessionJob: the
+  // SessionJobProcessor base class detaches, enters runAsSessionJob and opens the single write
+  // transaction (guardLive first). Pinned as the only caller by session/session-job-writers.spec.ts.
+  'session/session-job.processor.ts': {
+    names: ['detachForSessionJob'],
+    why: 'SessionJobProcessor base class: the only code that detaches into a session-job scope (withLiveSession, withAnySession)',
+  },
 };
 
 /** The source extensions that are scanned. */
@@ -210,12 +217,13 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(findStaleEntries(files, CALL_SITES)).toEqual([]);
   });
 
-  it('TC-008 the list holds the three database files (the two private entries and the lock core) and the BE-07 guard path (candidate/candidate-scope.ts), and nothing else: the session wrappers are not listed yet', () => {
+  it('TC-008 the list holds the three database files (the two private entries and the lock core), the BE-07 guard path (candidate/candidate-scope.ts) and the session-job base class (session/session-job.processor.ts), and nothing else', () => {
     expect(Object.keys(CALL_SITES).sort()).toEqual([
       'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
       'database/org-context.ts',
       'database/session-locks.ts',
+      'session/session-job.processor.ts',
     ]);
     // The only file that may use the three locks is the one that defines them.
     expect(CALL_SITES['database/session-locks.ts']?.names).toEqual([
