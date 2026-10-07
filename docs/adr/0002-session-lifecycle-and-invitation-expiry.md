@@ -2,10 +2,10 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Accepted** 2026-10-01 (D-16): A-03 option (a); every other recommendation as proposed; amended by D-17 (consent declined), D-21 (OTP during a test) and D-23 (manual scoring routing). See section 9. Applied to database.md; deltas in ADR 0008. |
+| Status | **Accepted** 2026-10-01 (D-16): A-03 option (a); every other recommendation as proposed; amended by D-17 (consent declined), D-21 (OTP during a test) and D-23 (manual scoring routing). See section 9. Section 10 (C-28 and ERASED) is a proposed amendment awaiting the owner. Applied to database.md; deltas in ADR 0008. |
 | Author | architect |
 | Decides | **A-03 per-section timing**, Q-01, Q-02 (column only), Q-23, Q-24, A-06 |
-| Serves | FR-301, FR-303, FR-305, FR-403, FR-505, FR-601, FR-604, FR-609, FR-903, FR-904; NFR-08; TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-046, TC-047, TC-050, TC-055, TC-063, TC-079, TC-080 |
+| Serves | FR-301, FR-303, FR-305, FR-403, FR-505, FR-601, FR-604, FR-609, FR-903, FR-904, FR-805; NFR-05, NFR-08; TC-021, TC-022, TC-024, TC-033, TC-036, TC-045, TC-046, TC-047, TC-050, TC-055, TC-063, TC-079, TC-080 |
 | Hands off | Candidate token storage, HMAC key delivery and reload recovery: ARC-03. GRADED ordering (Q-22): ARC-04. |
 
 DDL deltas are written against the reference DDL in database.md. No migration exists yet, so DB-02 applies them directly. This ADR is longer than one page because it carries A-03 and the pause and resume policy (D-03, D-08).
@@ -49,7 +49,7 @@ Rules for (a), testable in BE-06, BE-07, BE-10 and BE-11:
 
 ## 2. State machine (Q-01, A-06)
 
-fsd.md §3 has states with no way in or out. This is the proposed full map; ARC-02 copies it into the shared transition map.
+fsd.md §3 has states with no way in or out. This is the accepted map (rows marked proposed come from section 10); ARC-02 copies it into the shared transition map.
 
 | From | To | When |
 | --- | --- | --- |
@@ -63,11 +63,11 @@ fsd.md §3 has states with no way in or out. This is the proposed full map; ARC-
 | PAUSED | IN_PROGRESS | The last pause reason is cleared |
 | IN_PROGRESS, PAUSED | SUBMITTED | Finish, end of the last section, or deadline (auto-submit, TC-046) |
 | SUBMITTED | GRADED | Grading and analysis done (order decided in ARC-04, Q-22) |
-| GRADED | UNDER_REVIEW | Band MEDIUM or HIGH (FR-805), or identity not confirmed (section 6), or a short answer awaits manual scoring (D-23) |
-| GRADED | COMPLETED | Band LOW, identity PASSED or confirmed by a reviewer, and nothing awaits manual scoring |
+| GRADED | UNDER_REVIEW | (Proposed, section 10.) Always (C-28). There is no automatic clearing: a person reviews every session, whatever the band, the identity result or the scoring state. |
 | UNDER_REVIEW | COMPLETED | Verdict set |
 | COMPLETED | APPEALED | Appeal filed within 7 days of a VIOLATION verdict (FR-904) |
 | APPEALED | COMPLETED | Appeal resolved (section 7) |
+| Any status except ERASED | ERASED | (Proposed, section 10.) The erasure fence (ADR 0004 section 9.5, section 10). A session held (UNDER_REVIEW, APPEALED or with an OPEN appeal) is fenced only when the hold setting is off. |
 
 DISCONNECTED, FOCUS_LOST and TAB_SWITCH are events, not states.
 
@@ -160,5 +160,22 @@ VERIFIED then means "checks done", as fsd.md §3 says ("System check, ID and roo
 - **D-17 sign before CONSENTED.** CONSENTED means the consent document is signed (ADR 0007 §6). Resuming the same session does not ask for a new signature; every new session does.
 - **D-21 OTP during a test.** L-5 above.
   - *Detail chosen by architect; owner to confirm:* the event type is `RESUME_OTP_FAILED` (SERVER, MEDIUM, risk weight 0, always pushed to /live); the cooldown is 30 seconds; there is no attempt limit while the test runs, because the cooldown and the 10-minute OTP expiry bound guessing.
-- **D-23 manual scoring.** A session with a short answer in `scoring = 'MANUAL_PENDING'` goes to UNDER_REVIEW at GRADED (section 2), and the verdict cannot be set until every such answer is scored.
+- **D-23 manual scoring.** Every session goes to UNDER_REVIEW at GRADED (section 10, C-28; D-23 first routed only sessions with a short answer in `scoring = 'MANUAL_PENDING'` there). D-23 adds a gate that stays: the verdict cannot be set until every such answer is scored.
   - *Detail chosen by architect; owner to confirm:* manual scoring happens in the review workspace (REVIEWER or SUPER_ADMIN), and `total_score` is computed when the last answer is scored.
+
+## 10. Amendment: every session is reviewed (C-28) and the ERASED status (proposed, owner to confirm)
+
+**Status of this section.** The owner accepted this ADR (D-16) and its amendments D-17, D-21 and D-23. This section changes the accepted text, so it needs the owner's approval. The compliance decision C-28 (docs/compliance/decisions.md) and the accepted ADR 0004 section 9.5 (D-54) already require both changes. The table in section 2 is edited to match.
+
+- **C-28: GRADED always goes to UNDER_REVIEW.**
+  - The consent document tells the candidate that a person reviews every session. Section 2 earlier cleared LOW-band sessions with a confirmed identity without a reviewer (GRADED to COMPLETED). That row is removed. No session reaches COMPLETED without a verdict set by a reviewer (UNDER_REVIEW to COMPLETED).
+  - This replaces the band, identity and manual-scoring conditions on GRADED to UNDER_REVIEW. They still decide the review's priority and what the reviewer must do first (D-23: every short answer in MANUAL_PENDING is scored before the verdict), but not whether a review happens.
+  - Recruiters, exports and webhooks get results only after the verdict (C-28). The one-click verdict path for low-risk sessions is review UI (FR-805), not a state transition.
+  - Effects: fsd.md section 3 (GRADED next states: UNDER_REVIEW only; COMPLETED is entered only from UNDER_REVIEW or APPEALED), TC cases that expect auto-clear, the `session.completed` webhook timing, and reviewer capacity planning.
+- **ERASED: a new terminal status with no exit transition.**
+  - The erasure run (ADR 0004 section 9.5) moves every non-held session of the candidate to ERASED, terminal sessions included, through SessionStateService. A session in UNDER_REVIEW or APPEALED is fenced only when `holdWhileReviewOrAppealOpen` is false (C-06); the review then ends and an open appeal becomes CLOSED_ERASED.
+  - ERASED has no outgoing transition, so an erased session can never be appealed. COMPLETED or EXPIRED with an "erased" reason was rejected because COMPLETED allows APPEALED.
+  - SessionStateService is still the only writer. It keeps or sets `retention_anchor_at` at the fence (ADR 0004 R-1) and bumps `auth_epoch` (ADR 0013).
+  - The schema is `ALTER TYPE session_status ADD VALUE 'ERASED'` and `ALTER TYPE appeal_status ADD VALUE 'CLOSED_ERASED'`, each in its own migration (Database A, PR #91). ADR 0008 lists them in its section 11, which is pending in PR #218.
+- **What else changes.** Section 2 (two rows, marked proposed above) and the D-23 bullet in section 9. Sections 6 and 7 read as before, except that "Risk MEDIUM/HIGH" no longer decides whether a review happens.
+- **Consequences (proposed).** db-engineer: the two enum migrations (PR #91). backend-engineer: BE-07 transition map (GRADED to UNDER_REVIEW only; ERASED has no exit), BE-09 erasure fence, BE-13 and BE-14 result gating until the verdict (C-28). frontend-engineer: FE-11 and FE-13 fast review path and the ERASED label. fsd.md section 3 (the GRADED, UNDER_REVIEW, COMPLETED and ERASED rows), database.md and the dashboard label are in PR #218 or follow-up.
