@@ -9,6 +9,7 @@ import { resetMockFaults } from '@/mocks/fault-handlers';
 import { resetMockAdminState } from '@/mocks/admin-handlers';
 import { resetMockQuestionState } from '@/mocks/question-handlers';
 import { resetMockInvitationState } from '@/mocks/invitation-handlers';
+import { resetMockReviewState } from '@/mocks/review-handlers';
 import { resetMockTestState } from '@/mocks/test-handlers';
 import { resetMockAuthState, seedMockRefresh } from '@/mocks/auth-handlers';
 
@@ -23,6 +24,7 @@ export function resetAuthTestState(): void {
   resetMockAdminState();
   resetMockQuestionState();
   resetMockTestState();
+  resetMockReviewState();
   resetMockInvitationState();
   resetMockFaults();
   busyStore.reset();

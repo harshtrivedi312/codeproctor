@@ -13,8 +13,14 @@ export interface TemplateParams {
   reminder: { inviteUrl: string; windowEndsAt: string };
   results: Record<string, never>;
   otp: { otp: string; minutes: number };
-  'otp-lockout': { candidateEmail: string; minutes: number };
-  'consent-copy': { pdfKey: string };
+  'otp-lockout': {
+    candidateEmail: string;
+    minutes: number;
+    candidateName?: string;
+    testName?: string;
+  };
+  /** pdfKey for the queued path; the direct candidate path attaches the bytes itself. */
+  'consent-copy': { pdfKey?: string; documentVersion?: string; signedAt?: string };
   'erasure-delayed': { delayedUntil: string };
 }
 export type TemplateId = keyof TemplateParams;
@@ -153,18 +159,31 @@ export function renderMail(job: EmailJob, opts: RenderOptions = {}): RenderedMai
         'Thank you for taking the assessment. The hiring team will contact you about next steps.',
       ]);
     case 'otp':
+      // No recruiter-written text in a candidate mail (header rule): the test name is not included.
       return make('Your verification code', 'Your verification code', [
+        'This code is for your assessment.',
         `Your code is ${job.params.otp}. It expires in ${job.params.minutes} minutes.`,
         'Never share this code with anyone.',
       ]);
     case 'otp-lockout':
       return make('A candidate link was blocked', 'Candidate link blocked', [
-        `Too many wrong codes were entered for ${stripHeader(job.params.candidateEmail)}. The link is blocked for ${job.params.minutes} minutes.`,
+        `Too many wrong codes were entered for ${
+          job.params.candidateName ? `${stripHeader(job.params.candidateName)} (` : ''
+        }${stripHeader(job.params.candidateEmail)}${job.params.candidateName ? ')' : ''}${
+          job.params.testName ? ` on the assessment "${stripHeader(job.params.testName)}"` : ''
+        }. The link is blocked for ${job.params.minutes} minutes.`,
       ]);
     case 'consent-copy':
       return {
         ...make('Your signed consent copy', 'Your signed consent', [
           'A copy of the consent you signed is attached to this email.',
+          ...(job.params.documentVersion
+            ? [
+                `Document version ${stripHeader(job.params.documentVersion)}${
+                  job.params.signedAt ? `, signed ${when(job.params.signedAt)}` : ''
+                }.`,
+              ]
+            : []),
         ]),
         attachmentKey: job.params.pdfKey,
         attachmentFilename: 'consent.pdf',

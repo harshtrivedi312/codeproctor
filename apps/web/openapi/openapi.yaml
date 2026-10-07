@@ -2007,6 +2007,155 @@ paths:
         '503':
           $ref: '#/components/responses/Busy'
 
+  # ---------------------------------------------------------------------------------------------
+  # Review workspace (FR-901, FR-902, FR-703). REAL for the three read routes (apps/api/src/review,
+  # PR 297). The answer scoring PATCH (docs/api-contract.md section 7) and the verdict POST are
+  # contract only: the API does not implement them yet, so their shapes are the contract's and the
+  # verdict body and 409 codes are ASSUMED. Roles: REVIEWER and SUPER_ADMIN. Cross-organisation
+  # ids are 404.
+  # ---------------------------------------------------------------------------------------------
+  /v1/review/queue:
+    get:
+      operationId: listReviewQueue
+      summary: REAL. Sessions awaiting or under review, oldest first (review_queue:read). Default filter GRADED + UNDER_REVIEW.
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/SessionStatus' } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 300 } }
+        - {
+            name: pageSize,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 25 },
+          }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewQueue' }
+        '400':
+          description: Invalid status, cursor or page size
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
+  /v1/review/sessions/{sessionId}:
+    get:
+      operationId: getReviewSession
+      summary: REAL. The review bundle of one session (review_session:read).
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The review bundle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewSession' }
+        '400':
+          description: Not a UUID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such session in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          $ref: '#/components/responses/Busy'
+  /v1/review/sessions/{sessionId}/recordings/{recordingId}/playback:
+    get:
+      operationId: getReviewPlayback
+      summary: REAL. A presigned GET for one recording, valid 900 s (review_session:read).
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string } }
+        - { name: recordingId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The signed URL or ordered parts. Never cache or store it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewPlayback' }
+        '400':
+          description: Not a UUID, or a recording id that is not KIND-SEGMENT (SCREEN-0)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such session or recording in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          description: Object storage is not configured yet (no code; calm message, no retry loop), or BUSY
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+  /v1/review/sessions/{sessionId}/answers/{sessionQuestionId}:
+    patch:
+      operationId: scoreReviewAnswer
+      summary: Manual scoring of a short answer (review_verdict:set, docs/api-contract.md section 7).
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string } }
+        - { name: sessionQuestionId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScoreAnswer' }
+      responses:
+        '200':
+          description: Decision stored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScoredAnswer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such session or answer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '409':
+          description: code ANSWER_NOT_MANUAL, SESSION_NOT_UNDER_REVIEW or VERDICT_ALREADY_SET
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          $ref: '#/components/responses/Busy'
+  /v1/review/sessions/{sessionId}/verdict:
+    post:
+      operationId: setReviewVerdict
+      summary: Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED.
+      parameters:
+        - { name: sessionId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetVerdict' }
+      responses:
+        '200':
+          description: Verdict stored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReviewVerdict' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '409':
+          description: Pending manual answers, or a verdict is already set
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          $ref: '#/components/responses/Busy'
+
 components:
   responses:
     Forbidden:
@@ -2238,7 +2387,8 @@ components:
           description: >-
             A string on the API. Known values: FAILED, COMPILE_ERROR,
             TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR,
-            INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value
+            INTERNAL_ERROR, MISSING_REFERENCE, LOCAL_STUB (a run on the local
+            execution stub, not real execution). A client must cope with a value
             it does not know.
         actualOutput:
           { type: string, description: 'Only for a visible (sample) slot, never a hidden one' }
@@ -3149,7 +3299,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        status: { type: string, enum: [passed, failed] }
+        status: { type: string }
         input: { type: string }
         expectedOutput: { type: string }
         actualOutput: { type: string }
@@ -3314,3 +3464,167 @@ components:
               description: waiting = held while a review or appeal is open (D-19)
             requestedAt: { type: string, format: date-time, nullable: true }
             waitingFor: { type: string, enum: [review, appeal], nullable: true }
+    ReviewQueue:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - sessionId
+              - candidateName
+              - candidateEmail
+              - testTitle
+              - status
+              - submittedAt
+              - riskScore
+              - flagCount
+              - pendingManualCount
+            properties:
+              sessionId: { type: string }
+              candidateName: { type: string }
+              candidateEmail: { type: string }
+              testTitle: { type: string }
+              status: { $ref: '#/components/schemas/SessionStatus' }
+              submittedAt: { type: string, format: date-time, nullable: true }
+              riskScore: { type: number, nullable: true }
+              flagCount: { type: integer }
+              pendingManualCount: { type: integer }
+        nextCursor: { type: string, nullable: true }
+    ReviewRunResult:
+      type: object
+      required: [at, passed, total, tests]
+      properties:
+        at: { type: string, format: date-time }
+        passed: { type: integer }
+        total: { type: integer }
+        tests:
+          type: array
+          items:
+            type: object
+            required: [name, status]
+            properties:
+              name: { type: string }
+              status:
+                {
+                  type: string,
+                  description: 'Free string. Stored verdicts are uppercase: PASSED, FAILED, TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB; the API maps a missing one to PASSED, FAILED or UNKNOWN.',
+                }
+    ReviewAnswer:
+      type: object
+      required:
+        [sessionQuestionId, type, title, statement, points, score, scoring, scoringNote, answer]
+      properties:
+        sessionQuestionId: { type: string }
+        type: { type: string, enum: [CODING, MCQ, SHORT_ANSWER] }
+        title: { type: string }
+        statement: { type: string, description: Markdown source, shown as text }
+        points: { type: number }
+        score: { type: number, nullable: true }
+        scoring: { type: string, enum: [AUTO, MANUAL, MANUAL_PENDING] }
+        scoringNote: { type: string, nullable: true }
+        answer:
+          description: >-
+            CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored
+            jsonb value (MCQ option ids, or the short-answer text) or null. The
+            web copes with any JSON value.
+          nullable: true
+        runResults: { type: array, items: { $ref: '#/components/schemas/ReviewRunResult' } }
+    ReviewEvent:
+      type: object
+      required: [id, at, type, severity, detail, flagId]
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time }
+        type: { type: string, description: The stored type string; may be unknown to the web }
+        severity: { type: string, enum: [LOW, MEDIUM, HIGH] }
+        detail: { type: string, nullable: true }
+        flagId: { type: string, nullable: true }
+    ReviewRecording:
+      type: object
+      required: [id, kind, startedAt, durationMs]
+      properties:
+        id:
+          {
+            type: string,
+            pattern: '^(SCREEN|WEBCAM|AUDIO)-\\d{1,9}$',
+            description: 'KIND-SEGMENT, e.g. SCREEN-0',
+          }
+        kind: { type: string, enum: [SCREEN, WEBCAM, AUDIO] }
+        startedAt: { type: string, format: date-time }
+        durationMs: { type: integer }
+    ReviewVerdict:
+      type: object
+      description: The session review row; all three are null until a verdict is set.
+      required: [verdict, notes, completedAt]
+      properties:
+        verdict: { type: string, enum: [CLEAN, SUSPICIOUS, VIOLATION], nullable: true }
+        notes: { type: string, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+    ReviewSession:
+      type: object
+      required: [session, candidate, test, answers, events, recordings, verdict]
+      properties:
+        session:
+          type: object
+          required: [id, status, startedAt, submittedAt, totalScore, riskScore]
+          properties:
+            id: { type: string }
+            status: { $ref: '#/components/schemas/SessionStatus' }
+            startedAt: { type: string, format: date-time, nullable: true }
+            submittedAt: { type: string, format: date-time, nullable: true }
+            totalScore: { type: number, nullable: true }
+            riskScore: { type: number, nullable: true }
+        candidate:
+          type: object
+          required: [name, email]
+          properties:
+            name: { type: string }
+            email: { type: string }
+        test:
+          type: object
+          required: [title]
+          properties:
+            title: { type: string }
+        answers: { type: array, items: { $ref: '#/components/schemas/ReviewAnswer' } }
+        events: { type: array, items: { $ref: '#/components/schemas/ReviewEvent' } }
+        recordings: { type: array, items: { $ref: '#/components/schemas/ReviewRecording' } }
+        verdict: { allOf: [{ $ref: '#/components/schemas/ReviewVerdict' }], nullable: true }
+    ReviewPlayback:
+      type: object
+      description: url is the first part; play parts in seq order. Never cache or store.
+      required: [url, expiresAt, contentType, parts]
+      properties:
+        url: { type: string }
+        parts:
+          type: array
+          items:
+            type: object
+            required: [url, seq, durationMs]
+            properties:
+              url: { type: string }
+              seq: { type: integer }
+              durationMs: { type: integer }
+        expiresAt: { type: string, format: date-time }
+        contentType: { type: string }
+    ScoreAnswer:
+      type: object
+      required: [correct]
+      properties:
+        correct: { type: boolean }
+        note: { type: string, minLength: 1, maxLength: 1000 }
+    ScoredAnswer:
+      type: object
+      required: [sessionQuestionId, correct, score]
+      properties:
+        sessionQuestionId: { type: string }
+        correct: { type: boolean }
+        score: { type: number }
+    SetVerdict:
+      type: object
+      required: [verdict]
+      properties:
+        verdict: { type: string, enum: [CLEAN, SUSPICIOUS, VIOLATION] }
+        note: { type: string, minLength: 1, maxLength: 2000 }

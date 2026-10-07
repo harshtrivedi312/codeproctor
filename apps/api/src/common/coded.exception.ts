@@ -45,6 +45,10 @@ export const CANDIDATE_PROBLEM_CODES = [
   'RATE_LIMITED',
   'CANDIDATE_PORTAL_UNCONFIGURED',
   'MAIL_UNAVAILABLE',
+  // SESSION_ERASED and LOCK_BUSY are also returned on staff routes (the proctor resume): the list
+  // is named for its first users, the candidate routes, and is the one list of CodedHttpException codes.
+  'SESSION_ERASED',
+  'LOCK_BUSY',
   // Media presign and confirm (BE-09, ADR 0013 section 5.5).
   'SEQ_CONFLICT',
   'CHUNK_NOT_PRESIGNED',
