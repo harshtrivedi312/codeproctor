@@ -169,14 +169,14 @@ export class SessionStateService {
    * evidence, etag). A busy lock (SessionLockRetryError, 55P03, 40P01, P2034) is 503 LOCK_BUSY with
    * Retry-After, never 409 or 500.
    */
-  async proctorResume(input: ProctorResumeInput): Promise<ProctorResumeResult> {
+  async proctorResume(resume: ProctorResumeInput): Promise<ProctorResumeResult> {
     // Only a staff runAsUser scope has a user: this throws in a system, candidate or session-job
     // scope and with no scope. The resuming user is the verified one, never a caller-supplied id.
     const user = this.orgContext.requireUser();
     if (!hasPermission(user.role, 'live:pause')) {
       throw new ForbiddenException('Forbidden.');
     }
-    const now = input.now ?? new Date();
+    const now = resume.now ?? new Date();
     let committed: { result: ProctorResumeResult; authEpoch: number };
     try {
       committed = await this.prisma.client.$transaction(
@@ -190,7 +190,7 @@ export class SessionStateService {
             'proctor resume: SET LOCAL lock_timeout so a busy sessions row answers 503, not a hang',
             () => tx.$executeRaw`SET LOCAL lock_timeout = '2000ms'`,
           );
-          const state = await this.guardLive(tx, input.sessionId);
+          const state = await this.guardLive(tx, resume.sessionId);
           if (state === 'ERASED') {
             throw new CodedHttpException(
               HttpStatus.CONFLICT,
@@ -199,7 +199,7 @@ export class SessionStateService {
             );
           }
           const session = await tx.session.findUnique({
-            where: { id: input.sessionId },
+            where: { id: resume.sessionId },
             select: {
               orgId: true,
               status: true,
@@ -236,7 +236,7 @@ export class SessionStateService {
           } satisfies SessionTransitionPatch;
           if (remaining.length === 0) {
             await this.transition({
-              sessionId: input.sessionId,
+              sessionId: resume.sessionId,
               from: 'PAUSED',
               to: 'IN_PROGRESS',
               now,
@@ -253,7 +253,7 @@ export class SessionStateService {
             // added or removed meanwhile is never overwritten.
             const updated = await tx.session.updateMany({
               where: {
-                id: input.sessionId,
+                id: resume.sessionId,
                 status: 'PAUSED',
                 pauseReasons: { equals: [...session.pauseReasons] },
                 proctorPausedAt: session.proctorPausedAt,
@@ -270,20 +270,20 @@ export class SessionStateService {
           // The open section gets its own credit (ADR 0002 S-4: only the pause after it opened).
           let sectionDeadlineAt: Date | null = null;
           const open = await tx.sessionSection.findFirst({
-            where: { sessionId: input.sessionId, startedAt: { not: null }, endedAt: null },
+            where: { sessionId: resume.sessionId, startedAt: { not: null }, endedAt: null },
             orderBy: { position: 'asc' },
           });
           if (open?.deadlineAt != null) {
             sectionDeadlineAt =
               effectiveSectionDeadline(open, session, now, cap) ?? open.deadlineAt;
             await tx.sessionSection.updateMany({
-              where: { sessionId: input.sessionId, sectionId: open.sectionId, endedAt: null },
+              where: { sessionId: resume.sessionId, sectionId: open.sectionId, endedAt: null },
               data: { deadlineAt: sectionDeadlineAt },
             });
           }
           await tx.proctorEvent.create({
             data: {
-              sessionId: input.sessionId,
+              sessionId: resume.sessionId,
               type: 'PROCTOR_RESUME',
               severity: DEFAULT_EVENT_SEVERITY.PROCTOR_RESUME,
               source: 'SERVER',
@@ -293,7 +293,7 @@ export class SessionStateService {
           });
           return {
             result: {
-              sessionId: input.sessionId,
+              sessionId: resume.sessionId,
               status: remaining.length === 0 ? ('IN_PROGRESS' as const) : ('PAUSED' as const),
               creditedMs: credit,
               deadlineAt: before,
@@ -309,7 +309,7 @@ export class SessionStateService {
       throw busyLockToProblem(e) ?? e;
     }
     await this.resetDeadlineTtls(
-      input.sessionId,
+      resume.sessionId,
       committed.authEpoch,
       committed.result.deadlineAt,
       now,
