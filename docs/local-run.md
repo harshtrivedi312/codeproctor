@@ -196,10 +196,10 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | Invite candidates, live view, review, reports         | **Not on `main` yet** in the API (no routes). Mock mode shows the screens.                              |
 | Candidate link opens the gate                         | Works after `demo-invite.mjs`.                                                                          |
 | Mailpit (the inbox) in the stack                      | Works: the stack starts it and a test email sent to port 1025 shows in <http://localhost:8025> (checked). |
-| Candidate one-time email code                         | **Lands with Backend A's `smtp-dev` mail adapter** (`EMAIL_PROVIDER=smtp-dev`, allowed only with `APP_ENV=development`). Until then `EMAIL_PROVIDER=noop` drops mail and the send answers 503 `MAIL_UNAVAILABLE`. `local-env.mjs` switches the adapter on in `.env` automatically once the API has it. |
+| Candidate one-time email code                         | **Not working yet on `main`**: the API has the `smtp-dev` adapter and `local-env.mjs` now switches it on (`EMAIL_PROVIDER=smtp-dev`, allowed only with `APP_ENV=development`), but the candidate module is not bound to a mail provider: the send answers 503 `MAIL_UNAVAILABLE` and the log says `UnboundCandidateMailPort ... template otp not sent` (checked 2026-10-07). Waiting for Backend A to bind it. |
 | MinIO (the object store) in the stack                 | Works: the two buckets exist at start, an upload and a listing through the S3 API work, and a browser preflight from `http://localhost:3000` is allowed while any other origin is not (checked). |
 | File uploads, ID images, consent PDF                  | **Lands with #119** (BE-09: `StorageService` and `S3ObjectStore`, which bind the API to S3). The `S3_*` values in `.env` already point at MinIO; until #119 merges nothing in the API uses the store, and the API log repeats `Job consent-pdf failed`. |
-| Running candidate code                                | **Lands with Backend A's execution stub** (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
+| Running candidate code                                | The API accepts `JUDGE0_MODE=stub` and `local-env.mjs` switches it on (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
 | Analysis worker (`apps/worker`)                       | **Not part of `demo:up`.** The face-match service exists (`worker.app:app`, FastAPI) but has no Dockerfile or tuned models yet (the face landmarker model is not downloaded, P-13), and the API's presigned URLs name `localhost:9000`, which a worker inside Docker cannot reach. Without it the identity check answers MANUAL_REVIEW and the candidate continues. The compose file has a `worker` profile as the place for it. |
 | Proctoring in a real browser against the real API     | Not wired end to end; the browser parts run in mock mode (`/t/demo/test`, `/dev/proctor`).              |
 
@@ -207,8 +207,8 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 
 These are tracked in the delivery plan; this guide changes as each lands.
 
-- **Mail**: Mailpit is in the stack. The API's `smtp-dev` adapter (Backend A) makes the candidate code
-  show in Mailpit's web page.
+- **Mail**: Mailpit is in the stack and the API has the `smtp-dev` adapter. The candidate module still has to
+  be bound to it (Backend A); then the candidate code shows in Mailpit's web page.
 - **Object store**: MinIO is in the stack. #119 (BE-09) binds the API to it.
 - **Code execution**: Backend A's local stub. Real Judge0 (`infra/judge0`) needs Linux x86, privileged
   containers and cgroup v1, so it is not validated on macOS or Apple Silicon and its isolation is not
