@@ -149,7 +149,11 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
   }
   const spyOnService = (name: 'audit' | 'startSession' | 'clearFailures'): jest.SpyInstance =>
     jest.spyOn(authService as unknown as Record<typeof name, () => Promise<unknown>>, name);
-  /** The transaction runs to its last statement, then fails with P2028: an unknown outcome. */
+  /**
+   * The transaction runs to its last statement, then the error is thrown from inside the
+   * wrapper, so the real transaction rolls back: this models "the commit did not land". Use
+   * commitThenFail for the landed case.
+   */
   function failAfterCallback(error: () => Error = p2028): jest.SpyInstance {
     const client = appPrisma.client;
     const real = client.$transaction.bind(client) as (
@@ -212,6 +216,13 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
     ['P2034', () => prismaCode('P2034')],
     ['40001', () => Object.assign(new Error('serialization'), { code: '40001' })],
     ['40P01', () => Object.assign(new Error('deadlock'), { code: '40P01' })],
+    [
+      'a driver-adapter-shaped 40001 (cause.originalCode)',
+      () =>
+        Object.assign(prismaCode('P2010'), {
+          meta: { driverAdapterError: { cause: { originalCode: '40001' } } },
+        }),
+    ],
   ];
   /** The 500 is the generic body: no code, no Retry-After, nothing that says whether 2FA is on. */
   function expectFixed500(res: request.Response): void {
@@ -271,6 +282,21 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         expect(await failedLogins(e.id)).toBe(0);
         await confirm(e.token, code).expect(400);
         expect(await failedLogins(e.id)).toBe(1);
+      });
+
+      it('DL-37, FU-BE-208: the unknown-outcome error log carries only traceId, errorName and the route', async () => {
+        const e = await started();
+        const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const spy = jest.spyOn(Logger.prototype, 'error');
+        commitThenFail(p2028);
+        await confirm(e.token, authenticator.generate(e.key)).expect(500);
+        const call = spy.mock.calls.find((c) => c[1] === 'Write outcome unknown');
+        const entry = call?.[0] as Record<string, unknown> | undefined;
+        expect(entry).toBeDefined();
+        expect(entry?.route).toBe('auth.2fa.setup.confirm');
+        expect(entry?.errorName).toBe('OutcomeUnknownError');
+        expect(Object.keys(entry ?? {}).sort()).toEqual(['errorName', 'route', 'traceId']);
+        expect(JSON.stringify(entry)).not.toContain(e.id);
       });
 
       it.each(rollbackCases)(
@@ -354,6 +380,21 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
           expect(await failedLogins(e.id)).toBe(1);
         },
       );
+
+      it('DL-37, FU-BE-208: the unknown-outcome error log carries only traceId, errorName and the route', async () => {
+        const e = await started();
+        const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const spy = jest.spyOn(Logger.prototype, 'error');
+        commitThenFail(p2028);
+        await confirm(e.challenge, authenticator.generate(e.key)).expect(500);
+        const call = spy.mock.calls.find((c) => c[1] === 'Write outcome unknown');
+        const entry = call?.[0] as Record<string, unknown> | undefined;
+        expect(entry).toBeDefined();
+        expect(entry?.route).toBe('auth.2fa.enroll.confirm');
+        expect(entry?.errorName).toBe('OutcomeUnknownError');
+        expect(Object.keys(entry ?? {}).sort()).toEqual(['errorName', 'route', 'traceId']);
+        expect(JSON.stringify(entry)).not.toContain(e.id);
+      });
 
       it.each(rollbackCases)(
         'DL-37, FU-BE-208, FU-BE-214, FR-102 (PR #279): %s at commit stays 503 BUSY, the challenge is released and the mark too: the same challenge and code then sign in',
@@ -655,6 +696,17 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       jest.spyOn(validity, 'invalidateIssuedTokens').mockRejectedValueOnce(lockError());
       await disable(d.token, code).expect(503);
       expect(await failedLogins(d.id)).toBe(0);
+      await disable(d.token, code).expect(204);
+      expect(await failedLogins(d.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: P2034 at COMMIT on disable is a rollback: 503 BUSY and the same code then disables 2FA (204)', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      failAfterCallback(() => prismaCode('P2034'));
+      const res = await disable(d.token, code).expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
       await disable(d.token, code).expect(204);
       expect(await failedLogins(d.id)).toBe(0);
     });

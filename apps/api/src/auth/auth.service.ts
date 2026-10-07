@@ -585,8 +585,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // may have committed: the mark stays and the challenge stays spent (OutcomeUnknownError is
       // not retryable, so withChallengeUse keeps its key), and the client learns nothing about
       // whether 2FA is on, no recovery codes and no session.
-      const unknownOutcome = phase.started && phase.finished && !isCleanRollback(phase, e);
-      if (isCleanRollback(phase, e)) await releaseMark(mark);
+      const clean = isCleanRollback(phase, e);
+      const unknownOutcome = phase.started && phase.finished && !clean;
+      if (clean) await releaseMark(mark);
       // The code was right, so the reservation is not a failed guess (FU-BE-192).
       await this.refundAttempt(user).catch(() => undefined);
       if (unknownOutcome) {
