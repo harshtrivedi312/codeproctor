@@ -11,7 +11,10 @@ const aesKey = z
   .refine((v) => /^[A-Za-z0-9+/]+={0,2}$/.test(v) && Buffer.from(v, 'base64').length === 32, {
     message: 'must be 32 bytes, base64 encoded',
   });
-// HMAC/JWT secrets: at least 32 characters so a placeholder such as change-me is refused.
+// HMAC/JWT secrets: at least 32 characters. Length alone does not refuse placeholders (the local
+// template in .env.example uses long change-me-local-... values); shared environments also refuse
+// a value that matches change-me anywhere, ignoring case; this applies to the secrets, the keys and
+// the Judge0 tokens (see isSharedEnv and the superRefine below).
 const secret = z.string().min(32, 'must be at least 32 characters');
 
 /** True for http(s) URLs with no credentials, path (other than "/"), query or fragment. */
@@ -214,6 +217,32 @@ export const envSchema = z
         });
       }
     }
+    if (isSharedEnv(env)) {
+      for (const name of [
+        'JWT_ACCESS_SECRET',
+        'COOKIE_SECRET',
+        'JWT_CANDIDATE_SECRET',
+        'OTP_PEPPER',
+        'JUDGE0_AUTH_TOKEN',
+        'JUDGE0_AUTHZ_TOKEN',
+      ] as const) {
+        const value = env[name];
+        if (value !== undefined && isPlaceholderText(value)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [name],
+            message: 'is a local placeholder and is refused in staging, pilot and production',
+          });
+        }
+      }
+      if (isPlaceholderKey(env.ENCRYPTION_KEY)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['ENCRYPTION_KEY'],
+          message: 'is a local placeholder and is refused in staging, pilot and production',
+        });
+      }
+    }
     if (live && env.EMAIL_PROVIDER !== 'ses') {
       ctx.addIssue({
         code: 'custom',
@@ -324,20 +353,84 @@ export function isLiveEnv(env: Pick<Env, 'APP_ENV' | 'NODE_ENV'>): boolean {
   return env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production';
 }
 
+/** Local values only. Anything else, including a misspelling, counts as shared (allowlist). */
+const LOCAL_APP_ENVS: readonly string[] = ['development', 'test'];
+
+/** True unless APP_ENV is a local value; NODE_ENV=production is always shared. */
+export function isSharedEnv(env: { APP_ENV?: string; NODE_ENV?: string }): boolean {
+  return (
+    env.NODE_ENV === 'production' ||
+    env.APP_ENV === undefined ||
+    !LOCAL_APP_ENVS.includes(env.APP_ENV)
+  );
+}
+
+/**
+ * Matches change-me anywhere, ignoring case. The trim and quote strip are defensive only: includes()
+ * already ignores surrounding spaces and quotes.
+ */
+function isPlaceholderText(value: string): boolean {
+  return value
+    .trim()
+    .replace(/^['"]+/, '')
+    .toLowerCase()
+    .includes('change-me');
+}
+
+/** A base64 key whose bytes spell a change-me placeholder (the .env.example values). */
+function isPlaceholderKey(value: string): boolean {
+  return (
+    isPlaceholderText(value) || isPlaceholderText(Buffer.from(value, 'base64').toString('latin1'))
+  );
+}
+
+/** Names of configured SESSION_KEY_ENC_KEY_<kid> values that are local placeholders (never values). */
+function placeholderSessionKeys(raw: Record<string, unknown>): string[] {
+  return Object.entries(raw)
+    .filter(
+      ([name, value]) =>
+        name.startsWith('SESSION_KEY_ENC_KEY_') &&
+        typeof value === 'string' &&
+        isPlaceholderKey(value),
+    )
+    .map(([name]) => name);
+}
+
+const PLACEHOLDER_MESSAGE =
+  'is a local placeholder and is refused in staging, pilot and production';
+
 export function validateEnv(raw: Record<string, unknown>): Env {
   const result = envSchema.safeParse(raw);
   if (!result.success) {
     // Report variable names and reasons only, never the received values (they may be secrets).
-    const problems = result.error.issues
-      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
-      .join('; ');
-    throw new Error(`Invalid environment: ${problems}`);
+    const problems = result.error.issues.map(
+      (i) => `${i.path.join('.') || '(root)'}: ${i.message}`,
+    );
+    // An invalid APP_ENV is not local, so it is shared; an unset one takes the schema default.
+    const appEnv = typeof raw['APP_ENV'] === 'string' ? raw['APP_ENV'] : 'development';
+    const nodeEnv = typeof raw['NODE_ENV'] === 'string' ? raw['NODE_ENV'] : undefined;
+    if (isSharedEnv({ APP_ENV: appEnv, NODE_ENV: nodeEnv })) {
+      for (const name of placeholderSessionKeys(raw))
+        problems.push(`${name}: ${PLACEHOLDER_MESSAGE}`);
+    }
+    throw new Error(`Invalid environment: ${problems.join('; ')}`);
   }
   // The wrapping key is named by the active kid (SESSION_KEY_ENC_KEY_<kid>), so the schema cannot
   // list it. Pilot and production must not start without a valid one: without it every test start
   // would fail at the candidate's first click (ADR 0013 section 2). Names only, never values.
   const env = result.data;
-  if (env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production') {
+  // The parsed APP_ENV is never undefined: an unset one defaults to development, which is local,
+  // so an unset APP_ENV does NOT fail closed here (FU-BE-224).
+  if (isSharedEnv(env)) {
+    // Every configured wrapping key, not only the active kid: an old kid is still used to unwrap.
+    const bad = placeholderSessionKeys(raw);
+    if (bad.length > 0) {
+      throw new Error(
+        `Invalid environment: ${bad.map((n) => `${n}: ${PLACEHOLDER_MESSAGE}`).join('; ')}`,
+      );
+    }
+  }
+  if (isLiveEnv(env)) {
     const name = `SESSION_KEY_ENC_KEY_${env.SESSION_KEY_ENC_ACTIVE_KID}`;
     const value = raw[name];
     if (typeof value !== 'string' || !aesKey.safeParse(value).success) {
