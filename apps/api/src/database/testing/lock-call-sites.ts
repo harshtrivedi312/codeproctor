@@ -387,7 +387,8 @@ const memberCalls = (code: string, name: string): number[] =>
 /**
  * The names of the parameters in a parameter list (the text between the parentheses), split at top-level commas
  * (angle brackets, parentheses, brackets and braces nest): `tx: SessionLockTx, sessionId: string` gives `tx`,
- * `sessionId`. undefined when a parameter is not a plain name (a destructuring pattern, a rest parameter).
+ * `sessionId`. undefined when a parameter is not a plain name (a destructuring pattern, a rest parameter, an optional
+ * `?` or a default `=`).
  */
 function parameterNames(list: string): string[] | undefined {
   const parts: string[] = [];
@@ -406,10 +407,12 @@ function parameterNames(list: string): string[] | undefined {
   const names: string[] = [];
   for (const part of parts) {
     if (part.trim() === '') continue; // a trailing comma
+    // N-1 (review r3 of #208): a plain name with a type or none. An optional `?` or a default `=` (outside an arrow
+    // type's `=>`) is refused: `sessionId: string = this.lastSessionId` would lock a session the caller did not name.
     const match = new RegExp(
-      `^\\s*(?:(?:public|private|protected|readonly)\\s+)*(${IDENT})\\s*\\??\\s*(?::|=|$)`,
+      `^\\s*(?:(?:public|private|protected|readonly)\\s+)*(${IDENT})\\s*(?::|$)`,
     ).exec(part);
-    if (match === null) return undefined;
+    if (match === null || /=(?!>)/.test(part)) return undefined;
     names.push(match[1] as string);
   }
   return names;

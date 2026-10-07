@@ -748,6 +748,22 @@ export class S {
       'a destructured parameter',
       'async lockAnySession({ tx }: { tx: SessionLockTx }, sessionId: string) {\n    return coreLockAnySession(tx, sessionId);',
     ],
+    [
+      'a default for the session id (N-1: it would lock a session the caller did not name)',
+      'async lockAnySession(tx: SessionLockTx, sessionId: string = this.lastSessionId) {\n    return coreLockAnySession(tx, sessionId);',
+    ],
+    [
+      'an untyped default (N-1)',
+      'async lockAnySession(tx: SessionLockTx, sessionId = this.lastSessionId) {\n    return coreLockAnySession(tx, sessionId);',
+    ],
+    [
+      'an optional session id (N-1)',
+      'async lockAnySession(tx: SessionLockTx, sessionId?: string) {\n    return coreLockAnySession(tx, sessionId);',
+    ],
+    [
+      'an optional transaction (N-1)',
+      'async lockAnySession(tx?: SessionLockTx, sessionId: string) {\n    return coreLockAnySession(tx, sessionId);',
+    ],
   ])('TC-008 N2 a lockAnySession wrapper with %s fails', (_what, header) => {
     const text = STATE_TEXT.replace(
       'async lockAnySession(tx: SessionLockTx, sessionId: string) {\n    return coreLockAnySession(tx, sessionId);',
@@ -767,6 +783,14 @@ export class S {
     expect(state(STATE_TEXT.replace('return coreLockAnySession(tx, sessionId);', body))).toEqual(
       [],
     );
+  });
+
+  it('TC-008 N-1 an arrow type in a parameter type is not a default (its => is not an =)', () => {
+    const text = STATE_TEXT.replace(
+      'async lockAnySession(tx: SessionLockTx, sessionId: string) {',
+      'async lockAnySession(tx: SessionLockTx & { onDone?: (s: string) => void }, sessionId: string) {',
+    );
+    expect(state(text)).toEqual([]);
   });
 
   it('TC-008 N2 a comment in the wrapper body is not part of the shape (the comments are stripped first)', () => {
