@@ -5,7 +5,9 @@
 // Copies .env.example and replaces every `change-me` with a fresh random value, so a local run needs
 // no hand editing and no two machines share a secret. The database passwords are random too, and the
 // two database URLs carry the same ones. It also writes apps/web/.env.local with the API base URL the
-// web app needs (the API serves under /api, which the web default http://localhost:4000 lacks).
+// web app needs (the API serves under /api, which the web default http://localhost:4000 lacks) and the
+// MinIO origin the browser may upload to and play recordings from (NEXT_PUBLIC_UPLOAD_ORIGINS feeds the
+// CSP connect-src; it must be the origin of the presigned URLs, i.e. S3_ENDPOINT).
 //
 // Local development only: the values are for a database on this machine. It never overwrites a file
 // that exists (delete it first to start again), and it never prints a value. Staging, pilot and
@@ -77,7 +79,11 @@ export function detectSupport(root) {
   return { smtpDev: schema.includes("'smtp-dev'"), execStub: /JUDGE0_MODE\s*:/.test(schema) };
 }
 
-export const WEB_ENV_LOCAL = 'NEXT_PUBLIC_API_URL=http://localhost:4000/api\n';
+export const WEB_ENV_LOCAL = [
+  'NEXT_PUBLIC_API_URL=http://localhost:4000/api',
+  'NEXT_PUBLIC_UPLOAD_ORIGINS=http://127.0.0.1:9000',
+  '',
+].join('\n');
 
 function main() {
   const args = process.argv.slice(2);

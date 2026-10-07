@@ -81,7 +81,8 @@ services:
 
   # MinIO is the local S3-compatible object store (media, ID images, consent PDFs, reports). The two
   # buckets are created when the container starts and the browser-upload CORS is set for the local web
-  # origin only. The S3_* values in .env point here; the pilot uses real S3 (ADR 0001 section 2.1).
+  # origin only (MinIO answers the preflight for the method asked, so both uploads (PUT) and recording playback
+  (GET) work from that origin; checked). The S3_* values in .env point here; the pilot uses real S3 (ADR 0001 section 2.1).
   # Console: http://localhost:9001 (the MINIO_ROOT_* values from .env).
   # Image: the official minio/minio images are no longer published to Docker Hub or Quay, so this is the
   # frozen Bitnami build of MinIO 2025.7.23 (bitnamilegacy, no further updates). Acceptable for a local run

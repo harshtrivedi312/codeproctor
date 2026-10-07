@@ -37,10 +37,10 @@ describe('local-env (local demo)', () => {
     const env = parseEnv(readFileSync(join(dir, '.env'), 'utf8'));
     for (const secret of [env.JWT_ACCESS_SECRET, env.COOKIE_SECRET, env.POSTGRES_PASSWORD])
       assert.doesNotMatch(r.stdout + r.stderr, new RegExp(secret.replace(/[+/=]/g, '.')));
-    assert.equal(
-      readFileSync(join(dir, 'apps/web/.env.local'), 'utf8'),
-      'NEXT_PUBLIC_API_URL=http://localhost:4000/api\n',
-    );
+    const web = parseEnv(readFileSync(join(dir, 'apps/web/.env.local'), 'utf8'));
+    assert.equal(web.NEXT_PUBLIC_API_URL, 'http://localhost:4000/api');
+    // The CSP connect-src needs the MinIO origin that the presigned URLs carry (S3_ENDPOINT).
+    assert.equal(web.NEXT_PUBLIC_UPLOAD_ORIGINS, 'http://127.0.0.1:9000');
     if (process.platform !== 'win32')
       assert.equal(statSync(join(dir, '.env')).mode & 0o777, 0o600, '.env is private to the user');
     const before = readFileSync(join(dir, '.env'), 'utf8');

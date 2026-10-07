@@ -59,7 +59,9 @@ pnpm db:seed                          # the demo data (section 3)
 
 What `local-env.mjs` does: copies `.env.example`, replaces every `change-me` with a fresh random value
 (the database passwords, the JWT, cookie and OTP secrets, the encryption keys, the MinIO login), and writes
-`apps/web/.env.local` with `NEXT_PUBLIC_API_URL=http://localhost:4000/api`. The API serves under
+`apps/web/.env.local` with `NEXT_PUBLIC_API_URL=http://localhost:4000/api` and
+`NEXT_PUBLIC_UPLOAD_ORIGINS=http://127.0.0.1:9000` (the MinIO origin: the web app's content security policy only
+lets the browser upload to, and play recordings from, origins listed there; it must match `S3_ENDPOINT`). The API serves under
 `/api`, and the web app's built-in default (`http://localhost:4000`) lacks that prefix, so without the
 second file every sign-in fails with "The server did not answer as expected". `.env` sets `APP_ENV=development` explicitly: it is required and has no default, and the local-only paths
 (the seed, the demo scripts, and later the mail sink, object store and execution stub) switch on only for
@@ -78,7 +80,7 @@ The stack (`infra/docker-compose.yml`) binds every port to 127.0.0.1:
 | Service  | Address                                   | What it is                                                              |
 | -------- | ----------------------------------------- | ----------------------------------------------------------------------- |
 | Mailpit  | <http://localhost:8025> (SMTP on 1025)    | Catches every email (candidate codes) so nothing leaves the machine.    |
-| MinIO    | S3 <http://127.0.0.1:9000>, console <http://localhost:9001> | Local S3-compatible object store; the buckets `codeproctor-media` and `codeproctor-backup` exist at start, CORS only for `http://localhost:3000`. Login: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`. |
+| MinIO    | S3 <http://127.0.0.1:9000>, console <http://localhost:9001> | Local S3-compatible object store; the buckets `codeproctor-media` and `codeproctor-backup` exist at start, CORS only for `http://localhost:3000` (uploads and recording playback: PUT and GET are both answered; checked). Login: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`. |
 | Adminer  | <http://localhost:8080>                   | A database browser.                                                     |
 
 An `.env` written before MinIO was added has no `MINIO_*` or `S3_*` lines, and `pnpm dev:infra` then refuses
