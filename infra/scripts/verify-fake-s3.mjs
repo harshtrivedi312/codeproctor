@@ -9,7 +9,7 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], close: () => Promise<void> }>} */
+/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], puts: Array<{ path: string, conditional: boolean }>, close: () => Promise<void> }>} */
 export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
   const faults = { failList: false };
@@ -22,6 +22,8 @@ export async function startFakeS3({ versioned = false } = {}) {
   let counter = 0;
   /** Every DELETE request, as "bucket/key" (tests assert versioned backups issue none). */
   const deletes = [];
+  /** Every accepted PUT, with whether it carried If-None-Match: * (tests assert the erasure list is written conditionally). */
+  const puts = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const path = decodeURIComponent(url.pathname.slice(1));
@@ -33,6 +35,12 @@ export async function startFakeS3({ versioned = false } = {}) {
         res.end(req.method === 'HEAD' ? undefined : body);
       };
       if (req.method === 'PUT') {
+        // A conditional create (If-None-Match: *): refused with 412 when the key already exists.
+        if (req.headers['if-none-match'] === '*' && objects.has(path))
+          return send(412, xml('<Error><Code>PreconditionFailed</Code></Error>'), {
+            'content-type': 'application/xml',
+          });
+        puts.push({ path, conditional: req.headers['if-none-match'] === '*' });
         const body = Buffer.concat(chunks);
         const meta = {};
         for (const [h, v] of Object.entries(req.headers))
@@ -106,6 +114,7 @@ export async function startFakeS3({ versioned = false } = {}) {
     versions,
     metas,
     deletes,
+    puts,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

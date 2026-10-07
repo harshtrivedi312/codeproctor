@@ -82,6 +82,22 @@ s3cp() {
   fi
 }
 
+# s3_put_once <file> <key> <content type>: writes the object only if the key does not exist yet
+# (`If-None-Match: *`). An erasure-list entry is immutable (ADR 0004 R-7), and the pilot backup role
+# is allowed to create objects but not to overwrite or delete them (ADR 0017 5.3): `aws s3 cp` cannot
+# send the condition, so this uses put-object. A 412 means the entry already exists, which is success.
+# Any other failure stops the caller: an erasure missing from the list could come back on a restore.
+s3_put_once() {
+  if s3api put-object --bucket "$BUCKET" --key "$2" --body "$1" --content-type "$3" --if-none-match '*' > /dev/null 2> "$WORK/put.err"; then
+    return 0
+  fi
+  if grep -Eq 'PreconditionFailed|\(412\)' "$WORK/put.err"; then
+    log "already exists, left as it is."
+    return 0
+  fi
+  die "could not write the erasure list entry (not a 'precondition failed' answer)."
+}
+
 # load_keys <prefix>: sets KEYS to every key under the prefix, one per line. It runs in the main
 # shell and dies when the listing fails: a pipeline would hide the failure (POSIX sh has no
 # pipefail), and a restore that cannot read the erasure list must not look like an empty list.
