@@ -16,6 +16,7 @@ import type { Job } from 'bullmq';
 import { z } from 'zod';
 import { bullConnection } from '../candidate/session-jobs.service';
 import type { Env } from '../config/env';
+import { SessionLockRetryError } from '../database/errors';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { FaceMatchService } from './face-match.service';
@@ -25,6 +26,7 @@ import {
   FACE_MATCH_BACKOFF_MS,
   FACE_MATCH_JOB,
   IDENTITY_QUEUE,
+  LOCK_RETRY_DELAY_MS,
   MAX_BUSY_MS,
   PENDING_RECONCILE_AFTER_MS,
   RECONCILE_EVERY_MS,
@@ -167,6 +169,23 @@ export class IdentityJobsService
         if (job.updateData && job.moveToDelayed && token !== undefined) {
           await job.updateData({ ...data, busySince: since });
           await job.moveToDelayed(Date.now() + e.retryAfterSeconds * 1000, token);
+          throw new DelayedError();
+        }
+        throw e;
+      }
+      if (e instanceof SessionLockRetryError) {
+        // The session lock was busy at the write: keep the computed result by trying again (bounded
+        // like a busy worker); never turn it into a match error, which would record a review the
+        // worker never asked for.
+        const since = data.busySince ?? Date.now();
+        if (
+          Date.now() - since < MAX_BUSY_MS &&
+          job.updateData &&
+          job.moveToDelayed &&
+          token !== undefined
+        ) {
+          await job.updateData({ ...data, busySince: since });
+          await job.moveToDelayed(Date.now() + LOCK_RETRY_DELAY_MS, token);
           throw new DelayedError();
         }
         throw e;

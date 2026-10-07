@@ -19,6 +19,7 @@ import { PrismaService } from '../database/prisma.service';
 import { IdentityFacts } from './identity-facts';
 import { IdentityMedia } from './identity-media';
 import { IdentitySessionJobs } from './identity-session-jobs';
+import type { ReviewReason } from './identity-session-jobs';
 import { IdentityPurgeService } from './identity-purge.service';
 import { MAX_ATTEMPTS } from './identity.constants';
 import { WorkerClient } from './worker-client';
@@ -31,9 +32,6 @@ export interface FaceMatchData {
 }
 
 export type FaceMatchOutcome = 'RESOLVED' | 'SKIPPED';
-
-type ReviewReason =
-  'BELOW_THRESHOLD' | 'NO_FACE' | 'MULTIPLE_FACES' | 'LIVENESS_NOT_CONFIRMED' | 'MATCH_ERROR';
 
 interface Resolution {
   readonly status: 'PASSED' | 'LOW_CONFIDENCE' | 'MANUAL_REVIEW';

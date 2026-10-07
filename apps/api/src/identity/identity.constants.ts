@@ -31,3 +31,6 @@ export const MAX_BUSY_MS = 5 * 60_000;
 export const WORKER_GET_TTL_SECONDS = 60;
 /** Client timeout of a match call (ADR 0014 6.2). */
 export const MATCH_TIMEOUT_MS = 20_000;
+
+/** A busy session lock at the result write: try again after this long (bounded by MAX_BUSY_MS). */
+export const LOCK_RETRY_DELAY_MS = 5_000;

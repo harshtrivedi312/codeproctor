@@ -759,6 +759,28 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(worker.calls).toHaveLength(2);
   });
 
+  it('TC-033/CS-4.7: a busy session lock at the result write re-delays the job and keeps the computed result, never a match error', async () => {
+    const { IdentitySessionJobs } =
+      jest.requireActual<typeof import('./identity-session-jobs')>('./identity-session-jobs');
+    const { SessionLockRetryError } =
+      jest.requireActual<typeof import('../database/errors')>('../database/errors');
+    const writer = app.get(IdentitySessionJobs);
+    const real = writer.commit.bind(writer);
+    let busy = 1;
+    const spy = jest.spyOn(writer, 'commit').mockImplementation((data, keys) => {
+      if (busy-- > 0) return Promise.reject(new SessionLockRetryError());
+      return real(data, keys);
+    });
+    try {
+      const c = await session();
+      await submit(c, await upload(c));
+      const row = await settled(c.sessionId);
+      expect(row?.status).toBe('PASSED'); // the match was kept, not replaced by MANUAL_REVIEW
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   // ---------- uploads and names ----------
 
   it('FR-403: submitting before the upload gives 409 UPLOAD_NOT_FOUND and leaves the names usable', async () => {
