@@ -83,7 +83,7 @@ const SRC = resolve(__dirname, '..');
  *                         that entry in its own PR, not before.
  * In the state file each core is imported by name under an alias, by an `import { x as alias } from` statement and no
  * other form (a namespace or default import, `import x = require`, a re-export, and any `require`, `createRequire`,
- * `import(`, `_load`, `getBuiltinModule`, `node:module` or `node:vm` token or escaped specifier are refused), and called
+ * `import(`, `_load`, `getBuiltinModule`, `module`, `node:module`, `vm` or `node:vm` token or escaped specifier are refused), and called
  * exactly once, inside the wrapper method of the same name in the SessionStateService class, whose whole body is
  * `return <alias>(<param1>, <param2>);` with plain parameters (no default, not optional) and no decorator; the alias
  * is used nowhere else. The wrappers are counted with any receiver: `.lockAnySession(` and `.lockForAccommodation(`

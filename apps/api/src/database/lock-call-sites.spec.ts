@@ -705,7 +705,7 @@ export class S {
     expect(state(PRE_STATE_TEXT + '\n' + extra)).toEqual([LOADER]);
   });
 
-  const MODULE_LOADER = `${SESSION_STATE_FILE}: the module loader (_load, getBuiltinModule, node:module or node:vm) or an escaped specifier appears in the state file: it needs none, so it is refused`;
+  const MODULE_LOADER = `${SESSION_STATE_FILE}: the module loader (_load, getBuiltinModule, module, node:module, vm or node:vm) or an escaped specifier appears in the state file: it needs none, so it is refused`;
 
   it.each([
     [
@@ -720,9 +720,14 @@ export class S {
     ['an import of node:vm', "import { runInThisContext } from 'node:vm';"],
     ['an import of module', "import * as m from 'module';"],
     ['an escaped specifier', "import * as core from '../database/session\\u002dlocks';"],
-  ])('TC-008 SF-1 (review r4) %s in a pre-switch-over state file is refused', (_what, extra) => {
-    expect(state(PRE_STATE_TEXT + '\n' + extra)).toContain(MODULE_LOADER);
-  });
+  ])(
+    'TC-008 SF-1 (review r4) %s is refused in a state file, before and after the switch-over',
+    (_what, extra) => {
+      expect(state(PRE_STATE_TEXT + '\n' + extra)).toContain(MODULE_LOADER);
+      // SF-2 of review r5: the same rule holds once the file has the full shape.
+      expect(state(STATE_TEXT + '\n' + extra)).toContain(MODULE_LOADER);
+    },
+  );
 
   it('TC-008 SF-2 words that only contain the token, and import statements, are not loaders', () => {
     const text = PRE_STATE_TEXT.replace(

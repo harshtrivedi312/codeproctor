@@ -741,7 +741,7 @@ Five tests pin it, all with an **empty** list outside the defining file today:
     - **No default import, and no loader route** (N-4 of the r3 review, SF-1 of the r4 review): `import core from` and
       `import core, { ... } from` the module are refused (a default import holds the whole module), and so are
       `_load`, `getBuiltinModule`, an import of `module`, `node:module`, `vm` or `node:vm`, and a specifier with an
-      escape in it (`session-locks`: TypeScript resolves the decoded string, the scan reads the raw text). **Write
+      escape in it (`session\u002dlocks`: TypeScript resolves the decoded string, the scan reads the raw text). **Write
       the import on its own line, in prettier's layout**: the statement is parsed by a strict clause grammar, so a
       statement the grammar does not know fails (OTHERS) instead of passing. No file under `apps/api/src` may hold an
       escaped specifier at all (`import-guard.spec.ts`).

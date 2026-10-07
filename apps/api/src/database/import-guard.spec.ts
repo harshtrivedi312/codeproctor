@@ -95,9 +95,12 @@ const ruleNamed = (name: string): GuardRule => {
   return found;
 };
 
+/** The source extensions the real-tree scan reads (SF-1 of review r5 of #208): the six tsc compiles under NodeNext. */
+const SOURCE_EXTENSIONS = /\.(ts|mts|cts|js|mjs|cjs)$/;
+
 function isTestFile(path: string): boolean {
   return (
-    /\.(spec|e2e-spec)\.ts$/.test(path) ||
+    /\.(spec|e2e-spec)\.(ts|mts|cts|js|mjs|cjs)$/.test(path) ||
     path.startsWith('test/') ||
     path.startsWith('database/testing/') ||
     path.startsWith('generated/')
@@ -109,7 +112,8 @@ function readSource(dir: string): SourceFile[] {
     const full = join(dir, name);
     if (statSync(full).isDirectory()) return readSource(full);
     const path = relative(SRC, full).split(sep).join('/');
-    return path.endsWith('.ts') && !isTestFile(path)
+    // SF-1 (review r5 of #208): the six source extensions that tsc compiles under NodeNext, not `.ts` alone.
+    return SOURCE_EXTENSIONS.test(path) && !isTestFile(path)
       ? [{ path, text: readFileSync(full, 'utf8') }]
       : [];
   });
@@ -123,6 +127,13 @@ describe('import guard: nothing new reaches Postgres around the org scope (NFR-0
     expect(paths).toEqual(expect.arrayContaining(['auth/auth.service.ts', 'app.module.ts']));
     expect(paths).not.toContain('auth/auth.e2e-spec.ts');
     expect(paths.some((p) => p.startsWith('generated/'))).toBe(false);
+  });
+
+  it('TC-008 SF-1 (review r5 of #208): the real-tree scan reads all six source extensions, not .ts alone', () => {
+    for (const path of ['a.ts', 'a.mts', 'a.cts', 'a.js', 'a.mjs', 'a.cjs']) {
+      expect({ path, scanned: SOURCE_EXTENSIONS.test(path) }).toEqual({ path, scanned: true });
+    }
+    expect(SOURCE_EXTENSIONS.test('a.md')).toBe(false);
   });
 
   it('TC-008 SF-1 (review r4 of #208): no specifier in the real tree has an escape in it (TypeScript resolves the decoded string, every rule here reads the raw text)', () => {

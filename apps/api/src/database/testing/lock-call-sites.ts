@@ -97,7 +97,7 @@ export const LOCK_CALLER_RULES = {
     `method of the same name in the ${SESSION_STATE_CLASS} class, whose whole body is return <alias>(<param1>, ` +
     `<param2>); nowhere else; member calls counted with any receiver: one .guardLive( call, inside proctorResume, ` +
     `and no .lockAnySession( or .lockForAccommodation( call; proctorResume is treated like a lock name: every bare mention is its definition and every member mention is refused; ` +
-    `in either state no require, createRequire, import(, _load, getBuiltinModule, node:module or node:vm, and no escaped specifier; ` +
+    `in either state no require, createRequire, import(, _load, getBuiltinModule, module, node:module, vm or node:vm, and no escaped specifier; ` +
     `no default import of the core; wrapper parameters take no default and are not optional; no decorator on the wrappers or proctorResume`,
   processorFile:
     'no mention of proctorResume in either state; no lock named at all (before the switch-over), or: .guardLive( ' +
@@ -512,7 +512,7 @@ export function stateFileProblems(path: string, code: string): string[] {
     specifiersOf(code).some((s) => s.includes('\\') || /^(?:node:)?(?:module|vm)$/.test(s))
   ) {
     out.push(
-      `${path}: the module loader (_load, getBuiltinModule, node:module or node:vm) or an escaped specifier appears in the state file: it needs none, so it is refused`,
+      `${path}: the module loader (_load, getBuiltinModule, module, node:module, vm or node:vm) or an escaped specifier appears in the state file: it needs none, so it is refused`,
     );
   }
   const imports = parseLockImports(code);
