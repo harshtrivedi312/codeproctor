@@ -14,8 +14,12 @@ import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
 import { OrgContextMissingError } from '../database/errors';
 import { scrubPrismaError } from '../database/error-scrub';
-import { CodedConflictException, CodedForbiddenException } from './coded.exception';
-import type { ProblemCode } from './coded.exception';
+import {
+  CodedConflictException,
+  CodedForbiddenException,
+  CodedHttpException,
+} from './coded.exception';
+import type { CandidateProblemCode, ProblemCode } from './coded.exception';
 
 export interface ProblemDetails {
   type: string;
@@ -26,7 +30,9 @@ export interface ProblemDetails {
   traceId: string;
   errors?: string[];
   /** Stable machine code, present only where a route defines one (e.g. REAUTH_FAILED). */
-  code?: ProblemCode;
+  code?: ProblemCode | CandidateProblemCode;
+  /** Extra members of a CodedHttpException, for example `sessionStatus` or `retryAfterSeconds`. */
+  [extension: string]: unknown;
 }
 
 const TITLES: Record<number, string> = {
@@ -108,6 +114,14 @@ export class ProblemFilter implements ExceptionFilter {
         status < 500
       ) {
         problem.code = exception.code;
+      }
+      if (exception instanceof CodedHttpException && (status < 500 || status === 503)) {
+        problem.code = exception.code;
+        for (const [key, value] of Object.entries(exception.extensions)) {
+          if (!(key in problem)) problem[key] = value;
+        }
+        const wait = exception.extensions.retryAfterSeconds;
+        if (typeof wait === 'number') res.setHeader('Retry-After', String(wait));
       }
       if (status >= 500) {
         // Fixed message, class name and trace id only: never the body, which may carry values.
