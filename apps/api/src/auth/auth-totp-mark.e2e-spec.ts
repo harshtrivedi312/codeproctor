@@ -17,7 +17,13 @@ import type { PrismaService } from '../database/prisma.service';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import type { AuthService } from './auth.service';
-import { encryptSecret, passwordVersion } from './crypto.util';
+import {
+  encryptSecret,
+  newRecoveryCode,
+  normalizeRecoveryCode,
+  passwordVersion,
+  sha256Hex,
+} from './crypto.util';
 import { ARGON2_OPTIONS } from './password.service';
 import type { TotpService } from './totp.service';
 
@@ -147,9 +153,16 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       900,
     );
   }
+  /** Spies on the private give-back of one reserved attempt (FU-BE-220). */
+  const spyRefund = (): jest.SpyInstance =>
+    jest.spyOn(authService as unknown as { refundAttempt: () => Promise<void> }, 'refundAttempt');
   const spyOnService = (name: 'audit' | 'startSession' | 'clearFailures'): jest.SpyInstance =>
     jest.spyOn(authService as unknown as Record<typeof name, () => Promise<unknown>>, name);
-  /** The transaction runs to its last statement, then fails with P2028: an unknown outcome. */
+  /**
+   * The transaction runs to its last statement, then the error is thrown from inside the
+   * wrapper, so the real transaction rolls back: this models "the commit did not land". Use
+   * commitThenFail for the landed case.
+   */
   function failAfterCallback(error: () => Error = p2028): jest.SpyInstance {
     const client = appPrisma.client;
     const real = client.$transaction.bind(client) as (
@@ -173,6 +186,273 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
     for (const k of await markKeys(userId)) await redis.del(k);
   };
 
+  // The commit really lands, then the error is thrown: the worst case for an unknown outcome.
+  function commitThenFail(error: () => Error): jest.SpyInstance {
+    const client = appPrisma.client;
+    const real = client.$transaction.bind(client) as (
+      fn: (tx: unknown) => Promise<unknown>,
+      opts?: unknown,
+    ) => Promise<unknown>;
+    return jest.spyOn(client, '$transaction').mockImplementationOnce((async (
+      fn: (tx: unknown) => Promise<unknown>,
+      opts?: unknown,
+    ) => {
+      await real(fn, opts);
+      throw error();
+    }) as unknown as typeof client.$transaction);
+  }
+  const prismaCode = (code: string): Error => {
+    const { Prisma } = jest.requireActual<typeof import('../generated/prisma/client')>(
+      '../generated/prisma/client',
+    );
+    return new Prisma.PrismaClientKnownRequestError('driver failure', {
+      code,
+      clientVersion: 'test',
+    });
+  };
+  const connLost = (): Error =>
+    Object.assign(new Error('Connection terminated unexpectedly'), { code: 'ECONNRESET' });
+  const enabledInDb = async (id: string): Promise<{ on: boolean; hashes: number }> => {
+    const u = await prisma.user.findUniqueOrThrow({ where: { id } });
+    return { on: u.totpEnabled, hashes: u.recoveryCodeHashes.length };
+  };
+  const unknownCases: [string, () => Error][] = [
+    ['P2028 at COMMIT', p2028],
+    ['P1017 at COMMIT', () => prismaCode('P1017')],
+    ['a driver connection error after the callback', connLost],
+  ];
+  const rollbackCases: [string, () => Error][] = [
+    ['P2034', () => prismaCode('P2034')],
+    ['40001', () => Object.assign(new Error('serialization'), { code: '40001' })],
+    ['40P01', () => Object.assign(new Error('deadlock'), { code: '40P01' })],
+    [
+      'a driver-adapter-shaped 40001 (cause.originalCode)',
+      () =>
+        Object.assign(prismaCode('P2010'), {
+          meta: { driverAdapterError: { cause: { originalCode: '40001' } } },
+        }),
+    ],
+  ];
+  /** The 500 is the generic body: no code, no Retry-After, nothing that says whether 2FA is on. */
+  function expectFixed500(res: request.Response): void {
+    expect(res.status).toBe(500);
+    expect(res.headers['retry-after']).toBeUndefined();
+    const body = res.body as Record<string, unknown>;
+    expect(body.code).toBeUndefined();
+    expect(body.recoveryCodes).toBeUndefined();
+    expect(body.session).toBeUndefined();
+    expect(JSON.stringify(body)).not.toMatch(/recovery|enabled|two-factor/i);
+  }
+
+  describe('outcome unknown on the two 2FA confirm routes (DL-37, FU-BE-208, FU-BE-214, FR-102)', () => {
+    describe('POST /auth/2fa/setup/confirm', () => {
+      async function started(): Promise<{ id: string; token: string; key: string }> {
+        const u = await createUser({ totp: false });
+        const token = await accessFor(u.id);
+        const start = (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/setup/start`)
+            .set('Authorization', `Bearer ${token}`)
+            .send({ currentPassword: PASSWORD })
+            .expect(200)
+        ).body as Body;
+        return { id: u.id, token, key: start.manualKey };
+      }
+      const confirm = (token: string, code: string): request.Test =>
+        request(app.getHttpServer())
+          .post(`${API}/2fa/setup/confirm`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ currentPassword: PASSWORD, code });
+
+      it.each(unknownCases)(
+        'DL-37, FU-BE-208, FR-102: %s with the commit landed is the fixed 500; 2FA is on, the mark is kept, the counter is unchanged, and a retry is not counted as a guess',
+        async (_n, make) => {
+          const e = await started();
+          const code = authenticator.generate(e.key);
+          const refund = spyRefund();
+          commitThenFail(make);
+          expectFixed500(await confirm(e.token, code));
+          // FU-BE-220: only the password step's refund; none after the landed commit.
+          expect(refund).toHaveBeenCalledTimes(1);
+          expect(await enabledInDb(e.id)).toEqual({ on: true, hashes: 10 });
+          expect(await markCount(e.id)).toBe(1);
+          expect(await failedLogins(e.id)).toBe(0);
+          // Already on: the retry is the existing 409 and never a second set of recovery codes.
+          const retry = await confirm(e.token, code).expect(409);
+          expect((retry.body as Record<string, unknown>).recoveryCodes).toBeUndefined();
+          expect(await failedLogins(e.id)).toBe(0);
+        },
+      );
+
+      it('DL-37, FU-BE-208, FR-102: P2028 at COMMIT with the commit NOT landed is the same fixed 500; 2FA is off, the mark stays, and the retry of the code is a replay counted once', async () => {
+        const e = await started();
+        const code = authenticator.generate(e.key);
+        const refund = spyRefund();
+        failAfterCallback();
+        expectFixed500(await confirm(e.token, code));
+        expect(await enabledInDb(e.id)).toEqual({ on: false, hashes: 0 });
+        expect(await markCount(e.id)).toBe(1);
+        // FU-BE-220: nothing is given back after an unknown outcome: the reservation stays (+1).
+        // The only refund call is the password step's, made before the confirm transaction.
+        expect(refund).toHaveBeenCalledTimes(1);
+        expect(await failedLogins(e.id)).toBe(1);
+        await confirm(e.token, code).expect(400);
+        expect(await failedLogins(e.id)).toBe(2);
+      });
+
+      it('DL-37, FU-BE-208: the unknown-outcome error log carries only traceId, errorName and the route', async () => {
+        const e = await started();
+        const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const spy = jest.spyOn(Logger.prototype, 'error');
+        commitThenFail(p2028);
+        await confirm(e.token, authenticator.generate(e.key)).expect(500);
+        const call = spy.mock.calls.find((c) => c[1] === 'Write outcome unknown');
+        const entry = call?.[0] as Record<string, unknown> | undefined;
+        expect(entry).toBeDefined();
+        expect(entry?.route).toBe('auth.2fa.setup.confirm');
+        expect(entry?.errorName).toBe('OutcomeUnknownError');
+        expect(Object.keys(entry ?? {}).sort()).toEqual(['errorName', 'route', 'traceId']);
+        expect(JSON.stringify(entry)).not.toContain(e.id);
+      });
+
+      it.each(rollbackCases)(
+        'DL-37, FU-BE-208, FR-102 (PR #279): %s at commit stays 503 BUSY with Retry-After and a code, the mark is released, and the same code then enables 2FA',
+        async (_n, make) => {
+          const e = await started();
+          const code = authenticator.generate(e.key);
+          const refund = spyRefund();
+          failAfterCallback(make);
+          const res = await confirm(e.token, code).expect(503);
+          // The password step's refund plus exactly one for the rolled-back confirm (FU-BE-220).
+          expect(refund).toHaveBeenCalledTimes(2);
+          expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+          expect((res.body as { code?: string }).code).toBe('BUSY');
+          expect(await markCount(e.id)).toBe(0);
+          expect(await enabledInDb(e.id)).toEqual({ on: false, hashes: 0 });
+          await confirm(e.token, code).expect(200);
+          expect(await failedLogins(e.id)).toBe(0);
+        },
+      );
+
+      it('DL-37, FU-BE-208, FR-102: a pre-commit lock timeout (55P03 inside the callback) stays 503 BUSY and the mark is released', async () => {
+        const e = await started();
+        const code = authenticator.generate(e.key);
+        spyOnService('audit').mockRejectedValueOnce(lockError());
+        await confirm(e.token, code).expect(503);
+        expect(await markCount(e.id)).toBe(0);
+        await confirm(e.token, code).expect(200);
+      });
+
+      it('DL-37, FU-BE-208, FR-102: a wrong code is never refunded, also next to an unknown outcome (nothing committed)', async () => {
+        const e = await started();
+        await confirm(e.token, '000000').expect(400);
+        expect(await failedLogins(e.id)).toBe(1);
+        failAfterCallback();
+        expectFixed500(await confirm(e.token, authenticator.generate(e.key)));
+        // Wrong guess counted (1) plus the kept reservation of the unknown outcome (FU-BE-220).
+        expect(await failedLogins(e.id)).toBe(2);
+      });
+    });
+
+    describe('POST /auth/2fa/enroll/confirm', () => {
+      async function started(): Promise<{
+        id: string;
+        email: string;
+        challenge: string;
+        key: string;
+      }> {
+        const u = await createUser({ role: UserRole.SUPER_ADMIN, totp: false });
+        const challenge = await challengeFor(u.email);
+        const start = (
+          await request(app.getHttpServer())
+            .post(`${API}/2fa/enroll/start`)
+            .send({ challengeToken: challenge })
+            .expect(200)
+        ).body as Body;
+        return { id: u.id, email: u.email, challenge, key: start.manualKey };
+      }
+      const confirm = (challengeToken: string, code: string): request.Test =>
+        request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/confirm`)
+          .send({ challengeToken, code });
+      const liveFamilies = (id: string): Promise<number> =>
+        prisma.refreshToken.count({ where: { userId: id, revokedAt: null } });
+
+      it.each(unknownCases)(
+        'DL-37, FU-BE-208, FU-BE-214, FR-102: %s with the commit landed is the fixed 500 with no session and no cookie; the challenge stays spent, the mark is kept, the counter is unchanged',
+        async (_n, make) => {
+          const e = await started();
+          const code = authenticator.generate(e.key);
+          const refund = spyRefund();
+          commitThenFail(make);
+          const res = await confirm(e.challenge, code);
+          expectFixed500(res);
+          expect(refund).not.toHaveBeenCalled(); // FU-BE-220
+          expect(res.headers['set-cookie']).toBeUndefined();
+          expect(await enabledInDb(e.id)).toEqual({ on: true, hashes: 10 });
+          expect(await liveFamilies(e.id)).toBe(1);
+          expect(await markCount(e.id)).toBe(1);
+          expect(await failedLogins(e.id)).toBe(0);
+          // Spent: the same challenge is refused as expired, as for any used challenge.
+          await confirm(e.challenge, code).expect(401);
+          expect(await failedLogins(e.id)).toBe(0);
+          // The client goes to sign-in, which now asks for the code: replaying it is refused.
+          await verify2fa(await challengeFor(e.email), code).expect(400);
+          expect(await failedLogins(e.id)).toBe(1);
+        },
+      );
+
+      it('DL-37, FU-BE-208: the unknown-outcome error log carries only traceId, errorName and the route', async () => {
+        const e = await started();
+        const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const spy = jest.spyOn(Logger.prototype, 'error');
+        commitThenFail(p2028);
+        await confirm(e.challenge, authenticator.generate(e.key)).expect(500);
+        const call = spy.mock.calls.find((c) => c[1] === 'Write outcome unknown');
+        const entry = call?.[0] as Record<string, unknown> | undefined;
+        expect(entry).toBeDefined();
+        expect(entry?.route).toBe('auth.2fa.enroll.confirm');
+        expect(entry?.errorName).toBe('OutcomeUnknownError');
+        expect(Object.keys(entry ?? {}).sort()).toEqual(['errorName', 'route', 'traceId']);
+        expect(JSON.stringify(entry)).not.toContain(e.id);
+      });
+
+      it.each(rollbackCases)(
+        'DL-37, FU-BE-208, FU-BE-214, FR-102 (PR #279): %s at commit stays 503 BUSY, the challenge is released and the mark too: the same challenge and code then sign in',
+        async (_n, make) => {
+          const e = await started();
+          const code = authenticator.generate(e.key);
+          const refund = spyRefund();
+          failAfterCallback(make);
+          const res = await confirm(e.challenge, code).expect(503);
+          expect(refund).toHaveBeenCalledTimes(1); // FU-BE-220: exactly once, a real rollback
+          expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+          expect(await markCount(e.id)).toBe(0);
+          await confirm(e.challenge, code).expect(200);
+          expect(await failedLogins(e.id)).toBe(0);
+        },
+      );
+
+      it('DL-37, FU-BE-208, FR-102: a pre-commit lock timeout stays 503 BUSY and the challenge is released', async () => {
+        const e = await started();
+        const code = authenticator.generate(e.key);
+        spyOnService('audit').mockRejectedValueOnce(lockError());
+        await confirm(e.challenge, code).expect(503);
+        await confirm(e.challenge, code).expect(200);
+      });
+
+      it('DL-37, FU-BE-208, FR-102: a wrong code is never refunded', async () => {
+        const e = await started();
+        await confirm(e.challenge, '000000').expect(400);
+        expect(await failedLogins(e.id)).toBe(1);
+        failAfterCallback();
+        expectFixed500(await confirm(e.challenge, authenticator.generate(e.key)));
+        // Wrong guess counted (1) plus the kept reservation of the unknown outcome (FU-BE-220).
+        expect(await failedLogins(e.id)).toBe(2);
+      });
+    });
+  });
+
   describe('login with a TOTP code (completeLogin)', () => {
     it('FU-BE-208, DL-37, FR-102: a clean rollback (503 BUSY) gives the code back: the retry with the SAME code signs in and the failed_logins counter is unchanged', async () => {
       const u = await createUser({ role: UserRole.REVIEWER, totp: true });
@@ -191,12 +471,68 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       const challenge = await challengeFor(u.email);
       const code = authenticator.generate(SECRET);
       spyOnService('clearFailures').mockRejectedValueOnce(lockError());
+      const refund = spyRefund();
       await verify2fa(challenge, code).expect(503);
       expect(await markCount(u.id)).toBe(1);
-      expect(await failedLogins(u.id)).toBe(0);
+      // FU-BE-220: the INSERT returned (a landed commit): no refund, the reservation stays (+1).
+      expect(refund).not.toHaveBeenCalled();
+      expect(await failedLogins(u.id)).toBe(1);
       await verify2fa(challenge, code).expect(400);
+      expect(await failedLogins(u.id)).toBe(2);
+    });
+
+    it('FU-BE-208, FU-BE-220, DL-37, FR-102: plain login of a user without 2FA: a lock error from clearFailures AFTER the family INSERT returned is 503 BUSY with no refund (counter stays 1)', async () => {
+      const u = await createUser({ role: UserRole.RECRUITER, totp: false });
+      spyOnService('clearFailures').mockRejectedValueOnce(lockError());
+      const refund = spyRefund();
+      const res = await login(u.email).expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      expect(refund).not.toHaveBeenCalled();
       expect(await failedLogins(u.id)).toBe(1);
     });
+
+    it('FU-BE-208, FU-BE-220, DL-37, FR-102: plain login: a lock error from the family INSERT itself (before insert.done) is 503 BUSY and the attempt is refunded once (counter back to 0)', async () => {
+      const u = await createUser({ role: UserRole.RECRUITER, totp: false });
+      const base = appPrisma.client as unknown as {
+        $queryRaw: (...a: unknown[]) => Promise<unknown>;
+      };
+      const real = base.$queryRaw.bind(base);
+      jest.spyOn(base, '$queryRaw').mockImplementation(async (...args: unknown[]) => {
+        const text = JSON.stringify((args[0] as { strings?: string[] } | undefined)?.strings ?? '');
+        if (text.includes('INSERT INTO refresh_tokens')) throw lockError();
+        return real(...args);
+      });
+      const refund = spyRefund();
+      await login(u.email).expect(503);
+      expect(refund).toHaveBeenCalledTimes(1);
+      expect(await failedLogins(u.id)).toBe(0);
+    });
+
+    it.each([
+      ['the commit did not land (real rollback)', false],
+      ['the commit landed', true],
+    ])(
+      'FU-BE-208, FU-BE-220, DL-37, FR-102: recovery-code login, P2028 at COMMIT of the recovery transaction when %s: no refund (counter 1 if not landed, 0 if landed) and the code is consumed per the real DB state',
+      async (_n, landed) => {
+        const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+        const recovery = newRecoveryCode();
+        await prisma.user.update({
+          where: { id: u.id },
+          data: { recoveryCodeHashes: [sha256Hex(normalizeRecoveryCode(recovery))] },
+        });
+        const challenge = await challengeFor(u.email);
+        const refund = spyRefund();
+        if (landed) commitThenFail(p2028);
+        else failAfterCallback();
+        // Still answered 503 on this path: tracked by FU-BE-219.
+        await verify2fa(challenge, recovery).expect(503);
+        expect(refund).not.toHaveBeenCalled();
+        // Landed: the transaction's own clearFailures committed (0). Not landed: the reservation stays.
+        expect(await failedLogins(u.id)).toBe(landed ? 0 : 1);
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row.recoveryCodeHashes).toHaveLength(landed ? 0 : 1);
+      },
+    );
 
     it('FU-BE-208, FR-102: a successful login keeps its mark: the same code cannot be replayed with a fresh challenge', async () => {
       const u = await createUser({ role: UserRole.REVIEWER, totp: true });
@@ -320,14 +656,15 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(await failedLogins(e.id)).toBe(0);
     });
 
-    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished is the fixed 500 (not 503) and keeps the mark: the retry is a replay, counted once', async () => {
       const e = await startedEnrollment();
       const code = authenticator.generate(e.key);
       failAfterCallback();
-      await confirm(e.token, code).expect(503);
+      const res = await confirm(e.token, code).expect(500);
+      expect(res.headers['retry-after']).toBeUndefined();
       expect(await markCount(e.id)).toBe(1);
       await confirm(e.token, code).expect(400);
-      expect(await failedLogins(e.id)).toBe(1);
+      expect(await failedLogins(e.id)).toBe(2); // kept reservation + counted replay (FU-BE-220)
     });
 
     it('FU-BE-208, DL-37, FR-102: P2028 INSIDE the callback and 40P01 at commit are rollbacks: each gives the code back', async () => {
@@ -399,14 +736,15 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(await failedLogins(e.id)).toBe(0);
     });
 
-    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+    it('FU-BE-208, DL-37, FU-BE-214, FR-102: P2028 after the callback finished is the fixed 500 and keeps the mark; the challenge stays spent (401 on retry), the counter is unchanged', async () => {
       const e = await startedChallenge();
       const code = authenticator.generate(e.key);
       failAfterCallback();
-      await confirm(e.challenge, code).expect(503);
+      const res = await confirm(e.challenge, code).expect(500);
+      expect(res.headers['retry-after']).toBeUndefined();
       expect(await markCount(e.id)).toBe(1);
-      await confirm(e.challenge, code).expect(400);
-      expect(await failedLogins(e.id)).toBe(1);
+      await confirm(e.challenge, code).expect(401);
+      expect(await failedLogins(e.id)).toBe(1); // the kept reservation (FU-BE-220)
     });
 
     it('FU-BE-208, FR-102: wrong codes still count and lock at 5', async () => {
@@ -442,6 +780,17 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(await failedLogins(d.id)).toBe(0);
     });
 
+    it('FU-BE-208, DL-37, FR-102: P2034 at COMMIT on disable is a rollback: 503 BUSY and the same code then disables 2FA (204)', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      failAfterCallback(() => prismaCode('P2034'));
+      const res = await disable(d.token, code).expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      await disable(d.token, code).expect(204);
+      expect(await failedLogins(d.id)).toBe(0);
+    });
+
     it('FU-BE-208, DL-37, FR-102: a Redis outage while writing the token marker (our own 503 inside the transaction) is a clean rollback too', async () => {
       const d = await enrolled();
       const code = authenticator.generate(SECRET);
@@ -455,16 +804,62 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(await failedLogins(d.id)).toBe(0);
     });
 
-    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+    it.each(unknownCases)(
+      'FU-BE-208, FU-BE-219, DL-37, FR-102: %s with the commit landed is the fixed 500; 2FA is off, the mark is kept, no refund after it, and (token marker mocked) the retry is a 409',
+      async (_n, make) => {
+        const d = await enrolled();
+        const code = authenticator.generate(SECRET);
+        jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+        const refund = spyRefund();
+        commitThenFail(make);
+        expectFixed500(await disable(d.token, code));
+        // The password step and the pre-transaction refund; none after the unknown outcome.
+        expect(refund).toHaveBeenCalledTimes(2);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(
+          false,
+        );
+        expect(await markCount(d.id)).toBe(1);
+        expect(await failedLogins(d.id)).toBe(0);
+        // 2FA is already off: the retry is the existing 409, never a second disable.
+        await disable(d.token, code).expect(409);
+      },
+    );
+
+    it('FU-BE-208, FU-BE-219, DL-37, FR-102: with the REAL token marker, a landed disable ends the caller token: the retry is 401 (the real web flow)', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      commitThenFail(p2028);
+      expectFixed500(await disable(d.token, code));
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(
+        false,
+      );
+      await disable(d.token, code).expect(401);
+    });
+
+    it('FU-BE-208, FU-BE-219, DL-37, FR-102: P2028 at COMMIT with nothing committed is the same fixed 500; 2FA stays on, the mark is kept, and the retry is a counted replay (403)', async () => {
       const d = await enrolled();
       const code = authenticator.generate(SECRET);
       jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
       failAfterCallback();
-      await disable(d.token, code).expect(503);
+      expectFixed500(await disable(d.token, code));
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(true);
       expect(await markCount(d.id)).toBe(1);
       await disable(d.token, code).expect(403);
       expect(await failedLogins(d.id)).toBe(1);
     });
+
+    it.each(rollbackCases)(
+      'FU-BE-208, FU-BE-219, DL-37, FR-102: %s at commit on disable stays 503 BUSY and the same code then disables 2FA (204)',
+      async (_n, make) => {
+        const d = await enrolled();
+        const code = authenticator.generate(SECRET);
+        jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+        failAfterCallback(make);
+        const res = await disable(d.token, code).expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        await disable(d.token, code).expect(204);
+      },
+    );
 
     it('FU-BE-208, DL-37, FR-102: P2028 INSIDE the callback and 40P01 at commit are rollbacks: each gives the code back', async () => {
       const d = await enrolled();
