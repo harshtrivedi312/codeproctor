@@ -12,6 +12,7 @@ import type { Env } from './config/env';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CandidateModule } from './candidate/candidate.module';
+import { ProctorEventsModule } from './proctor-events/proctor-events.module';
 import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
 import { TestsModule } from './tests/tests.module';
@@ -123,6 +124,7 @@ function areaOf(context: ExecutionContext): Area {
     AuditModule,
     AuthModule,
     CandidateModule,
+    ProctorEventsModule,
     UsersModule,
     OrgSettingsModule,
     TestsModule,
