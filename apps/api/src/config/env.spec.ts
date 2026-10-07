@@ -1,6 +1,8 @@
 import { validateEnv } from './env';
 
 const valid = {
+  // APP_ENV has no default (DL-55, FU-BE-224): every fixture sets it.
+  APP_ENV: 'development',
   DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
   REDIS_URL: 'redis://127.0.0.1:6379',
   WEB_ORIGIN: 'http://localhost:3000',
@@ -519,6 +521,103 @@ describe('FU-BE-194 database pool settings', () => {
         validateEnv({ ...valid, ...ph, APP_ENV, SESSION_KEY_ENC_KEY_k1: sessionKey }),
       ).not.toThrow();
     });
+  });
+});
+
+describe('DL-55 FU-BE-224 NFR-04 APP_ENV is required, with no default', () => {
+  const { APP_ENV: _unused, ...withoutAppEnv } = valid;
+  void _unused;
+  const good = {
+    ...withoutAppEnv,
+    JWT_CANDIDATE_SECRET: 'c'.repeat(40),
+    OTP_PEPPER: 'd'.repeat(40),
+    SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
+  };
+
+  it('DL-55 FU-BE-224: an unset APP_ENV refuses to boot and the message names APP_ENV', () => {
+    expect(() => validateEnv(good)).toThrow(/APP_ENV/);
+    expect(() => validateEnv({ ...good, APP_ENV: undefined })).toThrow(/APP_ENV/);
+  });
+
+  it.each(['', 'prod', 'Production', 'dev', 'PRODUCTION', ' production', 'production ', 'live'])(
+    'DL-55 FU-BE-224: APP_ENV %j refuses to boot, names APP_ENV and does not echo the value',
+    (APP_ENV) => {
+      let message = '';
+      try {
+        validateEnv({ ...good, APP_ENV });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message).toMatch(/APP_ENV/);
+      // The fixed list of allowed values is the only place a value may appear; the received one is not.
+      const rest = message.replace('development, test, staging, pilot, production', '');
+      if (APP_ENV !== '') expect(rest).not.toContain(APP_ENV);
+    },
+  );
+
+  it('DL-55 FU-BE-224: the error message echoes no secret value', () => {
+    let message = '';
+    try {
+      validateEnv({ ...good, APP_ENV: 'prod' });
+    } catch (e) {
+      message = String(e);
+    }
+    expect(message).toMatch(/APP_ENV/);
+    for (const v of [
+      good.JWT_ACCESS_SECRET,
+      good.COOKIE_SECRET,
+      good.ENCRYPTION_KEY,
+      good.OTP_PEPPER,
+      good.SESSION_KEY_ENC_KEY_k1,
+      good.DATABASE_URL,
+    ]) {
+      expect(message).not.toContain(v);
+    }
+  });
+
+  it('DL-55 FU-BE-224: an unset, empty or misspelled APP_ENV still reports placeholder secrets (fails closed)', () => {
+    const ph = { OTP_PEPPER: 'change-me-local-otp-pepper-0000000000000' };
+    for (const APP_ENV of [undefined, '', 'prod', 'Production']) {
+      expect(() => validateEnv({ ...good, ...ph, APP_ENV })).toThrow(/APP_ENV/);
+      expect(() =>
+        validateEnv({
+          ...good,
+          APP_ENV,
+          SESSION_KEY_ENC_KEY_k1: Buffer.from('change-me-local-session-key-0001').toString(
+            'base64',
+          ),
+        }),
+      ).toThrow(/SESSION_KEY_ENC_KEY_k1/);
+    }
+  });
+
+  it.each(['development', 'test', 'staging', 'pilot', 'production'])(
+    'DL-55 FU-BE-224: APP_ENV=%s boots with the rest of a valid environment',
+    (APP_ENV) => {
+      expect(validateEnv({ ...good, APP_ENV, ...liveExtras(APP_ENV) }).APP_ENV).toBe(APP_ENV);
+    },
+  );
+
+  it.each(['development', 'test', 'production'])(
+    'DL-55 FU-BE-224: NODE_ENV=%s never relaxes a pilot or production APP_ENV',
+    (NODE_ENV) => {
+      for (const APP_ENV of ['pilot', 'production']) {
+        const base = { ...good, APP_ENV, NODE_ENV, ...liveExtras(APP_ENV) };
+        expect(() => validateEnv(base)).not.toThrow();
+        // The live-only guards still apply: no wrapping key, http origin, API docs on.
+        expect(() => validateEnv({ ...base, SESSION_KEY_ENC_KEY_k1: undefined })).toThrow(
+          /SESSION_KEY_ENC_KEY_k1/,
+        );
+        expect(() => validateEnv({ ...base, WEB_ORIGIN: 'http://app.example.com' })).toThrow(
+          /WEB_ORIGIN/,
+        );
+        expect(() => validateEnv({ ...base, ENABLE_API_DOCS: 'true' })).toThrow(/ENABLE_API_DOCS/);
+      }
+    },
+  );
+
+  it('DL-55 FU-BE-224: NODE_ENV stays optional (APP_ENV is the single authority)', () => {
+    expect(validateEnv({ ...good, APP_ENV: 'development' }).NODE_ENV).toBe('development');
   });
 });
 

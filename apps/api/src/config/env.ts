@@ -40,10 +40,14 @@ function emptyAsUnset<T extends z.ZodType>(schema: T) {
 
 export const envSchema = z
   .object({
+    // NODE_ENV is a library hint only (it can add strictness, never remove it): APP_ENV is the one
+    // authority for what the deployment is (DL-55). It stays optional because no guard needs it.
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-    APP_ENV: z
-      .enum(['development', 'test', 'staging', 'pilot', 'production'])
-      .default('development'),
+    // Required, no default (DL-55, FU-BE-224, NFR-04): an unset, empty or misspelled value refuses
+    // to boot, so a forgotten APP_ENV cannot make a shared deployment behave like development.
+    APP_ENV: z.enum(['development', 'test', 'staging', 'pilot', 'production'], {
+      error: 'is required and must be one of development, test, staging, pilot, production',
+    }),
     API_PORT: port.default(4000),
     DATABASE_URL: z.string().min(1),
     REDIS_URL: z.string().min(1),
@@ -402,8 +406,9 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     const problems = result.error.issues.map(
       (i) => `${i.path.join('.') || '(root)'}: ${i.message}`,
     );
-    // An invalid APP_ENV is not local, so it is shared; an unset one takes the schema default.
-    const appEnv = typeof raw['APP_ENV'] === 'string' ? raw['APP_ENV'] : 'development';
+    // Fails closed (DL-55, FU-BE-224): an unset, empty or misspelled APP_ENV is not a local value,
+    // so it counts as shared and the placeholder checks still run before this throws.
+    const appEnv = typeof raw['APP_ENV'] === 'string' ? raw['APP_ENV'] : undefined;
     const nodeEnv = typeof raw['NODE_ENV'] === 'string' ? raw['NODE_ENV'] : undefined;
     if (isSharedEnv({ APP_ENV: appEnv, NODE_ENV: nodeEnv })) {
       for (const name of placeholderSessionKeys(raw))
@@ -415,8 +420,7 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   // list it. Pilot and production must not start without a valid one: without it every test start
   // would fail at the candidate's first click (ADR 0013 section 2). Names only, never values.
   const env = result.data;
-  // The parsed APP_ENV is never undefined: an unset one defaults to development, which is local,
-  // so an unset APP_ENV does NOT fail closed here (FU-BE-224).
+  // The parsed APP_ENV is always one of the five values (it has no default, DL-55).
   if (isSharedEnv(env)) {
     // Every configured wrapping key, not only the active kid: an old kid is still used to unwrap.
     const bad = placeholderSessionKeys(raw);

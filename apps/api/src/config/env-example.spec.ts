@@ -85,10 +85,12 @@ describe('.env.example (DL-52, NFR-04)', () => {
     },
   );
 
-  it('DL-52 an unset APP_ENV takes the schema default (development) and is local', () => {
+  it('DL-55 FU-BE-224 the template sets APP_ENV and an unset one refuses to boot (no default)', () => {
+    expect(active['APP_ENV']).toBe('development');
+    expect(requiredNames()).toContain('APP_ENV');
     const { APP_ENV: _unused, ...rest } = active;
     void _unused;
-    expect(() => validateEnv(rest)).not.toThrow();
+    expect(() => validateEnv(rest)).toThrow(/APP_ENV/);
     expect(isSharedEnv({ APP_ENV: 'prod' })).toBe(true);
     expect(isSharedEnv({ APP_ENV: 'development', NODE_ENV: 'production' })).toBe(true);
   });
