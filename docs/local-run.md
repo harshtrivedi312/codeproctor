@@ -163,8 +163,8 @@ node infra/scripts/demo-invite.mjs
 ```
 
 It prints the candidate's email and the link (`http://localhost:3000/t/<token>`). Run it again for a
-new link; the old one stops working. The link opens the gate page ("Demo Corp"). Asking for the
-email code then fails with "The code could not be sent": see section 7.
+new link; the old one stops working. The link opens the gate page ("Demo Corp"). Ask for the email code on that page, then read it in
+Mailpit at <http://localhost:8025>.
 
 ## Your camera, your microphone, your data
 
@@ -200,7 +200,7 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | Invite candidates, live view, review, reports         | **Not on `main` yet** in the API (no routes). Mock mode shows the screens.                              |
 | Candidate link opens the gate                         | Works after `demo-invite.mjs`.                                                                          |
 | Mailpit (the inbox) in the stack                      | Works: the stack starts it and a test email sent to port 1025 shows in <http://localhost:8025> (checked). |
-| Candidate one-time email code                         | **Not working yet on `main`**: the API has the `smtp-dev` adapter and `local-env.mjs` now switches it on (`EMAIL_PROVIDER=smtp-dev`, allowed only with `APP_ENV=development`), but the candidate module is not bound to a mail provider: the send answers 503 `MAIL_UNAVAILABLE` and the log says `UnboundCandidateMailPort ... template otp not sent` (checked 2026-10-07). **Lands with Backend A's mail binding PR.** |
+| Candidate one-time email code                         | **Works (#305 is on `main`)**: with `EMAIL_PROVIDER=smtp-dev` (which `local-env.mjs` writes), asking for the code sends the mail to Mailpit (<http://localhost:8025>), and the code from that mail opens the session (checked 2026-10-07: link, code sent, code accepted, session `OPENED`). |
 | MinIO (the object store) in the stack                 | Works: the two buckets exist at start, an upload and a listing through the S3 API work, and a browser preflight from `http://localhost:3000` is allowed while any other origin is not (checked). |
 | File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log still shows a few `Job consent-pdf failed` lines; the job also emails the consent copy, which needs the candidate mail binding (above). Browser uploads from the candidate screens are not exercised here. |
 | Running candidate code                                | The API accepts `JUDGE0_MODE=stub` and `local-env.mjs` switches it on (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
@@ -211,8 +211,8 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 
 These are tracked in the delivery plan; this guide changes as each lands.
 
-- **Mail**: Mailpit is in the stack and the API has the `smtp-dev` adapter. The candidate module still has to
-  be bound to it (Backend A); then the candidate code shows in Mailpit's web page.
+- **Mail**: done: Mailpit is in the stack, the API has the `smtp-dev` adapter and the candidate module is
+  bound to it (#305); the candidate code shows in Mailpit's web page.
 - **Object store**: MinIO is in the stack and #119 (BE-09) binds the API to it (done).
 - **Code execution**: Backend A's local stub. Real Judge0 (`infra/judge0`) needs Linux x86, privileged
   containers and cgroup v1, so it is not validated on macOS or Apple Silicon and its isolation is not
