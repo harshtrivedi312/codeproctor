@@ -118,8 +118,15 @@ export const CALL_SITES: CallSiteList = {
   // SessionJobProcessor base class detaches, enters runAsSessionJob and opens the single write
   // transaction (guardLive first). Pinned as the only caller by session/session-job-writers.spec.ts.
   'session/session-job.processor.ts': {
-    names: ['detachForSessionJob'],
-    why: 'SessionJobProcessor base class: the only code that detaches into a session-job scope (withLiveSession, withAnySession)',
+    names: ['detachForSessionJob', 'guardLive', 'lockAnySession'],
+    why: 'SessionJobProcessor base class: the only code that detaches into a session-job scope; withLiveSession calls guardLive first, withAnySession calls lockAnySession first (this.state wrappers)',
+  },
+  // BE-07 (FU-BEB-111, the #208 flip). SessionStateService imports the three cores under aliases and
+  // exposes thin wrappers; its one STAFF method proctorResume calls guardLive. The only importer of
+  // database/session-locks (import-guard.spec.ts).
+  'session/session-state.service.ts': {
+    names: ['guardLive', 'lockAnySession', 'lockForAccommodation'],
+    why: 'the wrappers of the three locks: guardLive is called by the STAFF method proctorResume, lockAnySession by SessionJobProcessor.withAnySession, lockForAccommodation by the accommodation writer (PATCH, redact-note, video-check PUT) through the wrapper',
   },
 };
 
@@ -217,13 +224,14 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(findStaleEntries(files, CALL_SITES)).toEqual([]);
   });
 
-  it('TC-008 the list holds the three database files (the two private entries and the lock core), the BE-07 guard path (candidate/candidate-scope.ts) and the session-job base class (session/session-job.processor.ts), and nothing else', () => {
+  it('TC-008 the list holds the three database files (the two private entries and the lock core), the BE-07 guard path (candidate/candidate-scope.ts) the session-job base class (session/session-job.processor.ts) and SessionStateService (session/session-state.service.ts), and nothing else', () => {
     expect(Object.keys(CALL_SITES).sort()).toEqual([
       'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
       'database/org-context.ts',
       'database/session-locks.ts',
       'session/session-job.processor.ts',
+      'session/session-state.service.ts',
     ]);
     // The only file that may use the three locks is the one that defines them.
     expect(CALL_SITES['database/session-locks.ts']?.names).toEqual([
@@ -231,13 +239,22 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
       'lockForAccommodation',
       'lockAnySession',
     ]);
+    // Outside the core, a lock is listed only for the two session files (lockCallSiteProblems pins the shape).
+    const lockFiles = [
+      'database/session-locks.ts',
+      'session/session-job.processor.ts',
+      'session/session-state.service.ts',
+    ];
     for (const [path, entry] of Object.entries(CALL_SITES)) {
-      if (path !== 'database/session-locks.ts') {
+      if (!lockFiles.includes(path)) {
         expect(entry.names).not.toContain('guardLive');
         expect(entry.names).not.toContain('lockForAccommodation');
         expect(entry.names).not.toContain('lockAnySession');
       }
     }
+    expect(CALL_SITES['session/session-job.processor.ts']?.names).not.toContain(
+      'lockForAccommodation',
+    );
     // The grant sites are not allowed anywhere yet: no entry names one.
     expect(Object.values(CALL_SITES).some((entry) => entry.sites !== undefined)).toBe(false);
   });
@@ -275,13 +292,18 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     }
   });
 
-  it('TC-008 the three session locks are used in database/session-locks.ts only, in no other database file either', () => {
+  it('TC-008 the three session locks are used in database/session-locks.ts in the database folder, and outside it only by the two listed session files', () => {
     const using = files
       .filter(
         (f) => usesOf(f.text, ['guardLive', 'lockForAccommodation', 'lockAnySession']).length > 0,
       )
       .map((f) => f.path);
-    expect(using).toEqual(['database/session-locks.ts']);
+    expect(using).toEqual([
+      'database/session-locks.ts',
+      'session/session-job.processor.ts',
+      'session/session-state.service.ts',
+    ]);
+    expect(using.filter((p) => p.startsWith('database/'))).toEqual(['database/session-locks.ts']);
   });
 
   it('TC-008 the candidate-facts module is imported only by the database module (side effect) and, with BE-07, the guard', () => {
@@ -291,8 +313,10 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     ]);
   });
 
-  it('TC-008 S2: the session-locks module has no importer yet, in any of the six source extensions (the import guard allows only SessionStateService, when Backend B adds it)', () => {
-    expect(importersOf(files, 'database/session-locks')).toEqual([]);
+  it('TC-008 S2: the session-locks module has one importer, SessionStateService, in any of the six source extensions (the import guard allows only that file)', () => {
+    expect(importersOf(files, 'database/session-locks')).toEqual([
+      'session/session-state.service.ts',
+    ]);
     // The scan reads all six extensions: a .mts or .cjs importer would be in `files` and found.
     expect(files.length).toBeGreaterThan(20);
   });

@@ -79,7 +79,7 @@ export const RULES: readonly GuardRule[] = [
       'and all three refuse a CANDIDATE scope and system scope; a STAFF or SERVICE call under the ' +
       'SessionStateService grant is fine (ADR 0015 section 6, ADR 0013 section 5.7). That entry in `allowed` is ' +
       'the review point.',
-    allowed: [], // nobody outside database/ yet: Backend B adds exactly its SessionStateService file, nothing else
+    allowed: ['session/session-state.service.ts'], // exactly the SessionStateService file, nothing else (FU-BEB-111)
   },
   {
     name: 'PG_POOL',
@@ -481,9 +481,9 @@ describe('import guard: the session write locks have no importer yet (FU-DB-67, 
     locks = ruleNamed('database/session-locks');
   });
 
-  it('TC-008 the rule exists, names the module, and its allowlist is empty until Backend B adds its SessionStateService file', () => {
+  it('TC-008 the rule exists, names the module, and its allowlist is exactly the SessionStateService file (FU-BEB-111)', () => {
     expect(locks.module).toBe('database/session-locks');
-    expect(locks.allowed).toEqual([]);
+    expect(locks.allowed).toEqual(['session/session-state.service.ts']);
     // The reason is the review point: it says who adds what, in which pull request, and who must not.
     expect(locks.why).toContain('ONLY the SessionStateService file imports this module');
     expect(locks.why).toContain('exactly that file');
