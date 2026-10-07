@@ -94,7 +94,7 @@ docker run --rm -v "$PWD/packages/qa/k6:/k6" -v /absolute/path/to:/seed:ro -w /k
   run -e API_BASE_URL=https://<staging-host>/api/v1 -e ALLOWED_HOSTS=<staging-host> -e SESSIONS_FILE=/seed/sessions.json tc-090-load.js
 ```
 
-Use `SESSIONS_JSON` instead of `SESSIONS_FILE` when the list comes from a CI secret. Never put either value on the command line in a shared shell (history); export it as an environment variable.
+Use `SESSIONS_JSON` instead of `SESSIONS_FILE` when the list comes from the runner's own secret store (C-63: not a GitHub secret). Never put either value on the command line in a shared shell (history); export it as an environment variable.
 
 | Variable                                 | Default                                   | Meaning                                                                                                                                                                                           |
 | ---------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -148,12 +148,16 @@ Code runs run inline in the candidate's tick (the VU is blocked while Judge0 ans
 
 Result of the last check (2026-10-05, k6 from the pinned image, 60 candidates against the mock): all thresholds passed, zero 429s, about 1.43 API requests per second per candidate-second (5,819 API requests over an average of 54 active candidates across the 75 s run, 77 per second), slightly above the 1.4 estimate because it includes one proctor-key call per user and runs every 60 s (0.017 per second). TC-090 now fails if the achieved rate falls under 90 percent of the expected average. The mock binds to 127.0.0.1 by default (`MOCK_HOST` overrides); `host.docker.internal` reached it from Docker Desktop on macOS in this check. On Linux Docker, set `MOCK_HOST=0.0.0.0` only on a trusted network, or run k6 with `--network host`. `k6 inspect` accepts both scripts.
 
-## CI (hub changes, not made here)
+## CI (C-63)
 
-This folder does not edit `.github/**`. The exact workflow diff was sent to the architecture hub. In short: the job `k6` in `.github/workflows/qa.yml` runs `packages/qa/k6/<script>` through `run - < file` on stdin, which cannot import `lib/*.js`, and passes `CANDIDATE_TOKENS`. To use these scripts the workflow needs:
+No CI job runs these scripts: the owner decided (C-63) on no GitHub environments and no Actions secrets, so the `k6` job and its dispatch options were removed from `.github/workflows/qa.yml`. TC-090, TC-091 and TC-105 run from the k6 runner instance in the pilot setup (ADR 0017), started by the owner, with the seeded sessions and the test mailbox (C-57) kept inside AWS. Run command (the runner pulls the image by digest; bump it deliberately):
 
-1. Mount the folder instead of stdin, and pass the secret by name so it never appears in argv or `ps`:
-   `docker run --rm -e SESSIONS_JSON -v "$PWD/packages/qa/k6:/k6" -w /k6 ... run -e API_BASE_URL="$TARGET/api/v1" -e ALLOWED_HOSTS="$TARGET_HOST" tc-090-load.js`, with `SESSIONS_JSON: ${{ secrets.K6_SESSIONS_JSON }}` in the step `env:`. `-e SESSIONS_JSON` with no value makes Docker copy it from the step environment; k6 reads it from its own environment (do not give it as `k6 run -e SESSIONS_JSON=...`).
-2. `K6_SESSIONS_JSON` (the JSON list above) replaces the secret `K6_CANDIDATE_TOKENS` in the `staging` environment.
-3. Keep the `QA_STAGING_HOSTS` allow-list step; derive `API_BASE_URL` and `ALLOWED_HOSTS` from the already-validated target.
-4. Upload the k6 summary (`--summary-export`) as an artefact so the result report for BE-15B and the matrix has numbers. Do not upload the raw k6 log unless it went through `sed -E 's#https?://[^" ]*#<url-redacted>#g'` (section "Logs and outputs").
+```sh
+docker run --rm -e SESSIONS_JSON -v "$PWD/packages/qa/k6:/k6:ro" -v "$PWD/k6-out:/out:rw" -w /k6 \
+  -e ALLOWED_HOSTS="$TARGET_HOST" \
+  grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
+  run -e API_BASE_URL="https://$TARGET_HOST/api/v1" --summary-export=/out/summary.json tc-090-load.js 2>&1 \
+  | sed -E 's#https?://[^" ]*#<url-redacted>#g'
+```
+
+`-e SESSIONS_JSON` with no value makes Docker copy it from the shell environment (never on the command line). Do not keep the raw k6 log unless it went through the `sed` redaction above (section "Logs and outputs"); keep `summary.json`.
