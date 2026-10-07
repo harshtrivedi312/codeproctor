@@ -39,6 +39,7 @@ import {
 import type { RequestContext } from '../common/request-context';
 import { errorName } from '../common/request-context';
 import { isObject, lockContentionCode } from '../common/db-contention';
+import { OutcomeUnknownError } from '../common/outcome-unknown.error';
 import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
@@ -112,7 +113,7 @@ interface TxPhase {
  * True only when a failed transaction certainly rolled back (FU-BE-208, DL-37, api-contract
  * section 8): it never started (pool wait, contention on BEGIN), or a lock-contention error hit
  * before the callback finished (55P03, 40P01, 40001, P2034, and P2028 inside the callback, which
- * is a rollback), or the commit itself failed with 40001 or 40P01 (a serialization failure or
+ * is a rollback), or the commit itself failed with 40001, 40P01 or P2034 (a serialization failure or
  * deadlock at COMMIT is a rollback). Anything else after the callback finished (P2028, P1017, a
  * connection error at COMMIT) is an unknown outcome. `extra` adds callback-body failures the
  * caller knows are rollbacks too (a refusal thrown by our own code before the callback finished).
@@ -120,7 +121,7 @@ interface TxPhase {
 function isCleanRollback(phase: TxPhase, e: unknown, extra?: (e: unknown) => boolean): boolean {
   if (!phase.started) return true;
   const code = lockContentionCode(e);
-  if (phase.finished) return code === '40001' || code === '40P01';
+  if (phase.finished) return code === '40001' || code === '40P01' || code === 'P2034';
   return code !== undefined || (extra?.(e) ?? false);
 }
 
@@ -579,10 +580,20 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       });
       return { session, recoveryCodes: codes };
     } catch (e) {
-      // FU-BE-208: after a clean rollback the same code must work again (the 503 invites a retry).
+      // FU-BE-208: ONE classification. A clean rollback releases the mark (the 503 invites a
+      // retry with the same code). After the callback returned, anything that is not a rollback
+      // may have committed: the mark stays and the challenge stays spent (OutcomeUnknownError is
+      // not retryable, so withChallengeUse keeps its key), and the client learns nothing about
+      // whether 2FA is on, no recovery codes and no session.
+      const unknownOutcome = phase.started && phase.finished && !isCleanRollback(phase, e);
       if (isCleanRollback(phase, e)) await releaseMark(mark);
-      // The code was right, so the reservation is not a failed guess.
+      // The code was right, so the reservation is not a failed guess (FU-BE-192).
       await this.refundAttempt(user).catch(() => undefined);
+      if (unknownOutcome) {
+        throw new OutcomeUnknownError(
+          openSession ? 'auth.2fa.enroll.confirm' : 'auth.2fa.setup.confirm',
+        );
+      }
       if (e instanceof AlreadyEnrolledSignal) {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
