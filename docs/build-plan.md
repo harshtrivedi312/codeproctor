@@ -373,7 +373,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - **Changed 2026-10-07 by C-63:** the nightly staging backup workflow (`.github/workflows/backup-nightly.yml`), its `staging` GitHub environment and its secrets are removed. Staging holds synthetic data only and is rebuilt from seed. `backup.sh` and `restore.sh` stay for the pilot (versioned mode, C-55), run on the pilot host and its daily wake, not from GitHub. Removing the workflow and the runbook's staging-backup section: Database B, with the hub as gate reviewer (rule 12).
 - Owner: db-engineer. Branch: `db/step-7`. Depends on: DB-03. Parallel with: DB-04, DB-05.
 - Covers: NFR-03 (recoverability), BO-6. TCs: none.
-- Deliverables: `infra/scripts/backup.sh` (pg_dump custom format, gzip, upload through the S3-compatible interface to the backup bucket from env (R2 on staging, AWS S3 on pilot and production), prune backups older than 14 days), `infra/scripts/restore.sh`, ~~scheduled nightly GitHub Actions workflow using repository secrets~~ (removed by C-63; pilot backups run on the pilot host). A local `restore.sh` run starts with the localhost guard (`node infra/scripts/assert-local-db.mjs`). Staging and pilot backups and restores run only in GitHub Actions or on the server, where their credentials live (D-38).
+- Deliverables: `infra/scripts/backup.sh` (pg_dump custom format, gzip, upload through the S3-compatible interface to the backup bucket from env (R2 on staging, AWS S3 on pilot and production), prune backups older than 14 days), `infra/scripts/restore.sh`, ~~scheduled nightly GitHub Actions workflow using repository secrets~~ (removed by C-63; pilot backups run on the pilot host). A local `restore.sh` run starts with the localhost guard (`node infra/scripts/assert-local-db.mjs`). Staging and pilot backups and restores run only on the pilot server (C-63), where their credentials live (D-38).
 - Done when: local backup then restore into a new database with matching row counts.
 
 #### DB-08: Database verification
@@ -605,13 +605,16 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: checklist delivered to the human.
 
 #### DEP-03: Pilot stack
-- **Changed 2026-10-07 by C-56, C-57, C-62 and C-63 (docs/compliance/decisions.md):**
+- **Changed 2026-10-07 by C-56, C-57, C-63 and C-64 (docs/compliance/decisions.md; C-62 is superseded by C-63):**
   - **Infrastructure:** CloudFormation only for the one-time GitHub OIDC template the owner uploads. Everything else is Terraform in `infra/terraform/pilot/` (DL-47), applied by the owner in AWS CloudShell from reviewed code on main, with state in an encrypted S3 bucket with locking. No Terraform role is usable from GitHub (C-63 replaces C-62's workflow).
   - **OIDC:** the trust policy accepts only `repo:harshtrivedi312/codeproctor:ref:refs/heads/main`, with no environment conditions, so branches never get AWS access. The deploy role builds and uploads releases only.
   - **Release approval:** the instance installs only the release the owner has approved in an SSM Parameter Store standard parameter, set in the AWS console with MFA. The deploy role and every instance role can read it but never write it. The Delivery Lead's recommendation to the architect: the parameter names an immutable release (the git SHA plus the image digest).
   - **Network:** same AWS account (C-56). 443 only on the app host. Judge0 has no public inbound and is reachable only from the app host. No SSH; Session Manager only. TLS by DNS validation in the assess zone, so no port 80. The instance role may write only its `_acme-challenge` TXT and API A records, and every other hosted zone is denied.
   - **Load-test mailbox (C-57):** one dedicated test-only address, delivered into its own locked-down S3 bucket that's emptied after each run and readable only by the seeder.
   - **No GitHub Actions secrets** are needed (C-63 item 5).
+  - **CloudShell code (C-64):** the owner downloads the reviewed commit's ZIP by SHA in the browser, uploads it to CloudShell and verifies the SHA. No GitHub credential is ever in CloudShell.
+  - **Release notice (C-64):** the run summary and the new-release email show the paste-ready parameter value, the PRs and commits since the last approved release, and each one's review-clean and CI confirmation. The owner approves only releases reported clean.
+  - **Load-test instance (C-64):** created only for the test, deleted immediately after, nothing left running, cost confirmed (cents).
   - **Delivery (Backend A):** #239 is narrowed to the OIDC template. A Terraform PR carries the data stack, the roles, the security groups and the mailbox. Then come the release workflow and the instance's release-install step, and the owner's runbook for CloudShell and release approval.
 - **Redefined 2026-10-06 by C-43 to C-48 (docs/compliance/decisions.md); the layout goes into ADR 0017 (hub, owner approves). Budget about $12 a month.**
   - **Hosts:** one m7i.large x86 app host (API, worker, Postgres and Redis in Docker Compose; EBS on the default key) and a separate small Judge0 instance with no app secrets and no network path to Postgres, Redis or S3 (C-45). No RDS, NAT gateway, load balancer or Elastic IP.
