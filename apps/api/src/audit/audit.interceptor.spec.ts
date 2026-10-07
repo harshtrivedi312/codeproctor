@@ -29,6 +29,8 @@ class ProbeController {
     if (id === 'missing') throw new NotFoundException();
     // A lock timeout raised by the handler itself, before anything committed.
     if (id === 'locked') throw Object.assign(new Error('lock wait'), { code: '55P03' });
+    // A pool-wait timeout raised by the handler itself, before anything committed (FU-BE-197).
+    if (id === 'pooled') throw new Error('timeout exceeded when trying to connect');
     return { id, secretRecording: 'candidate data' };
   }
 
@@ -186,6 +188,41 @@ describe('AuditInterceptor (FR-105, TC-006)', () => {
       expect(created).toHaveLength(0);
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  // No TC id covers DL-42; FR-105, NFR-09 and the decision id name these.
+  it('FU-BE-197, DL-42, FR-105: a pool-wait timeout from the post-handler audit write is the fixed 500 (no BUSY, no Retry-After), not 503', async () => {
+    failWrite = new Error('timeout exceeded when trying to connect');
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/probe/sessions/abc')
+        .set('x-user', 'yes')
+        .expect(500);
+      expect(res.headers['retry-after']).toBeUndefined();
+      const body = res.body as Record<string, unknown>;
+      expect(body.code).toBeUndefined();
+      expect(body.detail).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain('candidate data');
+      expect(JSON.stringify(error.mock.calls)).not.toContain('timeout exceeded');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('FU-BE-197, DL-42, NFR-09: a pool-wait timeout from the handler itself is 503 BUSY with Retry-After 2 and no audit row', async () => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      const res = await request(app.getHttpServer())
+        .get('/probe/sessions/pooled')
+        .set('x-user', 'yes')
+        .expect(503);
+      expect(res.headers['retry-after']).toBe('2');
+      expect((res.body as Record<string, unknown>).code).toBe('BUSY');
+      expect(created).toHaveLength(0);
+    } finally {
+      error.mockRestore();
     }
   });
 });
