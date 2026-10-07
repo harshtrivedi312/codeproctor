@@ -867,6 +867,91 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/review/queue': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** REAL. Sessions awaiting or under review, oldest first (review_queue:read). Default filter GRADED + UNDER_REVIEW. */
+    get: operations['listReviewQueue'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/review/sessions/{sessionId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** REAL. The review bundle of one session (review_session:read). */
+    get: operations['getReviewSession'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/review/sessions/{sessionId}/recordings/{recordingId}/playback': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** REAL. A presigned GET for one recording, valid 900 s (review_session:read). */
+    get: operations['getReviewPlayback'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/review/sessions/{sessionId}/answers/{sessionQuestionId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Manual scoring of a short answer (review_verdict:set, docs/api-contract.md section 7). */
+    patch: operations['scoreReviewAnswer'];
+    trace?: never;
+  };
+  '/v1/review/sessions/{sessionId}/verdict': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED. */
+    post: operations['setReviewVerdict'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -991,7 +1076,7 @@ export interface components {
       language: components['schemas']['Language'];
       testCaseId: string | null;
       position: number | null;
-      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value it does not know. */
+      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE, LOCAL_STUB (a run on the local execution stub, not real execution). A client must cope with a value it does not know. */
       verdict: string;
       /** @description Only for a visible (sample) slot, never a hidden one */
       actualOutput?: string;
@@ -1546,8 +1631,7 @@ export interface components {
     SampleTestResult: {
       id: string;
       name: string;
-      /** @enum {string} */
-      status: 'passed' | 'failed';
+      status: string;
       input?: string;
       expectedOutput?: string;
       actualOutput?: string;
@@ -1675,6 +1759,125 @@ export interface components {
         /** @enum {string|null} */
         waitingFor?: 'review' | 'appeal' | null;
       };
+    };
+    ReviewQueue: {
+      items: {
+        sessionId: string;
+        candidateName: string;
+        candidateEmail: string;
+        testTitle: string;
+        status: components['schemas']['SessionStatus'];
+        /** Format: date-time */
+        submittedAt: string | null;
+        riskScore: number | null;
+        flagCount: number;
+        pendingManualCount: number;
+      }[];
+      nextCursor: string | null;
+    };
+    ReviewRunResult: {
+      /** Format: date-time */
+      at: string;
+      passed: number;
+      total: number;
+      tests: {
+        name: string;
+        /** @description Free string. Stored verdicts are uppercase: PASSED, FAILED, TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB; the API maps a missing one to PASSED, FAILED or UNKNOWN. */
+        status: string;
+      }[];
+    };
+    ReviewAnswer: {
+      sessionQuestionId: string;
+      /** @enum {string} */
+      type: 'CODING' | 'MCQ' | 'SHORT_ANSWER';
+      title: string;
+      /** @description Markdown source */
+      statement: string;
+      points: number;
+      score: number | null;
+      /** @enum {string} */
+      scoring: 'AUTO' | 'MANUAL' | 'MANUAL_PENDING';
+      scoringNote: string | null;
+      /** @description CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored jsonb value (MCQ option ids, or the short-answer text) or null. The web copes with any JSON value. */
+      answer: unknown;
+      runResults?: components['schemas']['ReviewRunResult'][];
+    };
+    ReviewEvent: {
+      id: string;
+      /** Format: date-time */
+      at: string;
+      /** @description The stored type string; may be unknown to the web */
+      type: string;
+      /** @enum {string} */
+      severity: 'LOW' | 'MEDIUM' | 'HIGH';
+      detail: string | null;
+      flagId: string | null;
+    };
+    ReviewRecording: {
+      /** @description KIND-SEGMENT, e.g. SCREEN-0 */
+      id: string;
+      /** @enum {string} */
+      kind: 'SCREEN' | 'WEBCAM' | 'AUDIO';
+      /** Format: date-time */
+      startedAt: string;
+      durationMs: number;
+    };
+    /** @description The session review row; all three are null until a verdict is set. */
+    ReviewVerdict: {
+      /** @enum {string|null} */
+      verdict: 'CLEAN' | 'SUSPICIOUS' | 'VIOLATION' | null;
+      notes: string | null;
+      /** Format: date-time */
+      completedAt: string | null;
+    };
+    ReviewSession: {
+      session: {
+        id: string;
+        status: components['schemas']['SessionStatus'];
+        /** Format: date-time */
+        startedAt: string | null;
+        /** Format: date-time */
+        submittedAt: string | null;
+        totalScore: number | null;
+        riskScore: number | null;
+      };
+      candidate: {
+        name: string;
+        email: string;
+      };
+      test: {
+        title: string;
+      };
+      answers: components['schemas']['ReviewAnswer'][];
+      events: components['schemas']['ReviewEvent'][];
+      recordings: components['schemas']['ReviewRecording'][];
+      verdict: components['schemas']['ReviewVerdict'] | null;
+    };
+    /** @description url is the first part; play parts in seq order. Never cache or store. */
+    ReviewPlayback: {
+      url: string;
+      parts: {
+        url: string;
+        seq: number;
+        durationMs: number;
+      }[];
+      /** Format: date-time */
+      expiresAt: string;
+      contentType: string;
+    };
+    ScoreAnswer: {
+      correct: boolean;
+      note?: string;
+    };
+    ScoredAnswer: {
+      sessionQuestionId: string;
+      correct: boolean;
+      score: number;
+    };
+    SetVerdict: {
+      /** @enum {string} */
+      verdict: 'CLEAN' | 'SUSPICIOUS' | 'VIOLATION';
+      note?: string;
     };
   };
   responses: {
@@ -4290,6 +4493,227 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['Problem'];
+        };
+      };
+      503: components['responses']['Busy'];
+    };
+  };
+  listReviewQueue: {
+    parameters: {
+      query?: {
+        status?: components['schemas']['SessionStatus'];
+        cursor?: string;
+        pageSize?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ReviewQueue'];
+        };
+      };
+      /** @description Invalid status, cursor or page size */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      503: components['responses']['Busy'];
+    };
+  };
+  getReviewSession: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sessionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The review bundle */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ReviewSession'];
+        };
+      };
+      /** @description Not a UUID */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such session in your organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      503: components['responses']['Busy'];
+    };
+  };
+  getReviewPlayback: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sessionId: string;
+        recordingId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The signed URL or ordered parts. Never cache or store it. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ReviewPlayback'];
+        };
+      };
+      /** @description Not a UUID, or a recording id that is not KIND-SEGMENT (SCREEN-0) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such session or recording in your organisation */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Object storage is not configured yet (no code; calm message, no retry loop), or BUSY */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+    };
+  };
+  scoreReviewAnswer: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sessionId: string;
+        sessionQuestionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ScoreAnswer'];
+      };
+    };
+    responses: {
+      /** @description Decision stored */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ScoredAnswer'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such session or answer */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description code ANSWER_NOT_MANUAL, SESSION_NOT_UNDER_REVIEW or VERDICT_ALREADY_SET */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      503: components['responses']['Busy'];
+    };
+  };
+  setReviewVerdict: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sessionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['SetVerdict'];
+      };
+    };
+    responses: {
+      /** @description Verdict stored */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ReviewVerdict'];
+        };
+      };
+      403: components['responses']['Forbidden'];
+      /** @description No such session */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
+      /** @description Pending manual answers, or a verdict is already set */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
       503: components['responses']['Busy'];
