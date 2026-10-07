@@ -1150,6 +1150,26 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       }
     });
 
+    it('FR-101, DL-42, FU-BE-197: under pool exhaustion a wrong-password login answers the same for an existing and an unknown account', async () => {
+      const u = await createUser();
+      const comparable = (res: request.Response): unknown => {
+        const body = { ...(res.body as Record<string, unknown>), traceId: undefined };
+        const { 'retry-after': retryAfter, 'content-type': contentType } = res.headers;
+        return { status: res.status, body, retryAfter, contentType };
+      };
+      const seen: unknown[] = [];
+      for (const email of [u.email, `nobody-${Date.now()}@example.com`]) {
+        const fail = registerFailureSpy().mockRejectedValueOnce(poolError());
+        try {
+          seen.push(comparable(await login(email, 'not-the-password-at-all-1')));
+        } finally {
+          fail.mockRestore();
+        }
+      }
+      expect(seen[0]).toEqual(seen[1]);
+      expect(seen[0]).toMatchObject({ status: 503, retryAfter: '2', body: { code: 'BUSY' } });
+    });
+
     it('FR-101: a wrong password still counts as a failed attempt (never refunded)', async () => {
       const u = await createUser();
       await login(u.email, 'not-the-password-at-all-1').expect(401);

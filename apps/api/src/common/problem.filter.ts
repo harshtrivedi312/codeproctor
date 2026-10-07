@@ -126,7 +126,7 @@ export class ProblemFilter implements ExceptionFilter {
         lockCode,
       };
       if (lockCode === POOL_TIMEOUT_TOKEN) {
-        this.logger.error(fields, 'Database pool wait timed out');
+        this.logger.error({ ...fields, pool: 'prisma' }, 'Database pool wait timed out');
       } else if (lockCode === 'P2028') this.logger.error(fields, 'Database transaction error');
       else this.logger.warn(fields, 'Database lock contention');
       problem.detail = LOCK_CONTENTION_DETAIL;

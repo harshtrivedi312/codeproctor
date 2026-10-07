@@ -1,5 +1,6 @@
-// Database lock contention (DL-37, FU-BE-42): a lock wait that timed out, a deadlock, or a Prisma
-// transaction that timed out or lost a write conflict. All of them fail closed and are worth a
+// Database lock contention (DL-37, FU-BE-42) and pool exhaustion (DL-42, FU-BE-197): a lock wait
+// that timed out, a deadlock, a serialization failure, a Prisma transaction that timed out or lost a
+// write conflict, or a wait for a free pool connection that timed out. All of them fail closed and are worth a
 // retry, so ProblemFilter answers them with 503 and Retry-After on every route, never 409 or 500.
 //
 // The error reaches us in two shapes (both exist in this repo): Prisma's own known request error
@@ -33,7 +34,7 @@ export const POOL_TIMEOUT_TOKEN = 'POOL_TIMEOUT' as const;
 
 /**
  * What pg-pool throws when the wait for a free slot runs out. Observed on Prisma 7.10 with
- * @prisma/adapter-pg (pool-timeout-shape.spec.ts): a bare `Error` with this exact message and no
+ * @prisma/adapter-pg (database/pool-timeout.spec.ts): a bare `Error` with this exact message and no
  * `code`, `cause` or `meta`, for a plain query, an interactive transaction start and an execute
  * alike. Prisma's own P2024 means the same and is matched by code. The message is compared, never
  * returned or logged.

@@ -10,6 +10,7 @@ import { Controller, Get, INestApplication, Logger } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_FILTER } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
+import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { lockContentionCode } from '../common/db-contention';
@@ -24,6 +25,30 @@ import type { MigratedDatabase } from './testing/migrated-postgres';
 
 const POOL_MESSAGE = 'timeout exceeded when trying to connect';
 const HOLD_MS = 1_800;
+
+/**
+ * Waits until the pg_sleep holder really is running on the server, so the waiter that follows
+ * finds the single pool slot taken however slow the machine is (no fixed sleep). Polls
+ * pg_stat_activity as the container owner.
+ */
+async function waitForHolder(ownerUrl: string, marker: string): Promise<void> {
+  const admin = new Client({ connectionString: ownerUrl });
+  await admin.connect();
+  try {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const { rowCount } = await admin.query(
+        `SELECT 1 FROM pg_stat_activity WHERE state = 'active' AND pid <> pg_backend_pid() AND query LIKE $1`,
+        [`%${marker}%`],
+      );
+      if (rowCount) return;
+      if (Date.now() > deadline) throw new Error('the pool holder never started');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  } finally {
+    await admin.end();
+  }
+}
 
 /** Own fields only: the shape of the error, with no message text beyond the pool sentence. */
 function describeShape(e: unknown): Record<string, unknown> {
@@ -94,7 +119,7 @@ describe('pool-wait timeout (FU-BE-197, DL-42, NFR-09)', () => {
     const client = createPrismaClient(db.appUserUrl, { max: 1, connectionTimeoutMillis: 300 });
     try {
       const hold = Promise.resolve(client.$queryRaw`SELECT pg_sleep(1.8)::text`);
-      await new Promise((r) => setTimeout(r, 250));
+      await waitForHolder(db.ownerUrl, 'pg_sleep(1.8)');
       const caught: unknown[] = [];
       for (const attempt of [
         () => client.$queryRaw`SELECT 1`,
@@ -117,8 +142,8 @@ describe('pool-wait timeout (FU-BE-197, DL-42, NFR-09)', () => {
   it('FU-BE-197, DL-42: a pool that frees up in time does not fail (the wait is bounded, not a failure)', async () => {
     const client = createPrismaClient(db.appUserUrl, { max: 1, connectionTimeoutMillis: 3_000 });
     try {
-      const hold = Promise.resolve(client.$queryRaw`SELECT pg_sleep(0.4)::text`);
-      await new Promise((r) => setTimeout(r, 100));
+      const hold = Promise.resolve(client.$queryRaw`SELECT pg_sleep(1.5)::text`);
+      await waitForHolder(db.ownerUrl, 'pg_sleep(1.5)');
       await expect(Promise.resolve(client.$queryRaw`SELECT 1 AS one`)).resolves.toBeDefined();
       await hold;
     } finally {
@@ -164,7 +189,7 @@ describe('pool-wait timeout (FU-BE-197, DL-42, NFR-09)', () => {
           const hold = request(app.getHttpServer())
             .get('/probe/hold')
             .then((r) => r);
-          await new Promise((r) => setTimeout(r, 250));
+          await waitForHolder(db.ownerUrl, 'pg_sleep(1.8)');
           const res = await request(app.getHttpServer()).get(`/probe/${path}`);
           expect(res.status).toBe(503);
           expect(res.headers['retry-after']).toBe('2');
@@ -178,6 +203,7 @@ describe('pool-wait timeout (FU-BE-197, DL-42, NFR-09)', () => {
             traceId: 'x',
             errorName: 'Error',
             lockCode: 'POOL_TIMEOUT',
+            pool: 'prisma',
           });
           expect(line).toBe('Database pool wait timed out');
           expect(JSON.stringify([...warn.mock.calls, ...error.mock.calls])).not.toMatch(

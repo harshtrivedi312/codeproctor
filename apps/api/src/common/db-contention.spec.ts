@@ -267,7 +267,7 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     expect(warn).not.toHaveBeenCalled();
     expect(error).toHaveBeenCalledTimes(1);
     expect(error).toHaveBeenCalledWith(
-      { traceId: 'trace-1', errorName: 'Error', lockCode: 'POOL_TIMEOUT' },
+      { traceId: 'trace-1', errorName: 'Error', lockCode: 'POOL_TIMEOUT', pool: 'prisma' },
       'Database pool wait timed out',
     );
     expect(JSON.stringify(error.mock.calls)).not.toMatch(/timeout exceeded/);

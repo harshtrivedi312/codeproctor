@@ -2773,9 +2773,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         busy(),
       );
       const first = await authed('post', '/heartbeat', tokenOf(inv));
-      // TODO(DL-37): this is 503 with Retry-After once Backend A's ProblemFilter mapping lands; the
-      // thrown error is busy-class (isBusyLockError) and the answer is a 5xx, never 409 or 200.
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await slot('heartbeat', inv.sessionId)).toBe(1);
       spy.mockRestore();
       await authed('post', '/heartbeat', tokenOf(inv)).expect(200);
@@ -2804,11 +2804,35 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         .spyOn(states, 'transition')
         .mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'));
       const first = await post('/start', { invitationToken: inv.token, otp: code });
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
       expect(await sessionRow(inv.sessionId)).toMatchObject({ status: 'INVITED', authEpoch: 0 });
       spy.mockRestore();
       expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(200);
+    });
+
+    it('DL-37, DL-42: a 40001 error releases the slot; an HttpException carrying a lock cause keeps it', async () => {
+      const { SessionRateLimiter: Limiter } =
+        jest.requireActual<typeof import('./session-rate-limiter')>('./session-rate-limiter');
+      const limiter = new Limiter(redis);
+      const sid = randomUUID();
+      const serialization = Object.assign(new Error('could not serialize'), { code: '40001' });
+      await limiter
+        .guarded('ser', sid, 100, 60, () => Promise.reject(serialization))
+        .catch(() => undefined);
+      expect(await slot('ser', sid)).toBe(0);
+      // Same module registry as the limiter (the suite resets modules before it builds the app).
+      const { ConflictException } =
+        jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+      const wrapped = new ConflictException('x', {
+        cause: Object.assign(new Error('lock'), { code: '55P03' }),
+      });
+      await limiter
+        .guarded('ser', sid, 100, 60, () => Promise.reject(wrapped))
+        .catch(() => undefined);
+      expect(await slot('ser', sid)).toBe(1);
     });
 
     it('DL-37: slots given back are capped per window (2), never below zero, and a release after the window ended takes nothing off the new window', async () => {
@@ -2886,8 +2910,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const code = await otpFor(inv);
       const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
       const first = await post('/start', { invitationToken: inv.token, otp: code });
-      // TODO(DL-37): 503 with Retry-After once Backend A's ProblemFilter mapping lands.
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
       const left = await redis.pttl(`otp:${inv.invitationId}`);
       expect(left).toBeGreaterThan(0);
