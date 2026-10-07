@@ -285,7 +285,7 @@ The total is close to $12. The hours are the lever: the monthly budget guard (4.
 ## 15. Verification and spike (before the pilot)
 
 - **Release-gate gate:** before the first pilot deploy, section 14 item 6 is decided and in place: agent sessions cannot approve a `pilot` deployment (a fine-grained token without Actions, Deployments or Environments write, "prevent self-review" on, the owner approving with MFA). Under CLAUDE.md rule 3 this is an authorization weakness, so it is a gate and not an open question.
-- **Load test (C-49 gate):** 5 concurrent candidates through TC-090 and TC-091 on the real m7i.large and the small Judge0 instance, with the face model running live and the post-session analysis in the same window. The pass criteria are those of NFR-01 and ADR 0016 section 11. Memory headroom at 8 GB is **Not verified**.
+- **Load test (C-49 gate):** 5 concurrent candidates through TC-105 (with the TC-090 and TC-091 scripts as its load shape) on the real m7i.large and the small Judge0 instance, with the face model running live and the post-session analysis in the same window. The pass criteria are those of NFR-01 and ADR 0016 section 11. Memory headroom at 8 GB is **Not verified**.
 - **Start and stop:** a rehearsal of start, a 3-session window, analysis, self-stop and a ceiling stop, measuring the start-to-ready time. The 45-minute lead is the owner's value; the rehearsal checks that it is enough, including the first start after a new volume (certificate issuance).
 - **Backup and restore:** the drill of 5.4.
 - **Deploy:** an unsigned manifest is refused, a signed one runs, a rollback (re-signed as a new manifest with a higher sequence number) works, an older manifest is refused, and verification works offline from the bundle.
