@@ -58,7 +58,7 @@ A failed threshold makes k6 exit non-zero, so the CI job fails.
 
 ## Seeding the sessions
 
-Each virtual user needs its own IN_PROGRESS candidate session on staging with synthetic data (200 for TC-090, 50 for TC-091; FR-502 allows one run per 5 s per candidate, so runs cannot share a session). Seeding is done with the staging admin tools or API by whoever owns DEP-01 (there is no seeding script yet); the result is a JSON file:
+Each virtual user needs its own IN_PROGRESS candidate session on staging with synthetic data (200 for TC-090, 50 for TC-091; FR-502 allows one run per 5 s per candidate, so runs cannot share a session). Seeding is done with `seed/seed.mjs` (public API only, synthetic data, cleanup by run id; see `seed/README.md`, written against the docs and blocked on BE-07 for a real run) or by hand with the staging admin tools or API; the result is a JSON file:
 
 ```json
 [

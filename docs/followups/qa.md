@@ -886,6 +886,8 @@ QA's practice: the test carries its TC id in its name once the hub assigns it; t
 - The 202 answer of the identity upload and the exact terminal statuses of `GET /candidate/session/identity` come from the review comments, not from a reading of the code.
 - Cgroup method B on a cgroup v1 host (Judge0's requirement) was not tried; it is only used for the app host, which has no isolate.
 
+**Update 2026-10-07 (seeder PR, Backend B's answer relayed by the Delivery Lead):** `POST /candidate/session/test/start` returns `sections[].questions[]` with `{ sessionQuestionId, position, points }` and by design no content or type (render projection, FU-BEB-74/82/16, not built). BE-11's `/candidate/answers/:questionId/{run,draft,submit}` takes the `sessionQuestionId`, resolved under the token's session, so the TC-105 scenario's A1, R1 and S1 calls use the id from `test/start` without knowing the type, once #187 is on main. The seeder (`packages/qa/k6/seed`, `--stop-at CONSENTED`, `--identity` gated) writes `sessionQuestionId`; it stops at the system check until those routes land (ADR 0013 5.4, 5.5).
+
 ## 24. QA-13 (2026-10-06): deploy-track test cases for the pilot (ids from the hub's draft PR #237, branch arc/test-cases-pilot-deploy @1a0d12e, section "Pilot deployment (ADR 0017)" of docs/test-cases.md; the ids are final once that PR merges; separate from the capacity gate of section 23; test-cases.md and test-matrix.md are NOT edited here)
 
 QA-owned cases (QA writes the tests and the manual scripts; the matrix rows are added by QA after the PR merges; each test carries its TC id in its name):
