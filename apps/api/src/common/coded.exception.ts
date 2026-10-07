@@ -43,6 +43,10 @@ export const CANDIDATE_PROBLEM_CODES = [
   'RATE_LIMITED',
   'CANDIDATE_PORTAL_UNCONFIGURED',
   'MAIL_UNAVAILABLE',
+  // SESSION_ERASED and LOCK_BUSY are also returned on staff routes (the proctor resume): the list
+  // is named for its first users, the candidate routes, and is the one list of CodedHttpException codes.
+  'SESSION_ERASED',
+  'LOCK_BUSY',
 ] as const;
 export type CandidateProblemCode = (typeof CANDIDATE_PROBLEM_CODES)[number];
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
