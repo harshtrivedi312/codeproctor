@@ -1190,6 +1190,17 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
         Reflect.set(svc, 'inviteLimit', limitBefore);
       });
 
+      /** A real Prisma known error (the shape lockContentionCode and the filter see in production). */
+      function known(code: string): Error {
+        const { Prisma: AppPrisma } = jest.requireActual<
+          typeof import('../generated/prisma/client')
+        >('../generated/prisma/client');
+        return new AppPrisma.PrismaClientKnownRequestError('synthetic', {
+          code,
+          clientVersion: AppPrisma.prismaVersion.client,
+        });
+      }
+
       type TxFn = (cb: (tx: unknown) => Promise<unknown>, opts?: unknown) => Promise<unknown>;
       /**
        * The real transaction runs and its callback returns, then the failure is raised. With
@@ -1238,10 +1249,7 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       it('DL-37 FU-BE-208, FR-103: a commit-time P2028 after the callback is the generic 500, no mail, the slot is not refunded, the row exists', async () => {
         const { admin } = await orgAdmin('Outcome Unknown Invite');
         mails.invites.length = 0;
-        failAfterCallback(
-          Object.assign(new Error('Transaction already closed'), { code: 'P2028' }),
-          true,
-        );
+        failAfterCallback(known('P2028'), true);
         expectGeneric500(await send(admin, 'unknown1@example.com'));
         expect(mails.invites).toHaveLength(0);
         expect(await owner.user.count({ where: { email: 'unknown1@example.com' } })).toBe(1);
@@ -1259,6 +1267,48 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
         expectGeneric500(await send(admin, 'unknown3@example.com'));
         txSpy?.mockRestore();
         await send(admin, 'unknown4@example.com').expect(429);
+      });
+
+      it('DL-37 FU-BE-208, FR-103: a known P1017 (connection closed) after the callback is the generic 500 and keeps the slot', async () => {
+        const { admin } = await orgAdmin('Outcome Unknown P1017');
+        failAfterCallback(known('P1017'), true);
+        expectGeneric500(await send(admin, 'unknown5@example.com'));
+        txSpy?.mockRestore();
+        await send(admin, 'unknown6@example.com').expect(429);
+      });
+
+      it('DL-37 FU-BE-208, FR-103: a known P2034 at commit is a rollback: 503 BUSY with Retry-After and the slot is refunded', async () => {
+        const { admin } = await orgAdmin('Outcome Rollback P2034');
+        failAfterCallback(known('P2034'), false);
+        const res = await send(admin, 'rollback-p2034@example.com').expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        expect(res.body).toMatchObject({ code: 'BUSY' });
+        txSpy?.mockRestore();
+        await send(admin, 'rollback-p2034@example.com').expect(201);
+      });
+
+      it('DL-37 FU-BE-208, FR-103: a known P2028 BEFORE the callback finished (mid-callback) is 503 BUSY and the slot is refunded', async () => {
+        const { admin } = await orgAdmin('Outcome Mid P2028');
+        const busy = jest
+          .spyOn(svc as unknown as { requireSameAdmin: () => Promise<void> }, 'requireSameAdmin')
+          .mockRejectedValueOnce(known('P2028'));
+        try {
+          const res = await send(admin, 'mid-p2028@example.com').expect(503);
+          expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+          await send(admin, 'mid-p2028@example.com').expect(201);
+        } finally {
+          busy.mockRestore();
+        }
+      });
+
+      it('DL-37 FU-BE-208, FR-103: an HttpException after the callback finished is rethrown unchanged and the slot is kept', async () => {
+        const { admin } = await orgAdmin('Outcome Http');
+        const { ConflictException } =
+          jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        failAfterCallback(new ConflictException('late'), false);
+        await send(admin, 'http-late@example.com').expect(409);
+        txSpy?.mockRestore();
+        await send(admin, 'http-late2@example.com').expect(429);
       });
 
       it.each(['40001', '40P01'])(
@@ -1317,9 +1367,45 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
           const { admin, org } = await orgAdmin('Outcome Reissue');
           const id = await pendingUser(org, 'pending-r1@example.com');
           mails.invites.length = 0;
-          failAfterCallback(Object.assign(new Error('closed'), { code: 'P2028' }), true);
+          failAfterCallback(known('P2028'), true);
           expectGeneric500(await reissue(admin, id));
           expect(mails.invites).toHaveLength(0);
+          txSpy?.mockRestore();
+          // The commit landed: the token was rotated and the audit row exists.
+          const row = await owner.user.findUniqueOrThrow({ where: { id } });
+          expect(row.setPasswordTokenHash).not.toBe(sha256Hex('old-pending-r1@example.com'));
+          expect(
+            await owner.auditLog.count({ where: { entityId: id, action: 'USER_INVITE_REISSUED' } }),
+          ).toBe(1);
+          await reissue(admin, id).expect(429);
+        });
+
+        it('DL-37 FU-BE-208, FR-103: a known P2034 at commit on re-issue is 503 BUSY and the slot is refunded', async () => {
+          const { admin, org } = await orgAdmin('Outcome Reissue P2034');
+          const id = await pendingUser(org, 'pending-p2034@example.com');
+          failAfterCallback(known('P2034'), false);
+          const res = await reissue(admin, id).expect(503);
+          expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+          txSpy?.mockRestore();
+          await reissue(admin, id).expect(200);
+        });
+
+        it('DL-37 FU-BE-208, FR-103: a known P1017 after the callback on re-issue is the generic 500 and keeps the slot', async () => {
+          const { admin, org } = await orgAdmin('Outcome Reissue P1017');
+          const id = await pendingUser(org, 'pending-p1017@example.com');
+          failAfterCallback(known('P1017'), true);
+          expectGeneric500(await reissue(admin, id));
+          txSpy?.mockRestore();
+          await reissue(admin, id).expect(429);
+        });
+
+        it('DL-37 FU-BE-208, FR-103: an HttpException after the callback finished on re-issue is rethrown unchanged and the slot is kept', async () => {
+          const { admin, org } = await orgAdmin('Outcome Reissue Http');
+          const id = await pendingUser(org, 'pending-http@example.com');
+          const { ConflictException } =
+            jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+          failAfterCallback(new ConflictException('late'), false);
+          await reissue(admin, id).expect(409);
           txSpy?.mockRestore();
           await reissue(admin, id).expect(429);
         });

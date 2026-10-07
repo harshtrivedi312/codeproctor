@@ -53,7 +53,6 @@ import type {
 export const INVITE_TTL_MS = 72 * 60 * 60 * 1000;
 
 interface TxPhase {
-  started: boolean;
   finished: boolean;
 }
 
@@ -167,10 +166,9 @@ export class UsersService {
     const token = newOpaqueToken();
     let created: User;
     // Phase tracking for the failure rule (DL-37, FU-BE-208): set inside the callback.
-    const phase: TxPhase = { started: false, finished: false };
+    const phase: TxPhase = { finished: false };
     try {
       created = await this.prisma.client.$transaction(async (tx) => {
-        phase.started = true;
         await this.requireSameAdmin(tx, actor, verified.passwordHash);
         const user = await tx.user.create({
           data: {
@@ -267,10 +265,9 @@ export class UsersService {
     const slot = await this.takeInviteSlot(actor.orgId);
     const targetId = rawTargetId.toLowerCase();
     const token = newOpaqueToken();
-    const phase: TxPhase = { started: false, finished: false };
+    const phase: TxPhase = { finished: false };
     const updated = await this.prisma.client
       .$transaction(async (tx) => {
-        phase.started = true;
         await this.requireSameAdmin(tx, actor, verified.passwordHash);
         const found = await this.raw('lock the target user row, same org only', () =>
           tx.$queryRaw<{ id: string; is_active: boolean; has_password: boolean }[]>(Prisma.sql`
