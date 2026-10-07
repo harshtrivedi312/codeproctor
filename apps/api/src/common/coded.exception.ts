@@ -49,6 +49,10 @@ export const CANDIDATE_PROBLEM_CODES = [
   'VALIDATION_FAILED',
   'SIGNATURE_INVALID',
   'KEY_EPOCH_STALE',
+  // SESSION_ERASED and LOCK_BUSY are also returned on staff routes (the proctor resume): the list
+  // is named for its first users, the candidate routes, and is the one list of CodedHttpException codes.
+  'SESSION_ERASED',
+  'LOCK_BUSY',
   'SEQ_CONFLICT',
   'PAYLOAD_TOO_LARGE',
   'UNSUPPORTED_MEDIA_TYPE',

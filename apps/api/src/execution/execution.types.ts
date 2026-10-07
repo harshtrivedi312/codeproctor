@@ -8,7 +8,13 @@ export type TestVerdict =
   | 'MEMORY_LIMIT'
   | 'OUTPUT_LIMIT'
   | 'RUNTIME_ERROR'
-  | 'INTERNAL_ERROR';
+  | 'INTERNAL_ERROR'
+  /**
+   * Local development stub only (DL-54, DL-58). A verdict-free marker: nothing ran, so it is never
+   * a pass or a fail. `passed` is always false and downstream code must never count it as right or
+   * wrong in a score, nor treat it as accepted. Real Judge0 modes never produce it.
+   */
+  | 'LOCAL_STUB';
 
 export interface ExecutionTest {
   readonly id: string;
@@ -27,6 +33,8 @@ export interface ExecutionRequest {
   /** question_versions.limits, validated here. */
   readonly limits: unknown;
   readonly tests: readonly ExecutionTest[];
+  /** 'submit' makes a stub result say it was not graded. Defaults to 'run'. */
+  readonly mode?: 'run' | 'submit';
 }
 
 export interface TestRunResult {
@@ -40,6 +48,8 @@ export interface TestRunResult {
   readonly stdoutTruncated?: boolean;
   /** Sanitized: a fixed sentence, plus capped compiler or runtime output when revealed. */
   readonly message?: string;
+  /** True only for a local-stub result: not executed, not graded, never a pass or fail. */
+  readonly stub?: true;
 }
 
 export interface ExecutionResult {

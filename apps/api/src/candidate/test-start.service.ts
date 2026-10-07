@@ -10,7 +10,6 @@
 // Variant parameters, hidden cases and answer keys never appear in the response.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { randomInt } from 'node:crypto';
-import { z } from 'zod';
 import { CodedHttpException } from '../common/coded.exception';
 import type { CandidateProblemCode } from '../common/coded.exception';
 import { PrismaService } from '../database/prisma.service';
@@ -19,6 +18,7 @@ import { readExtraTime, scaledMs } from '../session/accommodations';
 import { SessionKeyConfigError, SessionKeyService } from '../session/session-key.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { SessionStateService } from '../session/session-state.service';
+import { SYSTEM_CHECK_MAX_AGE_MS, isSystemCheckFresh } from '../session/system-check';
 import { LIVE_STATUSES, PRE_START_STATUSES } from '../session/session-transitions';
 import { sessionNotActive } from '../session/session-write-gate';
 import { parseRandomRule, ruleKey } from '../tests/random-rule';
@@ -30,14 +30,7 @@ import { assignDistinct } from './random-assignment';
 /** Candidates read per random rule (ordered by id): wide enough for variety between candidates. */
 const RANDOM_POOL = 2000;
 
-/** The latest system check must be this fresh when the test starts (ADR 0013 section 3). */
-export const SYSTEM_CHECK_MAX_AGE_MS = 15 * 60_000;
-
-// What the system-check route (BE-10) stores in sessions.device_info.systemCheck.
-const systemCheckSchema = z.object({
-  passed: z.boolean(),
-  checkedAt: z.iso.datetime(),
-});
+export { SYSTEM_CHECK_MAX_AGE_MS };
 
 export interface StartedSection {
   readonly position: number;
@@ -235,14 +228,7 @@ export class TestStartService {
 
   /** FR-605: a start needs a fresh passed system check (ADR 0013 section 3). */
   private assertSystemCheck(deviceInfo: unknown, now: Date): void {
-    const raw =
-      typeof deviceInfo === 'object' && deviceInfo !== null
-        ? (deviceInfo as Record<string, unknown>).systemCheck
-        : undefined;
-    const check = systemCheckSchema.safeParse(raw);
-    const fresh =
-      check.success && now.getTime() - Date.parse(check.data.checkedAt) <= SYSTEM_CHECK_MAX_AGE_MS;
-    if (!check.success || !check.data.passed || !fresh) {
+    if (!isSystemCheckFresh(deviceInfo, now)) {
       throw coded(
         HttpStatus.CONFLICT,
         'Run the system check again before starting the test.',

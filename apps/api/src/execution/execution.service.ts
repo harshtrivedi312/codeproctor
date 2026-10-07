@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { JUDGE0_CLIENT, JUDGE0_STATUS } from '../judge0/judge0.types';
 import type { Judge0Client, Judge0RawResult, Judge0Submission } from '../judge0/judge0.types';
+import { STUB_LABEL } from '../judge0/stub-judge0.client';
 import { judge0LanguageId } from '../judge0/language-map';
 import { InvalidLimitsError, resolveLimits } from './limits';
 import { outputsMatch, truncate } from './normalize';
@@ -18,7 +19,12 @@ export const MAX_RUNNER_OUTPUT_BYTES = 64 * 1024;
 export const MAX_RETURNED_OUTPUT_CHARS = 4 * 1024;
 const MAX_DIAGNOSTIC_CHARS = 2 * 1024;
 
-const MESSAGES: Record<Exclude<TestVerdict, 'PASSED' | 'FAILED'>, string> = {
+/** Shown on every run result produced by the local stub (DL-58). Same text as STUB_LABEL. */
+export const STUB_RUN_MESSAGE = STUB_LABEL;
+/** Shown instead on a submit-time result produced by the local stub (DL-58). */
+export const STUB_SUBMIT_MESSAGE = 'not graded (local stub)';
+
+const MESSAGES: Record<Exclude<TestVerdict, 'PASSED' | 'FAILED' | 'LOCAL_STUB'>, string> = {
   COMPILE_ERROR: 'The code did not compile.',
   TIME_LIMIT: 'Time limit exceeded.',
   MEMORY_LIMIT: 'Memory limit exceeded.',
@@ -87,6 +93,23 @@ export class ExecutionService {
       };
     }
 
+    if (this.judge0.isStub === true) {
+      // Local stub (DL-58): nothing ran. Never classify, never PASSED or FAILED.
+      const message = request.mode === 'submit' ? STUB_SUBMIT_MESSAGE : STUB_RUN_MESSAGE;
+      return {
+        clampedLimits: limits.clamped,
+        results: request.tests.map((t) => ({
+          testId: t.id,
+          verdict: 'LOCAL_STUB',
+          passed: false,
+          stub: true,
+          timeMs: null,
+          memoryKb: null,
+          message,
+        })),
+      };
+    }
+
     const results = request.tests.map((test, i) =>
       this.toResult(test, raws[i] as Judge0RawResult, limits.memoryKb),
     );
@@ -133,7 +156,11 @@ export class ExecutionService {
     };
   }
 
-  private classify(test: ExecutionTest, raw: Judge0RawResult, memoryLimitKb: number): TestVerdict {
+  private classify(
+    test: ExecutionTest,
+    raw: Judge0RawResult,
+    memoryLimitKb: number,
+  ): Exclude<TestVerdict, 'LOCAL_STUB'> {
     const id = raw.statusId;
     if (id === JUDGE0_STATUS.COMPILATION_ERROR) return 'COMPILE_ERROR';
     if (id === JUDGE0_STATUS.TIME_LIMIT_EXCEEDED) return 'TIME_LIMIT';
