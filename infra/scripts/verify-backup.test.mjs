@@ -75,6 +75,17 @@ describe('DB-07 guards (NFR-03)', () => {
     );
   });
 
+  it('C-55: BACKUP_KEEP_NEWEST must be 1 to 1000 and BACKUP_MODE must be known', async () => {
+    const base = { PGHOST: 'h', PGUSER: 'u', PGDATABASE: 'd', S3_BACKUP_BUCKET: 'b' };
+    for (const bad of ['0', 'x', '2; rm', '1001']) {
+      const r = await run(BACKUP, [], { ...base, BACKUP_KEEP_NEWEST: bad });
+      assert.notEqual(r.status, 0, bad);
+      assert.match(r.stderr, /BACKUP_KEEP_NEWEST/);
+    }
+    const r = await run(BACKUP, [], { ...base, BACKUP_MODE: 'rotate' });
+    assert.match(r.stderr, /BACKUP_MODE must be versioned or timestamped/);
+  });
+
   it('restore.sh refuses a target server that is not this machine (ADR 0009)', async () => {
     const r = await run(RESTORE, ['--target-db', 'restored'], {
       PGHOST: 'db.staging.example.com',
@@ -108,14 +119,14 @@ describe('DB-07 guards (NFR-03)', () => {
     }
   });
 
-  it('restore.sh needs a dump file name, not a path', async () => {
+  it('restore.sh needs latest or a version id, not a path', async () => {
     const r = await run(RESTORE, ['--target-db', 'x', '--backup', '../../etc/passwd'], {
       PGHOST: 'localhost',
       PGUSER: 'u',
       S3_BACKUP_BUCKET: 'b',
     });
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /--backup must be a file name/);
+    assert.match(r.stderr, /--backup must be latest/);
   });
 
   it('restore.sh with a missing option value exits 1, never the "counts differ" code 2', async () => {
@@ -159,7 +170,10 @@ describe('DB-07 guards (NFR-03)', () => {
       (await run(ERASURES, ['append', ERASED_ID, 'yesterday'], env)).stderr,
       /time must look like/,
     );
-    assert.match((await run(ERASURES, ['prune', 'x'], env)).stderr, /UTC stamp/);
+    assert.match(
+      (await run(ERASURES, ['prune', 'x'], { ...env, BACKUP_MODE: 'timestamped' })).stderr,
+      /UTC stamp/,
+    );
     assert.match((await run(ERASURES, ['complete', 'nope'], env)).stderr, /candidate uuid/);
   });
 
@@ -206,6 +220,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       S3_ACCESS_KEY_ID: 'drill',
       S3_SECRET_ACCESS_KEY: SECRET,
       RESTORE_CREATE_APP_USER: '1',
+      BACKUP_MODE: 'timestamped',
       AWS_MAX_ATTEMPTS: '1',
       PG_BIN_DIR: clientShims(pg, mkdtempSync(join(tmpdir(), 'pg-shims-'))),
     };
@@ -219,28 +234,42 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
   const keys = () => [...s3.objects.keys()].map((k) => k.replace('drill-backups/', ''));
   const put = (key) => s3.objects.set(`drill-backups/${key}`, Buffer.from('x'));
 
-  it('NFR-03: uploads dump, checksum and counts, prunes dumps past 14 days', async () => {
-    const old = stampDaysAgo(20);
+  it('NFR-03, C-55: timestamped mode uploads one dump with its metadata, prunes dumps past 14 days but never the newest 3', async () => {
+    const d40 = stampDaysAgo(40);
+    const d30 = stampDaysAgo(30);
+    const d20 = stampDaysAgo(20);
     const recent = stampDaysAgo(3);
-    put(`db/dumps/codeproctor-${old}.dump.gz`);
-    put(`db/dumps/codeproctor-${old}.dump.gz.sha256`);
-    put(`db/dumps/codeproctor-${recent}.dump.gz`);
+    for (const stamp of [d40, d30, d20, recent]) put(`db/dumps/codeproctor-${stamp}.dump`);
+    // An orphan that is not a dump never takes a keep slot and is never pruned.
+    const orphan = `db/dumps/codeproctor-${stampDaysAgo(25)}.dump.sha256`;
+    put(orphan);
     const before = new Date();
     const r = await run(BACKUP, [], env);
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stderr + r.stdout, new RegExp(SECRET));
     const k = keys();
     const today = before.toISOString().slice(0, 10).replace(/-/g, '');
-    assert.ok(
-      k.some((x) => new RegExp(`^db/dumps/codeproctor-${today}T\\d{6}Z\\.dump\\.gz$`).test(x)),
+    const uploaded = k.find((x) =>
+      new RegExp(`^db/dumps/codeproctor-${today}T\\d{6}Z\\.dump$`).test(x),
     );
-    assert.ok(k.some((x) => x.endsWith('.dump.gz.sha256') && x.includes(today)));
-    assert.ok(k.some((x) => x.endsWith('.counts.tsv') && x.includes(today)));
-    assert.ok(!k.some((x) => x.includes(old)), '20-day-old dump pruned');
-    assert.ok(
-      k.some((x) => x.includes(recent)),
-      '3-day-old dump kept',
-    );
+    assert.ok(uploaded, 'the new dump is there');
+    const meta = s3.metas.get(`drill-backups/${uploaded}`);
+    assert.match(meta.sha256, /^[0-9a-f]{64}$/);
+    assert.match(meta['dumped-at'], /^\d{8}T\d{6}Z$/);
+    assert.match(meta.counts, /(^|,)candidates=2(,|$)/);
+    assert.ok(!k.includes(`db/dumps/codeproctor-${d40}.dump`), '40-day-old dump pruned');
+    assert.ok(!k.includes(`db/dumps/codeproctor-${d30}.dump`), '30-day-old dump pruned');
+    assert.ok(k.includes(`db/dumps/codeproctor-${d20}.dump`), '20-day-old kept: newest 3 (C-55)');
+    assert.ok(k.includes(`db/dumps/codeproctor-${recent}.dump`), '3-day-old kept');
+    assert.ok(k.includes(orphan), 'an orphan sidecar is neither counted nor pruned');
+  });
+
+  it('C-55: BACKUP_KEEP_NEWEST=1 keeps only the newest dump', async () => {
+    const old = stampDaysAgo(20);
+    put(`db/dumps/codeproctor-${old}.dump`);
+    const r = await run(BACKUP, [], { ...env, BACKUP_KEEP_NEWEST: '1' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!keys().includes(`db/dumps/codeproctor-${old}.dump`));
   });
 
   it('FR-704, ADR 0004 R-7: the erasure list is outside the database and survives dump pruning', async () => {
@@ -338,7 +367,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
 
   it('NFR-03: a damaged backup is refused before the server is touched', async () => {
     const dump = keys()
-      .filter((k) => /dump\.gz$/.test(k))
+      .filter((k) => /codeproctor-[^/]*\.dump$/.test(k))
       .sort()
       .at(-1);
     const original = s3.objects.get(`drill-backups/${dump}`);
@@ -479,7 +508,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     put(`db/erasure-completed/${stampDaysAgo(1)}-${slow}.json`);
     // Files that are not ours under the dumps prefix are never touched.
     put('db/dumps/notes.txt');
-    put('db/dumps/codeproctor-x.dump.gz');
+    put('db/dumps/codeproctor-x.dump');
     const r = await run(BACKUP, [], env);
     assert.equal(r.status, 0, r.stderr);
     const list = (await run(ERASURES, ['list'], env)).stdout;
@@ -493,7 +522,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       'its marker goes with it',
     );
     assert.ok(keys().includes('db/dumps/notes.txt'));
-    assert.ok(keys().includes('db/dumps/codeproctor-x.dump.gz'));
+    assert.ok(keys().includes('db/dumps/codeproctor-x.dump'));
   });
 
   it('ADR 0004 R-7: complete needs an existing entry and is idempotent', async () => {
@@ -510,14 +539,14 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
   });
 
   it('NFR-03: exit code 2 means only "restored, row counts differ"', async () => {
-    const counts = keys()
-      .filter((k) => k.endsWith('.counts.tsv'))
+    const dump = keys()
+      .filter((k) => /codeproctor-\d{8}T\d{6}Z\.dump$/.test(k))
       .sort()
       .at(-1);
-    const original = s3.objects.get(`drill-backups/${counts}`);
-    s3.objects.set(`drill-backups/${counts}`, Buffer.from('candidates\t999\n'));
+    const original = s3.metas.get(`drill-backups/${dump}`);
+    s3.metas.set(`drill-backups/${dump}`, { ...original, counts: 'candidates=999' });
     const r = await run(RESTORE, ['--target-db', 'restored_counts', '--skip-erasures'], env);
-    s3.objects.set(`drill-backups/${counts}`, original);
+    s3.metas.set(`drill-backups/${dump}`, original);
     assert.equal(r.status, 2, r.stderr);
     assert.match(r.stderr, /row counts differ/);
   });
@@ -541,7 +570,7 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     s3.faults.failList = true;
     // The latest dump is named by listing, so name it.
     const dump = keys()
-      .filter((k) => /dump\.gz$/.test(k) && !k.includes('codeproctor-x'))
+      .filter((k) => /codeproctor-\d{8}T\d{6}Z\.dump$/.test(k))
       .sort()
       .at(-1);
     const r = await run(
@@ -685,5 +714,222 @@ describe('DB-07 version check (NFR-03)', { skip }, () => {
     } finally {
       pg.stop();
     }
+  });
+});
+
+describe('DB-07 versioned backups (NFR-03, ADR 0017 5.3, C-55)', { skip }, () => {
+  let pg;
+  let s3;
+  let env;
+  const KEY = 'drill-backups/db/dump/latest.dump';
+
+  before(async () => {
+    pg = startPostgres();
+    s3 = await startFakeS3({ versioned: true });
+    applyMigrations(pg, 'vsource');
+    loadFixture(pg, 'vsource');
+    env = {
+      ...pg.env,
+      PGDATABASE: 'vsource',
+      S3_BACKUP_BUCKET: 'drill-backups',
+      S3_ENDPOINT: `http://127.0.0.1:${s3.port}`,
+      S3_REGION: 'auto',
+      S3_FORCE_PATH_STYLE: 'true',
+      S3_ACCESS_KEY_ID: 'drill',
+      S3_SECRET_ACCESS_KEY: SECRET,
+      RESTORE_CREATE_APP_USER: '1',
+      AWS_MAX_ATTEMPTS: '1',
+      PG_BIN_DIR: clientShims(pg, mkdtempSync(join(tmpdir(), 'pg-shims-'))),
+    };
+  });
+
+  after(async () => {
+    pg?.stop();
+    await s3?.close();
+  });
+
+  it('NFR-03, C-55: every backup is a new version of one fixed key, with its checksum, time and counts as metadata, and nothing is deleted', async () => {
+    const oldEntry = `db/erasure-list/${stampDaysAgo(40)}-${ERASED_ID}.json`;
+    const oldDone = `db/erasure-completed/${stampDaysAgo(39)}-${ERASED_ID}.json`;
+    s3.objects.set(`drill-backups/${oldEntry}`, Buffer.from('{}'));
+    s3.objects.set(`drill-backups/${oldDone}`, Buffer.from('{}'));
+    s3.objects.set('drill-backups/db/dump/unrelated.txt', Buffer.from('keep'));
+    s3.objects.set('drill-backups/db/dumps/codeproctor-20200101T000000Z.dump', Buffer.from('old'));
+    const first = await run(BACKUP, [], env);
+    assert.equal(first.status, 0, first.stderr);
+    assert.doesNotMatch(first.stderr + first.stdout, new RegExp(SECRET));
+    pg.psql(
+      'vsource',
+      `UPDATE candidates SET full_name = 'Changed after v1' WHERE id = '${KEPT_ID}'`,
+    );
+    const second = await run(BACKUP, [], env);
+    assert.equal(second.status, 0, second.stderr);
+    const versions = s3.versions.get(KEY);
+    assert.equal(versions.length, 2, 'two versions of the one key');
+    for (const v of versions) {
+      assert.match(v.meta.sha256, /^[0-9a-f]{64}$/);
+      assert.match(v.meta['dumped-at'], /^\d{8}T\d{6}Z$/);
+      assert.match(v.meta.counts, /(^|,)candidates=2(,|$)/);
+    }
+    assert.notEqual(versions[0].meta.sha256, versions[1].meta.sha256);
+    assert.ok(s3.objects.has('drill-backups/db/dump/unrelated.txt'), 'nothing else was touched');
+    assert.ok(
+      s3.objects.has('drill-backups/db/dumps/codeproctor-20200101T000000Z.dump'),
+      'versioned mode never prunes',
+    );
+    assert.match(second.stderr, /nothing is deleted/);
+    assert.equal(s3.deletes.length, 0, 'versioned mode issues no DELETE request');
+    assert.ok(
+      s3.objects.has(`drill-backups/${oldEntry}`),
+      'erasure list entries are never pruned here',
+    );
+    assert.ok(s3.objects.has(`drill-backups/${oldDone}`));
+  });
+
+  it('NFR-03: restore latest gets the newest version; --backup <version id> gets an older one', async () => {
+    const [v1] = s3.versions.get(KEY);
+    const latest = await run(RESTORE, ['--target-db', 'vlatest', '--skip-erasures'], env);
+    assert.equal(latest.status, 0, latest.stderr);
+    assert.match(latest.stderr, /row counts match/);
+    assert.equal(
+      pg.psql('vlatest', `SELECT full_name FROM candidates WHERE id = '${KEPT_ID}'`),
+      'Changed after v1',
+    );
+    const older = await run(
+      RESTORE,
+      ['--target-db', 'vfirst', '--backup', v1.id, '--skip-erasures'],
+      env,
+    );
+    assert.equal(older.status, 0, older.stderr);
+    assert.equal(
+      pg.psql('vfirst', `SELECT full_name FROM candidates WHERE id = '${KEPT_ID}'`),
+      'Candidate 2',
+    );
+  });
+
+  it('NFR-03: a version whose checksum metadata does not match its bytes is refused before the server is touched', async () => {
+    const versions = s3.versions.get(KEY);
+    const newest = versions.at(-1);
+    const original = newest.body;
+    newest.body = Buffer.from('tampered');
+    s3.objects.set(KEY, newest.body);
+    const r = await run(RESTORE, ['--target-db', 'vtamper', '--skip-erasures'], env);
+    newest.body = original;
+    s3.objects.set(KEY, original);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /checksum mismatch/);
+    assert.equal(
+      pg.psql('postgres', "SELECT count(*) FROM pg_database WHERE datname = 'vtamper'"),
+      '0',
+    );
+  });
+
+  it('NFR-03: an unknown version id is an error, not a fallback to latest', async () => {
+    const r = await run(
+      RESTORE,
+      ['--target-db', 'vmissing', '--backup', 'no-such-version', '--skip-erasures'],
+      env,
+    );
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /does not exist/);
+  });
+
+  it('C-55: versioned mode on a store that does not version fails loudly', async () => {
+    const plain = await startFakeS3({ versioned: false });
+    try {
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /not versioned/);
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it('C-55: an existing object in an unversioned bucket is never overwritten (the refusal comes before the upload)', async () => {
+    const plain = await startFakeS3({ versioned: false });
+    try {
+      const existing = Buffer.from('the only backup');
+      plain.objects.set(KEY, existing);
+      const before = plain.objects.get(KEY);
+      assert.ok(before, 'the fixture really has an existing object');
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /Nothing was uploaded/);
+      assert.equal(plain.objects.get(KEY), existing, 'the existing object was not overwritten');
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it('C-55: an existing object whose version id is "null" (versioning suspended) is not overwritten either', async () => {
+    const suspended = await startFakeS3({ versioned: true });
+    try {
+      const body = Buffer.from('the only backup');
+      suspended.objects.set(KEY, body);
+      suspended.versions.set(KEY, [{ id: 'null', body, meta: {} }]);
+      const r = await run(BACKUP, [], {
+        ...env,
+        S3_ENDPOINT: `http://127.0.0.1:${suspended.port}`,
+      });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /Nothing was uploaded/);
+      assert.equal(suspended.objects.get(KEY), body);
+    } finally {
+      await suspended.close();
+    }
+  });
+
+  it('C-55: an error other than "not found" while checking for an earlier backup stops the run (fails closed)', async () => {
+    const broken = await startFakeS3({ versioned: true });
+    try {
+      broken.objects.set(KEY, Buffer.from('the only backup'));
+      // The 403 also breaks the later HEADs: the unchanged body proves the refusal came before the upload.
+      broken.faults.failHead = true;
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${broken.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /cannot check for an earlier backup/);
+      assert.equal(broken.objects.get(KEY).toString(), 'the only backup');
+    } finally {
+      await broken.close();
+    }
+  });
+
+  it('NFR-03: --backup null is a version id like any other, never "latest"', async () => {
+    const r = await run(
+      RESTORE,
+      ['--target-db', 'vnull', '--backup', 'null', '--skip-erasures'],
+      env,
+    );
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /does not exist/);
+  });
+
+  it('NFR-03: metadata that is missing or hostile stops the restore before the server is touched', async () => {
+    const newest = s3.versions.get(KEY).at(-1);
+    const original = { ...newest.meta };
+    const originalCurrent = s3.metas.get(KEY);
+    for (const [patch, pattern] of [
+      [{ sha256: 'nothex' }, /no checksum/],
+      [{ counts: 'a=1;x' }, /no row counts/],
+      [{ 'dumped-at': 'yesterday' }, /no dump time/],
+    ]) {
+      newest.meta = { ...original, ...patch };
+      s3.metas.set(KEY, newest.meta);
+      const r = await run(RESTORE, ['--target-db', 'vbad', '--skip-erasures'], env);
+      assert.equal(r.status, 1, JSON.stringify(patch));
+      assert.match(r.stderr, pattern);
+    }
+    newest.meta = original;
+    s3.metas.set(KEY, originalCurrent);
+    assert.equal(
+      pg.psql('postgres', "SELECT count(*) FROM pg_database WHERE datname = 'vbad'"),
+      '0',
+    );
+  });
+
+  it('C-55: erasure-list.sh prune refuses in versioned mode (the owner-applied function prunes)', async () => {
+    const r = await run(ERASURES, ['prune', stampDaysAgo(1)], env);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /BACKUP_MODE=timestamped only/);
   });
 });

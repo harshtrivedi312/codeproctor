@@ -1,17 +1,28 @@
 // A tiny in-memory S3 server for the backup tests (DB-07). Path-style only, no auth, no
-// multipart: enough for `aws s3 cp` of small files, head-object, list-objects-v2 and delete-object.
+// multipart: enough for `aws s3 cp` of small files, head-object, get-object, list-objects-v2 and
+// delete-object. A PUT with `versioned: true` also keeps object versions (x-amz-version-id) and the
+// x-amz-meta-* headers, like a versioned AWS bucket; objects put straight into `objects` have no
+// version id, like Cloudflare R2.
 // Not a test file. Binds to 127.0.0.1 on a random port.
 import { createServer } from 'node:http';
 
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, close: () => Promise<void> }>} */
-export async function startFakeS3() {
+/** failList: every listing answers 500; failHead: every HEAD answers a bare 403.
+ * @returns {Promise<{ port: number, faults: { failList: boolean, failHead: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], close: () => Promise<void> }>} */
+export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
-  const faults = { failList: false };
+  const faults = { failList: false, failHead: false };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
   const objects = new Map();
+  /** @type {Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>} */
+  const versions = new Map();
+  /** Metadata of the current object per key. */
+  const metas = new Map();
+  let counter = 0;
+  /** Every DELETE request, as "bucket/key" (tests assert versioned backups issue none). */
+  const deletes = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const path = decodeURIComponent(url.pathname.slice(1));
@@ -23,10 +34,20 @@ export async function startFakeS3() {
         res.end(req.method === 'HEAD' ? undefined : body);
       };
       if (req.method === 'PUT') {
-        objects.set(path, Buffer.concat(chunks));
-        return send(200, '', { etag: '"fake"' });
+        const body = Buffer.concat(chunks);
+        const meta = {};
+        for (const [h, v] of Object.entries(req.headers))
+          if (h.startsWith('x-amz-meta-')) meta[h.slice('x-amz-meta-'.length)] = String(v);
+        objects.set(path, body);
+        metas.set(path, meta);
+        if (!versioned) return send(200, '', { etag: '"fake"' });
+        counter += 1;
+        const id = `v${counter}`;
+        versions.set(path, [...(versions.get(path) ?? []), { id, body, meta }]);
+        return send(200, '', { etag: '"fake"', 'x-amz-version-id': id });
       }
       if (req.method === 'DELETE') {
+        deletes.push(path);
         objects.delete(path);
         return send(204);
       }
@@ -54,17 +75,24 @@ export async function startFakeS3() {
           { 'content-type': 'application/xml' },
         );
       }
+      if (req.method === 'HEAD' && faults.failHead) return send(403);
       if (req.method === 'GET' || req.method === 'HEAD') {
-        const body = objects.get(path);
+        const wanted = url.searchParams.get('versionId');
+        const history = versions.get(path) ?? [];
+        const version = wanted ? history.find((v) => v.id === wanted) : history.at(-1);
+        const body = wanted ? version?.body : (objects.get(path) ?? version?.body);
         if (!body)
           return send(404, xml('<Error><Code>NoSuchKey</Code></Error>'), {
             'content-type': 'application/xml',
           });
+        const meta = wanted ? (version?.meta ?? {}) : (metas.get(path) ?? {});
         res.writeHead(200, {
           'content-length': body.length,
           etag: '"fake"',
           'last-modified': new Date().toUTCString(),
           'content-type': 'application/octet-stream',
+          ...(version ? { 'x-amz-version-id': version.id } : {}),
+          ...Object.fromEntries(Object.entries(meta).map(([k, v]) => [`x-amz-meta-${k}`, v])),
         });
         return res.end(req.method === 'HEAD' ? undefined : body);
       }
@@ -77,6 +105,9 @@ export async function startFakeS3() {
     port,
     faults,
     objects,
+    versions,
+    metas,
+    deletes,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

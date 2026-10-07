@@ -13,7 +13,10 @@ import {
 } from '@/features/candidate-flow/test-helpers';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_OTP, MOCK_TOKENS } from '@/mocks/candidate/handlers';
+import { testState } from '@/mocks/candidate/test-handlers';
+import { OVER_STATUSES } from './adr-wire';
 import { createAdrSource, openSection } from './adr-source';
+import { startedSession as startedMock } from './proctor/test-support';
 import { TestScreen } from './test-screen';
 
 vi.hoisted(() => {
@@ -106,7 +109,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     const order = seen.map(
       (r) => `${r.method} ${new URL(r.url).pathname.replace(/\/q\d/, '/:id')}`,
     );
-    expect(order.indexOf('PUT /v1/candidate/questions/:id/draft')).toBeLessThan(
+    expect(order.indexOf('PUT /v1/candidate/answers/:id/draft')).toBeLessThan(
       order.indexOf('POST /v1/candidate/answers/:id/run'),
     );
     expect(seen.find((r) => r.method === 'PUT')?.body).toMatchObject({
@@ -148,7 +151,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     let paused = true;
     const saved: unknown[] = [];
     server.use(
-      http.put(`${cand}/questions/:id/draft`, async ({ request }) => {
+      http.put(`${cand}/answers/:id/draft`, async ({ request }) => {
         if (paused) return HttpResponse.json({ code: 'SESSION_PAUSED' }, { status: 409 });
         saved.push(await request.json());
         return HttpResponse.json({ savedAt: new Date().toISOString() });
@@ -183,7 +186,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
     );
     await screen.findByText(/finished and cannot be reopened/i);
-    const draft = seen.find((r) => r.method === 'PUT' && r.url.endsWith('/q2/draft'));
+    const draft = seen.find((r) => r.method === 'PUT' && r.url.endsWith('/answers/q2/draft'));
     expect(draft?.body).toEqual({ kind: 'mcq', selectedOptionId: 'opt_b' });
   });
 
@@ -216,14 +219,53 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(screen.getByRole('heading', { level: 1 })).toHaveFocus();
     const finishes = seen
       .filter((r) => r.url.includes('/finish'))
-      .map((r) => r.url.split('/').slice(-2)[0]);
-    expect(finishes).toEqual(['1', '2']);
+      .map((r) => (r.body as { position: number }).position);
+    expect(finishes).toEqual([1, 2]);
+  });
+
+  it('ADR 0002 ADR 0013 5.11: a 409 SECTION_NOT_OPEN is never shown as finished', async () => {
+    await startedSession();
+    server.use(
+      http.post(`${cand}/session/section/finish`, () =>
+        HttpResponse.json({ code: 'SECTION_NOT_OPEN' }, { status: 409 }),
+      ),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await within(screen.getByRole('dialog')).findByRole('alert');
+    expect(screen.queryByText(/finished and cannot be reopened/i)).not.toBeInTheDocument();
+  });
+
+  it('ADR 0013 5.11: an accepted finish that has not closed yet shows a pending note, then opens section 2 on retry', async () => {
+    const session = await startedMock();
+    testState(session).closeDelayMs = 60_000;
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await screen.findByText(/finished and cannot be reopened/i);
+    await user.click(screen.getByRole('button', { name: /continue to the next section/i }));
+    expect(await screen.findByText(/next section is not open yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/section 2 of 2/i)).not.toBeInTheDocument();
+    testState(session).closeDelayMs = 0;
+    testState(session).pendingClose = { position: 1, at: Date.now() - 1 };
+    await user.click(screen.getByRole('button', { name: /continue to the next section/i }));
+    await screen.findByText(/section 2 of 2/i);
+    // The retry re-reads; it never sends a second finish.
+    expect(seen.filter((r) => r.url.endsWith('/section/finish'))).toHaveLength(1);
   });
 
   it('ADR 0002: a 409 on finish is re-read before anything is shown as finished', async () => {
     await startedSession();
     server.use(
-      http.post(`${cand}/sections/:position/finish`, () =>
+      http.post(`${cand}/session/section/finish`, () =>
         HttpResponse.json({ code: 'SESSION_PAUSED' }, { status: 409 }),
       ),
     );
@@ -333,7 +375,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     await screen.findByText(/section 2 of 2/i);
     // The server submits the test, but the answer never arrives.
     server.use(
-      http.post(`${cand}/sections/:position/finish`, () => {
+      http.post(`${cand}/session/section/finish`, () => {
         return HttpResponse.error();
       }),
       http.get(`${cand}/session`, () =>
@@ -356,7 +398,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     );
   });
 
-  it('ADR 0002: a 409 SESSION_NOT_ACTIVE on the re-read also means the test is over', async () => {
+  it('ADR 0002 FR-505: a 409 SESSION_NOT_ACTIVE on the re-read also means the test is over', async () => {
     await startedSession();
     const source = createAdrSource({ onSessionEnded: vi.fn() });
     server.use(
@@ -367,7 +409,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(await source.readSession()).toEqual({ submitted: true });
   });
 
-  it('ADR 0002: an unknown status (drift, lower case, empty) is "could not read", never "submitted"', async () => {
+  it('ADR 0002 FR-505: an unknown status (drift, lower case, empty) is "could not read", never "submitted"', async () => {
     await startedSession();
     const source = createAdrSource({ onSessionEnded: vi.fn() });
     for (const status of ['submitted', 'DONE', '', 'FINISHED']) {
@@ -385,14 +427,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
       );
       expect(await source.readSession()).toBeNull();
     }
-    for (const status of [
-      'SUBMITTED',
-      'GRADED',
-      'UNDER_REVIEW',
-      'COMPLETED',
-      'APPEALED',
-      'EXPIRED',
-    ]) {
+    for (const status of OVER_STATUSES) {
       server.use(
         http.get(`${cand}/session`, () =>
           HttpResponse.json({

@@ -26,6 +26,10 @@ const EXTENSIONS = ['.ts', '.mjs', '.js', '.py', '.sh', '.sql'];
 const ALLOWED: Record<string, string> = {
   'apps/api/src/retention/retention.constants.ts': 'defines them',
   'apps/api/src/retention/retention.repository.ts': 'RetentionService writes and reads the markers',
+  'apps/api/src/retention/erasure/erasure.repository.ts':
+    'erasure writes the completion, notice and fence rows and reads the email markers (never RETENTION_*_DONE)',
+  'apps/api/src/retention/erasure/erasure.ports.ts':
+    'prose only: the notice port documents who writes ERASURE_EMAIL_SENT and ERASURE_EMAIL_FAILED',
   'infra/backup/erasure-list.sh':
     'prose only: its comment names the ERASURE_COMPLETED event; it writes no audit row',
   'apps/api/src/test/retention/retention-harness.ts':
@@ -75,6 +79,8 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
       'const a = `RETENTION_${tier}_DONE`;',
       "const a = ['ERASURE_', 'EMAIL_SENT'].join('');",
       "const a = 'ERASURE_' + 'EMAIL_FAILED';",
+      "const a = 'ERASURE_SESSION' + '_PURGED';",
+      "const a = 'ERASURE_LIST' + '_COMPLETED';",
     ];
     for (const sample of offenders) expect(reservedActionHits(sample)).not.toEqual([]);
     expect(reservedActionHits("action: 'RETENTION_RUN'")).toEqual([]);
@@ -87,7 +93,7 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
     }
   });
 
-  it('the constants hold exactly the six reserved action names', () => {
+  it('the constants hold exactly the ten reserved action names', () => {
     const text = readFileSync(join(REPO, 'apps/api/src/retention/retention.constants.ts'), 'utf8');
     for (const name of [
       'RETENTION_FACE_DONE',
@@ -96,6 +102,10 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
       'ERASURE_EMAIL_SENT',
       'ERASURE_EMAIL_FAILED',
       'ERASURE_COMPLETED',
+      'ERASURE_NOTICE_RECORDED',
+      'ERASURE_SESSION_FENCED',
+      'ERASURE_SESSION_PURGED',
+      'ERASURE_LIST_COMPLETED',
     ]) {
       expect(text).toContain(`'${name}'`);
     }
