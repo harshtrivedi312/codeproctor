@@ -47,7 +47,7 @@ interface State {
   scenario: InvitationScenario;
 }
 
-const TERMINAL: readonly Status[] = ['EXPIRED', 'DECLINED', 'COMPLETED'];
+const TERMINAL: readonly Status[] = ['EXPIRED', 'DECLINED', 'COMPLETED', 'ERASED'];
 const MAX_BULK = 200;
 const MOCK_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/i;
 const DETECTORS = [
@@ -79,6 +79,8 @@ function pathTo(status: Status, hoursAgo: number): Step[] {
   let chain: Status[];
   if (status === 'EXPIRED') chain = ['INVITED', 'EXPIRED'];
   else if (status === 'DECLINED') chain = ['INVITED', 'OPENED', 'DECLINED'];
+  else if (status === 'ERASED')
+    chain = [...normal.slice(0, normal.indexOf('COMPLETED') + 1), 'ERASED'];
   else if (status === 'PAUSED')
     chain = ['INVITED', 'OPENED', 'CONSENTED', 'VERIFIED', 'IN_PROGRESS', 'PAUSED'];
   else chain = normal.slice(0, normal.indexOf(status) + 1);

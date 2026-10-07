@@ -1,0 +1,84 @@
+{"level":30,"time":1791388082305,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"AuthController {/api/v1/auth}:"}
+{"level":30,"time":1791388082306,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/login, POST} route"}
+{"level":30,"time":1791388082306,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/enroll/start, POST} route"}
+{"level":30,"time":1791388082306,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/enroll/confirm, POST} route"}
+{"level":30,"time":1791388082306,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/verify, POST} route"}
+{"level":30,"time":1791388082307,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/setup/start, POST} route"}
+{"level":30,"time":1791388082307,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/setup/confirm, POST} route"}
+{"level":30,"time":1791388082307,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/disable, POST} route"}
+{"level":30,"time":1791388082307,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/recovery-codes/regenerate, POST} route"}
+{"level":30,"time":1791388082308,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/2fa/reset/:userId, POST} route"}
+{"level":30,"time":1791388082308,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/refresh, POST} route"}
+{"level":30,"time":1791388082308,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/logout, POST} route"}
+{"level":30,"time":1791388082308,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/password/forgot, POST} route"}
+{"level":30,"time":1791388082308,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/auth/password/reset, POST} route"}
+{"level":30,"time":1791388082308,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"CandidateAuthController {/api/v1/candidate/session}:"}
+{"level":30,"time":1791388082309,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/link, POST} route"}
+{"level":30,"time":1791388082309,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/otp, POST} route"}
+{"level":30,"time":1791388082309,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/start, POST} route"}
+{"level":30,"time":1791388082309,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"CandidateSessionController {/api/v1/candidate/session}:"}
+{"level":30,"time":1791388082309,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session, GET} route"}
+{"level":30,"time":1791388082309,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/consent, GET} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/consent/sign, POST} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/consent/decline, POST} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/test/start, POST} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/heartbeat, POST} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/candidate/session/proctor-key, POST} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"UsersController {/api/v1/admin/users}:"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/users, GET} route"}
+{"level":30,"time":1791388082310,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/users/lock-events, GET} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/users, POST} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/users/:userId/invite, POST} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/users/:userId, PATCH} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/users/:userId/unlock, POST} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"OrgSettingsController {/api/v1/admin/org-settings}:"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/org-settings, GET} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/admin/org-settings, PATCH} route"}
+{"level":30,"time":1791388082311,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"TestsController {/api/v1/tests}:"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/tests, GET} route"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/tests, POST} route"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/tests/:id, GET} route"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/tests/:id, PATCH} route"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"InvitationsController {/api/v1/tests}:"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/tests/:id/invitations, POST} route"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"AiPolicyController {/api/v1/questions/ai-policy}:"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/ai-policy, GET} route"}
+{"level":30,"time":1791388082312,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"QuestionsController {/api/v1/questions}:"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions, GET} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions, POST} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id, GET} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/preview, GET} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id, PATCH} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/publish, POST} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/archive, POST} route"}
+{"level":30,"time":1791388082313,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/unarchive, POST} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/test-cases, POST} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/test-cases/:testCaseId, PATCH} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/test-cases/:testCaseId, DELETE} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"VariantsController {/api/v1/questions/:id/versions/:version/variants}:"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants, GET} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants, POST} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants/:variantId/preview, GET} route"}
+{"level":30,"time":1791388082314,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants/:variantId, PATCH} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants/:variantId, DELETE} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId, PUT} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/variants/:variantId/test-cases/:testCaseId, DELETE} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"ValidationController {/api/v1/questions/:id}:"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/validate, POST} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/validation, GET} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"AiReferencesController {/api/v1/questions/:id/versions/:version/ai-references}:"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/ai-references, GET} route"}
+{"level":30,"time":1791388082315,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/ai-references, POST} route"}
+{"level":30,"time":1791388082316,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/questions/:id/versions/:version/ai-references/:aiReferenceId/supersede, POST} route"}
+{"level":30,"time":1791388082316,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"HealthController {/api/v1/health}:"}
+{"level":30,"time":1791388082316,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/health, GET} route"}
+{"level":30,"time":1791388082316,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RoutesResolver","msg":"ClientErrorsController {/api/v1/client-errors}:"}
+{"level":30,"time":1791388082316,"pid":74098,"hostname":"RYSUNUSA32.local","context":"RouterExplorer","msg":"Mapped {/api/v1/client-errors, POST} route"}
+{"level":30,"time":1791388082369,"pid":74098,"hostname":"RYSUNUSA32.local","context":"NestApplication","msg":"Nest application successfully started"}
+
+Test Suites: 2 passed, 2 total
+Tests:       72 passed, 72 total
+Snapshots:   0 total
+Time:        15.239 s, estimated 16 s
+Ran all test suites matching src/invitations.
+Force exiting Jest: Have you considered using `--detectOpenHandles` to detect async operations that kept running after all tests finished?

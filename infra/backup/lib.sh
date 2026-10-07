@@ -26,10 +26,15 @@ init_s3() {
     export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
   fi
   AWS_DEFAULT_REGION=${S3_REGION:-us-east-1}
-  AWS_REQUEST_CHECKSUM_CALCULATION=when_required
-  AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+  # R2 and other stores reject some of the CLI's default checksums; AWS S3 (no endpoint) keeps the
+  # defaults, which an Object Lock bucket needs on uploads.
+  if [ -n "${S3_ENDPOINT:-}" ]; then
+    AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+    AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+    export AWS_REQUEST_CHECKSUM_CALCULATION AWS_RESPONSE_CHECKSUM_VALIDATION
+  fi
   AWS_PAGER=
-  export AWS_DEFAULT_REGION AWS_REQUEST_CHECKSUM_CALCULATION AWS_RESPONSE_CHECKSUM_VALIDATION AWS_PAGER
+  export AWS_DEFAULT_REGION AWS_PAGER
   if [ "${S3_FORCE_PATH_STYLE:-false}" = "true" ]; then
     # An aws config file is the only way to choose path-style addressing.
     AWS_CONFIG_FILE=${WORK:?}/aws-config
@@ -43,6 +48,16 @@ init_s3() {
   printf '%s' "$PREFIX" | grep -q '^[A-Za-z0-9_/-]*$' || die "BACKUP_PREFIX may hold only letters, digits, underscore, hyphen and slash."
   case "$PREFIX" in /* | *//*) die "BACKUP_PREFIX must be a relative path." ;; esac
   # These are read by the scripts that source this file.
+  # BACKUP_MODE (ADR 0017 5.3, owner decision C-55):
+  #   versioned    (default; pilot and production) one fixed key, a versioned bucket, a lifecycle rule
+  #                that keeps the newest 3 versions, and a backup role that cannot delete anything.
+  #   timestamped  (staging: Cloudflare R2 has no object versioning) one key per dump, and the script
+  #                itself keeps the newest 3 and prunes the rest after 14 days.
+  BACKUP_MODE=${BACKUP_MODE:-versioned}
+  case "$BACKUP_MODE" in versioned | timestamped) ;; *) die "BACKUP_MODE must be versioned or timestamped." ;; esac
+  export BACKUP_MODE
+  # shellcheck disable=SC2034
+  DUMP_KEY="${PREFIX}dump/latest.dump"
   # shellcheck disable=SC2034
   DUMP_PREFIX="${PREFIX}dumps/"
   # shellcheck disable=SC2034
@@ -65,6 +80,38 @@ s3cp() {
   else
     aws s3 cp --only-show-errors "$@"
   fi
+}
+
+# s3_put_once <file> <key> <content type>: writes the object only if the key does not exist yet
+# (`If-None-Match: *`). An erasure-list entry is immutable (ADR 0004 R-7), and the pilot backup role
+# is allowed to create objects but not to overwrite or delete them (ADR 0017 5.3): `aws s3 cp` cannot
+# send the condition, so this uses put-object. A 412 means the entry already exists, which is success;
+# a 409 (concurrent conditional write) is retried and never counted as success.
+# Any other failure stops the caller: an erasure missing from the list could come back on a restore.
+s3_put_once() {
+  # 409 ConditionalRequestConflict means another conditional write on the key is in flight: try again
+  # after a short, doubling pause (bounded: 5 tries). It is never success. 412 is.
+  tries=0
+  delay=${BACKUP_PUT_RETRY_DELAY_SECONDS:-1}
+  case "$delay" in '' | *[!0-9]* | 0[0-9]* | ???*) delay=1 ;; esac
+  while :; do
+    tries=$((tries + 1))
+    if s3api put-object --bucket "$BUCKET" --key "$2" --body "$1" --content-type "$3" --if-none-match '*' ${BACKUP_SSE:+--server-side-encryption "$BACKUP_SSE"} > /dev/null 2> "$WORK/put.err"; then
+      return 0
+    fi
+    if grep -Eq 'PreconditionFailed|\(412\)' "$WORK/put.err"; then
+      log "already exists, left as it is."
+      return 0
+    fi
+    if grep -Eq 'ConditionalRequestConflict|\(409\)' "$WORK/put.err" && [ "$tries" -lt 5 ]; then
+      sleep "$delay"
+      delay=$((delay * 2))
+      continue
+    fi
+    # Only the error code reaches the log (never the message, which could name a key or an endpoint).
+    code=$(sed -n 's/.*An error occurred (\([A-Za-z0-9]*\)).*/\1/p' "$WORK/put.err" | head -n 1)
+    die "could not write the erasure list entry (attempt $tries; error ${code:-unknown}; not a 'precondition failed' answer)."
+  done
 }
 
 # load_keys <prefix>: sets KEYS to every key under the prefix, one per line. It runs in the main
@@ -101,7 +148,7 @@ sha256_of() {
   fi
 }
 
-# Dump keys look like <prefix>dumps/codeproctor-20261005T020000Z.dump.gz
+# Timestamped-mode dump keys look like <prefix>dumps/codeproctor-20261005T020000Z.dump
 STAMP_RE='[0-9]\{8\}T[0-9]\{6\}Z'
 UUID_RE='^[0-9a-fA-F]\{8\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{4\}-[0-9a-fA-F]\{12\}$'
 

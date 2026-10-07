@@ -46,7 +46,7 @@ case "$cmd" in
       exit 0
     fi
     printf '{"candidateId":"%s","erasedAt":"%s"}\n' "$id" "$stamp" > "$WORK/entry.json"
-    s3cp "$WORK/entry.json" "s3://$BUCKET/$ERASURE_PREFIX$stamp-$id.json" --content-type application/json
+    s3_put_once "$WORK/entry.json" "$ERASURE_PREFIX$stamp-$id.json" application/json
     ;;
   complete)
     # Always "now": a back-dated completion could get the entry pruned while backups still hold the data.
@@ -63,7 +63,7 @@ case "$cmd" in
       exit 0
     fi
     printf '{"candidateId":"%s","completedAt":"%s"}\n' "$id" "$stamp" > "$WORK/done.json"
-    s3cp "$WORK/done.json" "s3://$BUCKET/$COMPLETED_PREFIX$stamp-$id.json" --content-type application/json
+    s3_put_once "$WORK/done.json" "$COMPLETED_PREFIX$stamp-$id.json" application/json
     ;;
   list)
     load_keys "$ERASURE_PREFIX"
@@ -76,6 +76,7 @@ case "$cmd" in
     cat "$WORK/parsed"
     ;;
   prune)
+    [ "$BACKUP_MODE" = timestamped ] || die "prune is for BACKUP_MODE=timestamped only; in versioned mode the owner-applied expiry function prunes the list."
     before=${2:-}
     is_stamp "$before" || die "prune needs a UTC stamp."
     # Only entries whose completion marker is older than the stamp. Entries without a marker stay.

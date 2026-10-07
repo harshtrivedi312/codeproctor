@@ -43,16 +43,22 @@ export async function hitWindowCounter(
   return { count, ttlSeconds };
 }
 
-// KEYS[1] counter. Gives one hit back, but only to a live counter above zero: DECR on a key that
-// expired in the meantime would create it at -1 with no TTL, and a counter never goes below zero.
-export const REFUND_COUNTER_SCRIPT = `
+// KEYS[1] counter. Gives one hit back, never below zero, and never creates the key.
+export const WINDOW_REFUND_SCRIPT = `
 local v = tonumber(redis.call('GET', KEYS[1]))
-if v and v > 0 then
-  return redis.call('DECR', KEYS[1])
-end
+if v and v > 0 then return redis.call('DECR', KEYS[1]) end
 return 0`;
 
-/** Takes one hit back from a live window counter. Throws when Redis fails. */
+/**
+ * Gives back one hit of a window counter (a slot taken for an attempt that failed for a reason
+ * the caller could not control, such as database lock contention, DL-37). Best effort: a Redis
+ * failure is swallowed so it never masks the error being propagated. Never use it on a counter
+ * that records a failed authentication.
+ */
 export async function refundWindowCounter(redis: Redis, key: string): Promise<void> {
-  await redis.eval(REFUND_COUNTER_SCRIPT, 1, key);
+  try {
+    await redis.eval(WINDOW_REFUND_SCRIPT, 1, key);
+  } catch {
+    // The slot stays taken until the window ends; the original error is what matters.
+  }
 }

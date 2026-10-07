@@ -266,9 +266,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
 
       expect(sent).toHaveLength(1);
       expect(sent[0]?.to).toBe('ada.mixed@example.org');
-      const m = /^http:\/\/localhost:3000\/t\/start#token=([A-Za-z0-9_-]{43})$/.exec(
-        sent[0]?.inviteUrl ?? '',
-      );
+      const m = /^http:\/\/localhost:3000\/t#([A-Za-z0-9_-]{43})$/.exec(sent[0]?.inviteUrl ?? '');
       expect(m).not.toBeNull();
       const token = m?.[1] ?? '';
       expect(inv.tokenHash).toBe(sha256(token));
@@ -632,7 +630,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         invite(who, testId, goodBody()),
       ]);
       expect(res.map((r) => r.status)).toEqual([201, 201]);
-      const toks = sent.slice(-2).map((m) => /#token=(.+)$/.exec(m.inviteUrl)?.[1] ?? '');
+      const toks = sent.slice(-2).map((m) => /#(.+)$/.exec(m.inviteUrl)?.[1] ?? '');
       expect(new Set(toks).size).toBe(2);
       const rows = await owner.invitation.findMany({ where: { testId } });
       expect(new Set(rows.map((r) => r.tokenHash)).size).toBe(2);
@@ -752,7 +750,9 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         await holder.query('BEGIN');
         await holder.query('SELECT id FROM tests WHERE id = $1 FOR UPDATE', [testId]);
         const release = setTimeout(() => void holder.query('COMMIT'), 3000);
-        await invite(who, testId, goodBody()).expect(503);
+        const busy = await invite(who, testId, goodBody()).expect(503);
+        expect((busy.body as Json).code).toBe('BUSY');
+        expect(busy.headers['retry-after']).toBe('2');
         clearTimeout(release);
         Reflect.set(service, 'txTimeoutMs', before);
         await invite(who, testId, goodBody()).expect(201);
@@ -775,7 +775,9 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       try {
         await holder.query('BEGIN');
         await holder.query('SELECT id FROM tests WHERE id = $1 FOR UPDATE', [testId]);
-        await invite(who, testId, goodBody()).expect(503);
+        const busy = await invite(who, testId, goodBody()).expect(503);
+        expect((busy.body as Json).code).toBe('BUSY');
+        expect(busy.headers['retry-after']).toBe('2');
         await holder.query('COMMIT');
         Reflect.set(service, 'lockTimeoutMs', before);
         await invite(who, testId, goodBody()).expect(201);
@@ -937,9 +939,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         const res = await invite(who, testId, goodBody({ email: addr }));
         expect(Date.now() - started).toBeLessThan(5000); // cut at ~0.8 s, not held to the commit
         expect(res.status).toBe(503);
-        expect((res.body as Json).detail).toBe(
-          'The invitation could not be saved in time. Try again.',
-        );
+        expect((res.body as Json).detail).toBe('The service is busy; retry shortly.');
         await holder.query('COMMIT');
       } finally {
         Reflect.set(service, 'lockTimeoutMs', before);
@@ -968,9 +968,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         const res = await invite(who, testId, goodBody({ email: addr }));
         clearTimeout(release);
         expect(res.status).toBe(503);
-        expect((res.body as Json).detail).toBe(
-          'The invitation could not be saved in time. Try again.',
-        );
+        expect((res.body as Json).detail).toBe('The service is busy; retry shortly.');
       } finally {
         Reflect.set(service, 'txTimeoutMs', before);
         await holder.end();
@@ -1074,7 +1072,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       }
       // Not vacuous: the request log lines were captured (the path carries the test id).
       expect(lines.some((l) => l.includes(`/api/v1/tests/${testId}/invitations`))).toBe(true);
-      const tokensSeen = sent.map((s) => /#token=([A-Za-z0-9_-]+)$/.exec(s.inviteUrl)?.[1] ?? '');
+      const tokensSeen = sent.map((s) => /#([A-Za-z0-9_-]+)$/.exec(s.inviteUrl)?.[1] ?? '');
       expect(tokensSeen).toHaveLength(2);
       for (const t of tokensSeen) expect(t).toHaveLength(43);
       const planted = [...tokensSeen, addr, 'planted.person', name, 'Zxqv'];

@@ -37,6 +37,7 @@ import {
 } from './crypto.util';
 import type { RequestContext } from '../common/request-context';
 import { errorName } from '../common/request-context';
+import { isObject, lockContentionCode } from '../common/db-contention';
 import { ACCESS_TTL_SECONDS } from '../common/auth/access-ttl';
 import { TokenService } from '../common/auth/token.service';
 import { TokenValidityService } from '../common/auth/token-validity.service';
@@ -90,7 +91,13 @@ type Reservation = 'granted' | 'denied';
 
 /** Failures that mean "try again with the same challenge": a wrong code or an outage. */
 function isRetryable(e: unknown): boolean {
-  return e instanceof BadRequestException || e instanceof ServiceUnavailableException;
+  // Database lock contention is answered 503 + Retry-After (DL-37): the transaction rolled back,
+  // so the same challenge must stay usable for the retry it invites.
+  return (
+    e instanceof BadRequestException ||
+    e instanceof ServiceUnavailableException ||
+    lockContentionCode(e) !== undefined
+  );
 }
 
 /** How long shutdown waits for deferred reset and lock mail. */
@@ -102,6 +109,8 @@ const SHUTDOWN_CATCH_ALL_MS = 1_000;
 export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
   private readonly logger = new Logger(AuthService.name);
+  /** Errors whose reservation was already given back, so a caller does not refund them twice. */
+  private readonly refundedErrors = new WeakSet<object>();
   /** Deferred forgot-password work still running; awaited by tests and at shutdown. */
   private readonly deferred = new Set<Promise<void>>();
 
@@ -203,6 +212,13 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         await this.refundAttempt(user).catch(() => undefined);
         throw this.invalid();
       }
+      // DL-37: the password was already right and opening the session hit lock contention (503,
+      // retry): give back the attempt of THIS request only. startSession runs on the root client
+      // here, with no transaction: the refresh-family INSERT may already have committed when
+      // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-184). Failed-guess counts (wrong
+      // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
+      if (lockContentionCode(e) !== undefined)
+        await this.refundAttempt(user).catch(() => undefined);
       throw e;
     }
   }
@@ -273,8 +289,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   /**
    * Runs `fn` with the challenge marked used (Redis SET NX), so one challenge cannot mint two
    * sessions. A Redis outage is a 503 (nothing is reserved or counted yet). The mark is released
-   * only when `fn` ends in a wrong code or an outage, so a retry stays possible; once state may
-   * have changed the challenge stays spent. If releasing the mark also fails (Redis
+   * when `fn` ends in a wrong code, an outage or database lock contention (503 + Retry-After), so
+   * a retry stays possible. Other errors leave it spent. Contention can follow a committed refresh
+   * family INSERT (the TOTP path has no transaction around startSession), which then never
+   * reaches the client: unusable, and tracked by FU-BE-184. If releasing the mark also fails (Redis
    * still down), the challenge stays spent until its TTL: the user signs in again.
    */
   private async withChallengeUse<T>(jti: string, fn: () => Promise<T>): Promise<T> {
@@ -532,6 +550,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       return await this.totp.verify(user.id, encryptedSecret, code);
     } catch (e) {
       await this.refundAttempt(user).catch(() => undefined);
+      // The caller must not refund this same failure a second time (DL-37).
+      if (isObject(e)) this.refundedErrors.add(e);
       throw e;
     }
   }
@@ -571,9 +591,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     if (!user.totpEnabled || !secret) throw this.challengeExpired();
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
+    let wrongCode = false;
     try {
       if (/^\d{6}$/.test(code)) {
         if (!(await this.verifyTotp(user, secret, code))) {
+          wrongCode = true; // a failed guess is never refunded (DL-37)
           return await this.failCode(user, ctx);
         }
         return await this.startSession(user, this.prisma.client, secret);
@@ -596,10 +618,21 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         return this.startSession(user, tx, secret);
       });
     } catch (e) {
+      // A wrong recovery code is a failed guess: counted by failCode, returned before any refund
+      // below, so it is never refunded (DL-37).
       if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
       if (e instanceof PasswordChangedSignal) {
         await this.refundAttempt(user).catch(() => undefined);
         throw this.challengeExpired();
+      }
+      // DL-37: contention (503, retry) before a verdict on the code was recorded gave no guess
+      // oracle, so this request's reservation goes back. A wrong code (failCode) is never refunded.
+      if (
+        !wrongCode &&
+        lockContentionCode(e) !== undefined &&
+        !(isObject(e) && this.refundedErrors.has(e))
+      ) {
+        await this.refundAttempt(user).catch(() => undefined);
       }
       throw e;
     }
@@ -837,7 +870,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // A rotated or revoked token came back: assume theft and kill the whole family (TC-005).
       const revoked = await this.revokeFamily(existing.familyId);
       // Audit only when the reuse actually killed live tokens, not on every later retry.
-      if (revoked > 0) await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+      if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
       throw new UnauthorizedException('Authentication required.');
     }
     if (existing.expiresAt.getTime() <= Date.now()) {
@@ -896,7 +929,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         // Only a real reuse kills live tokens; a reset that revoked the family first does not
         // raise a theft alert (FU-BE-41).
         const revoked = await this.revokeFamily(existing.familyId);
-        if (revoked > 0) await this.audit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+        if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
         throw new UnauthorizedException('Authentication required.');
       }
       throw e;
@@ -915,7 +948,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (!user) return;
       await this.asUser(user, async () => {
         await this.revokeFamily(existing.familyId);
-        await this.audit(user, 'AUTH_LOGOUT', ctx);
+        await this.auditAfterCommit(user, 'AUTH_LOGOUT', ctx);
       });
     });
   }
@@ -1221,7 +1254,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * SUPER_ADMINs of the same org (FU-BE-22).
    */
   private async recordLock(user: User, ctx: RequestContext): Promise<void> {
-    await this.audit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
+    await this.auditAfterCommit(user, 'AUTH_ACCOUNT_LOCKED', ctx, { minutes: LOCKOUT_MINUTES });
     const { orgId, email, fullName } = user;
     this.defer('lock-alert', () => this.alertAdmins(orgId, email, fullName));
   }
@@ -1245,6 +1278,25 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         }
       }
     });
+  }
+
+  /**
+   * An audit row written after the state change committed, on an auth route (login lockout,
+   * re-auth failure lockout, refresh reuse, logout). A failure here is logged by class name (the
+   * alert hook, FU-BE-191) and NEVER changes the response: a 500 on these paths would tell an
+   * existing account from an unknown one (api-contract section 8, P-37).
+   */
+  private async auditAfterCommit(
+    user: User,
+    action: string,
+    ctx: RequestContext,
+    metadata: Prisma.InputJsonObject = {},
+  ): Promise<void> {
+    try {
+      await this.audit(user, action, ctx, metadata);
+    } catch (e) {
+      this.logger.error(`Audit write after commit failed (${errorName(e)}) for ${action}`);
+    }
   }
 
   private async audit(

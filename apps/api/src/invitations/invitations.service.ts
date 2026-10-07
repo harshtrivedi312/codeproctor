@@ -40,6 +40,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
 import { newOpaqueToken, sha256Hex } from '../auth/crypto.util';
+import { lockContentionCode } from '../common/db-contention';
 import type { RequestContext } from '../common/request-context';
 import { hitWindowCounter, refundWindowCounter } from '../common/redis-counter';
 import type { Env } from '../config/env';
@@ -65,8 +66,8 @@ const START_SKEW_MS = 5 * 60_000;
 const RATE_WINDOW_SECONDS = 60 * 60;
 const NOT_FOUND = 'Test not found.';
 
-/** The candidate page the web reads. /t/start moves the fragment token into memory (FE-09). */
-export const INVITE_PATH = '/t/start';
+/** The candidate entry page (FR-407). The token travels in the URL fragment: `/t#<token>`. */
+export const INVITE_PATH = '/t';
 
 @Injectable()
 export class InvitationsService {
@@ -206,13 +207,20 @@ export class InvitationsService {
         { timeout: this.txTimeoutMs, maxWait: this.txMaxWaitMs },
       );
     } catch (e) {
-      const failure = this.mapTimeout(e);
       // The rate slot is refunded only when the failure is the server's (5xx: lock contention,
-      // timeout, port 503, bug), so a retry does not burn the hourly budget. 400, 404, 409 and 422
-      // are legitimate attempts and keep their slot. Best effort; the original error is rethrown.
-      const status = failure instanceof HttpException ? failure.getStatus() : 500;
+      // port 503, bug) and no invitation was created (the transaction rolled back), so a retry
+      // does not burn the hourly budget. 400, 404, 409 and 422 are legitimate attempts and keep
+      // their slot. Lock contention is rethrown as is: ProblemFilter answers it 503 BUSY with
+      // Retry-After (DL-37), and lockContentionCode is the same test the filter uses, so the status
+      // the refund sees equals the status the client gets (FU-BE-172). Best effort.
+      const status =
+        e instanceof HttpException
+          ? e.getStatus()
+          : lockContentionCode(e) !== undefined
+            ? HttpStatus.SERVICE_UNAVAILABLE
+            : HttpStatus.INTERNAL_SERVER_ERROR;
       if (status >= 500) await this.refundSlot(slot);
-      throw failure;
+      throw e;
     }
 
     // The mail is outside the transaction: an outcome other than queued does not undo anything.
@@ -268,20 +276,6 @@ export class InvitationsService {
     }
   }
 
-  /**
-   * A transaction timeout (P2028) or a lock wait cut by lock_timeout (Postgres 55P03, which Prisma
-   * 7 reports as P2039 with the driver code in meta) is a fixed 503; the transaction is rolled
-   * back. Backend PR #216 maps these generally; this keeps the route safe until it lands.
-   */
-  private mapTimeout(e: unknown): unknown {
-    if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return e;
-    const cause = (e.meta as { driverAdapterError?: { cause?: { code?: unknown } } } | undefined)
-      ?.driverAdapterError?.cause;
-    if (e.code !== 'P2028' && cause?.code !== '55P03') return e;
-    this.log.warn('Invitation transaction timed out or lock wait cut.');
-    return new ServiceUnavailableException('The invitation could not be saved in time. Try again.');
-  }
-
   /** Server time is the only clock: the rules compare against `now`, never a client value. */
   private window(dto: CreateInvitationDto, now: Date): { start: Date; end: Date } {
     const start = dto.windowStart === undefined ? now : parseInstant(dto.windowStart);
@@ -311,7 +305,7 @@ export class InvitationsService {
   ): Promise<MailOutcome> {
     try {
       return await this.mail.sendInvitation(to, {
-        inviteUrl: `${this.webOrigin}${INVITE_PATH}#token=${token}`,
+        inviteUrl: `${this.webOrigin}${INVITE_PATH}#${token}`,
         windowStartsAt,
         windowEndsAt,
       });
