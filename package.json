@@ -11,6 +11,7 @@
     "dev:infra": "docker compose --env-file .env -f infra/docker-compose.yml up -d --wait",
     "dev:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
     "dev:infra:reset": "sh infra/scripts/dev-infra-reset",
+    "dev:api": "pnpm --filter @codeproctor/api dev",
     "dev:web": "pnpm --filter @codeproctor/web dev",
     "dev:web:mock": "pnpm --filter @codeproctor/web dev:mock",
     "db:generate": "prisma generate",
