@@ -1,47 +1,40 @@
 // SessionJobProcessor (ADR 0013 section 5.7, CS-4.1, CS-4.7; FR-505, NFR-04). A fake transaction
-// and a recording lock port prove the order and the outcomes; the real scope is real.
+// and a recording SessionStateService fake prove the order and the outcomes; the real scope is real.
 import { Logger } from '@nestjs/common';
-import { UnrecoverableError } from 'bullmq';
 import type { SessionStatus } from '../generated/prisma/enums.js';
 import { randomUUID } from 'node:crypto';
+import { SessionLockRetryError, SessionNotFoundError } from '../database/errors';
 import { OrgContextService } from '../database/org-context';
 import type { PrismaService } from '../database/prisma.service';
 import { ANY_SESSION_JOBS, SessionJobProcessor, type AnySessionJob } from './session-job.processor';
-import {
-  SessionLockPort,
-  SessionLockRetryError,
-  SessionLockUnavailableError,
-  SessionNotFoundError,
-  type SessionLockState,
-  type SessionTx,
-} from './session-lock.port';
+import type { SessionStateService, SessionTx } from './session-state.service';
+
+type SessionLockState = 'LIVE' | 'ERASED';
 
 const ORG = randomUUID();
 const SID = randomUUID();
 
-class Locks extends SessionLockPort {
+/** The two lock wrappers of SessionStateService, recording their order. The real core runs in verify-session.jobs.spec.ts. */
+class Locks {
   state: SessionLockState | Error = 'LIVE';
-  constructor(private readonly events: string[]) {
-    super();
-  }
+  constructor(private readonly events: string[]) {}
   guardLive(_tx: SessionTx, sessionId: string): Promise<SessionLockState> {
     this.events.push(`guardLive ${sessionId}`);
     return this.state instanceof Error ? Promise.reject(this.state) : Promise.resolve(this.state);
   }
-  lockAnySession(_tx: SessionTx, sessionId: string): Promise<SessionLockState> {
+  lockAnySession(_tx: SessionTx, sessionId: string): Promise<SessionStatus> {
     this.events.push(`lockAnySession ${sessionId}`);
-    return this.state instanceof Error ? Promise.reject(this.state) : Promise.resolve(this.state);
-  }
-  lockForAccommodation(): Promise<SessionStatus> {
-    return Promise.reject(new Error('not used by session jobs'));
+    return this.state instanceof Error
+      ? Promise.reject(this.state)
+      : Promise.resolve(this.state === 'ERASED' ? 'ERASED' : 'IN_PROGRESS');
   }
 }
 
 class Probe extends SessionJobProcessor {
   protected readonly logger = new Logger('Probe');
   protected override readonly anySessionJobs: readonly AnySessionJob[] = ANY_SESSION_JOBS;
-  constructor(prisma: PrismaService, orgContext: OrgContextService, locks: SessionLockPort) {
-    super(prisma, orgContext, locks);
+  constructor(prisma: PrismaService, orgContext: OrgContextService, locks: Locks) {
+    super(prisma, orgContext, locks as unknown as SessionStateService);
   }
   live<T>(fn: (tx: SessionTx) => Promise<T>) {
     return this.withLiveSession(SID, ORG, fn);
@@ -202,7 +195,7 @@ describe('SessionJobProcessor (ADR 0013 section 5.7, CS-4.7)', () => {
     class Plain extends SessionJobProcessor {
       protected readonly logger = new Logger('Plain');
       constructor() {
-        super(prisma, orgContext, locks);
+        super(prisma, orgContext, locks as unknown as SessionStateService);
       }
       attempt() {
         return this.withAnySession('ingest-close', SID, ORG, () => Promise.resolve(1));
@@ -210,15 +203,6 @@ describe('SessionJobProcessor (ADR 0013 section 5.7, CS-4.7)', () => {
     }
     await expect(new Plain().attempt()).rejects.toThrow(/may not use withAnySession/);
     expect(events).toEqual([]);
-  });
-
-  it('ADR 0013 5.7: an unwired lock layer fails the job for good (UnrecoverableError, class name only) and rolls back', async () => {
-    const { probe, locks, events } = setup();
-    locks.state = new SessionLockUnavailableError();
-    const error: unknown = await probe.live(() => Promise.resolve(1)).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(UnrecoverableError);
-    expect((error as Error).message).toBe('SessionLockUnavailableError');
-    expect(events).toEqual(['begin', `guardLive ${SID}`, 'rollback']);
   });
 
   it('ADR 0013 5.7: Postgres lock_timeout (55P03), deadlock (40P01) and Prisma P2034 become a BullMQ retry, also when wrapped', async () => {

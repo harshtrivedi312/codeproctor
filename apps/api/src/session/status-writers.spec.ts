@@ -8,6 +8,12 @@ import { join, relative, resolve, sep } from 'node:path';
 
 const SRC = resolve(__dirname, '..');
 const OWNER = 'session/session-state.service.ts';
+/**
+ * Database A's lock core (#208): its compare-and-set is `updateMany({ where: { id, status }, data: { status } })`, which
+ * writes the status it just read back (a row lock, never a change). It is exempt from the scan only while every `data`
+ * of its writes is exactly `{ status }` (the test below).
+ */
+const LOCK_CORE = 'database/session-locks.ts';
 
 const WRITE_CALL =
   /\bsession\s*\.\s*(?:create|createMany|createManyAndReturn|update|updateMany|updateManyAndReturn|upsert)\s*\(/g;
@@ -99,9 +105,25 @@ function sources(dir: string): Array<{ path: string; text: string }> {
 describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4.4a)', () => {
   it('FR-106: no file except session-state.service.ts writes the status column', () => {
     const offenders = sources(SRC)
-      .filter((f) => f.path !== OWNER)
+      .filter((f) => f.path !== OWNER && f.path !== LOCK_CORE)
       .flatMap((f) => findStatusWrites(f.text).map((m) => `${f.path}: ${m}`));
     expect(offenders).toEqual([]);
+  });
+
+  it('FR-106, ADR 0013 5.7: the lock core writes the status back unchanged and nothing else: every data is exactly { status }, no create, upsert or raw SQL', () => {
+    const core = sources(SRC).find((f) => f.path === LOCK_CORE);
+    expect(core).toBeDefined();
+    const text = (core?.text ?? '').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const writes = findStatusWrites(text);
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((w) => w.endsWith('data: { status }'))).toBe(true);
+    const bodies = [...text.matchAll(/\bdata\s*:\s*\{([^}]*)\}/g)]
+      .map((m) => (m[1] ?? '').trim())
+      // the SessionLockTx type declares the same key as `{ readonly status: SessionStatus }`: not a write
+      .filter((b) => !b.startsWith('readonly'));
+    expect(bodies.length).toBe(writes.length);
+    expect(bodies.every((b) => b === 'status')).toBe(true);
+    expect(text).not.toMatch(/\.(create|createMany|upsert|update)\s*\(|\$executeRaw|\$queryRaw/);
   });
 
   it('FR-106: the owner file is scanned and does write the column (the scan can find a write)', () => {

@@ -135,7 +135,8 @@ describe('Session jobs write only through SessionJobProcessor (ADR 0013 5.7, CS-
     const aliased = everyFile(SRC)
       .filter(
         (f) =>
-          /\bWorker\s+as\s+\w+/.test(strip(f.text)) && !/session-job-writers\.spec/.test(f.path),
+          /\bWorker\s+as\s+\w+/.test(f.text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')) &&
+          !/session-job-writers\.spec/.test(f.path),
       )
       .map((f) => f.path);
     expect(aliased).toEqual([]);
@@ -180,7 +181,7 @@ describe('Session jobs write only through SessionJobProcessor (ADR 0013 5.7, CS-
       .sort((x, y) => y[0] - x[0])
       .reduce((out, [from, to]) => out.slice(0, from) + out.slice(to), text);
 
-  it('ADR 0013 5.7, FU-DB-67: guardLive has exactly two callers: withLiveSession and SessionStateService.proctorResume (plus the wrapper that delegates)', () => {
+  it('ADR 0013 5.7, FU-DB-67: guardLive has exactly two member callers: withLiveSession and SessionStateService.proctorResume (the wrapper itself calls the core, not a member)', () => {
     const callers = all
       .filter((f) => /\.guardLive\s*\(/.test(strip(f.text)))
       .map((f) => f.path)
@@ -193,16 +194,17 @@ describe('Session jobs write only through SessionJobProcessor (ADR 0013 5.7, CS-
     // The processor: the call is inside withLiveSession and nowhere else in the file.
     const processor = all.find((f) => f.path === OWNER)?.text ?? '';
     const live = methodRange(processor, 'withLiveSession');
-    expect(strip(processor.slice(live[0], live[1]))).toMatch(/\.guardLive\s*\(/);
+    expect(strip(processor.slice(live[0], live[1]))).toMatch(/this\.state\.guardLive\s*\(/);
     expect(strip(without(processor, [live]))).not.toMatch(/\.guardLive\s*\(/);
 
-    // The state service: calls only inside proctorResume and the guardLive wrapper; the REST of the
-    // file (everything outside both) has none.
+    // The state service: the one call is inside proctorResume; the wrapper body is exactly the core call.
     const state = all.find((f) => f.path === 'session/session-state.service.ts')?.text ?? '';
     const resume = methodRange(state, 'proctorResume');
     const wrapper = methodRange(state, 'guardLive');
     expect(strip(state.slice(resume[0], resume[1]))).toMatch(/this\.guardLive\s*\(/);
-    expect(strip(state.slice(wrapper[0], wrapper[1]))).toMatch(/this\.locks\.guardLive\s*\(/);
+    expect(strip(state.slice(wrapper[0], wrapper[1]))).toMatch(
+      /return coreGuardLive\(tx, sessionId\);/,
+    );
     const rest = strip(without(state, [resume, wrapper]));
     expect(rest.length).toBeGreaterThan(1000);
     expect(rest).not.toMatch(/\.guardLive\s*\(/);
@@ -213,21 +215,47 @@ describe('Session jobs write only through SessionJobProcessor (ADR 0013 5.7, CS-
       .filter((f) => /\.lockAnySession\s*\(/.test(strip(f.text)))
       .map((f) => f.path)
       .sort();
-    expect(any).toEqual(['session/session-job.processor.ts', 'session/session-state.service.ts']);
+    expect(any).toEqual(['session/session-job.processor.ts']);
     const processor = all.find((f) => f.path === OWNER)?.text ?? '';
     const [aa, ab] = methodRange(processor, 'withAnySession');
-    expect(strip(processor.slice(aa, ab))).toMatch(/\.lockAnySession\s*\(/);
+    expect(strip(processor.slice(aa, ab))).toMatch(/this\.state\.lockAnySession\s*\(/);
     expect(strip(processor.slice(aa, ab))).not.toMatch(/\.guardLive\s*\(/);
-    // In the state service the wrapper is the only place: nothing else in the file uses the port.
+    expect(strip(without(processor, [[aa, ab]]))).not.toMatch(/\.lockAnySession\s*\(/);
+    // In the state service the three wrappers hold each core exactly once; nothing else in the file.
     const state = all.find((f) => f.path === 'session/session-state.service.ts')?.text ?? '';
-    const wrappers = ['guardLive', 'lockAnySession', 'lockForAccommodation'].map((n) =>
-      methodRange(state, n),
-    );
-    const restOfState = strip(without(state, [...wrappers, methodRange(state, 'proctorResume')]));
-    expect(restOfState).not.toMatch(/\.lockAnySession\s*\(|\.lockForAccommodation\s*\(|\.locks\./);
+    for (const [name, alias] of [
+      ['guardLive', 'coreGuardLive'],
+      ['lockAnySession', 'coreLockAnySession'],
+      ['lockForAccommodation', 'coreLockForAccommodation'],
+    ] as const) {
+      const [from, to] = methodRange(state, name);
+      expect(strip(state.slice(from, to))).toContain(`return ${alias}(tx, sessionId);`);
+      expect(
+        strip(without(state, [[from, to]])).match(new RegExp(`\\b${alias}\\b`, 'g')),
+      ).toHaveLength(1);
+    }
+    expect(strip(state)).not.toMatch(/\.lockAnySession\s*\(|\.lockForAccommodation\s*\(|\.locks\./);
+    // No caller of lockForAccommodation exists in this layer (accommodations.ts adds one later).
     const accommodation = all
       .filter((f) => /\.lockForAccommodation\s*\(/.test(strip(f.text)))
       .map((f) => f.path);
-    expect(accommodation).toEqual(['session/session-state.service.ts']);
+    expect(accommodation).toEqual([]);
+  });
+
+  it('ADR 0013 5.7: nothing outside session-state.service.ts imports the lock core, and the retired port is gone', () => {
+    const importers = all
+      .filter(
+        (f) =>
+          /from\s+['"][^'"]*database\/session-locks/.test(
+            f.text.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''),
+          ) && !f.path.startsWith('database/'),
+      )
+      .map((f) => f.path);
+    expect(importers).toEqual(['session/session-state.service.ts']);
+    expect(
+      all.some((f) =>
+        /session-lock\.port|SessionLockPort|SessionLockUnavailableError/.test(f.text),
+      ),
+    ).toBe(false);
   });
 });
