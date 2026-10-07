@@ -5,8 +5,9 @@
 // The error reaches us in two shapes (both exist in this repo): Prisma's own known request error
 // (`code` P2028 / P2034, or any code with the driver error in `meta.driverAdapterError`), and the
 // pg driver-adapter shape, where the SQLSTATE sits in `originalCode` or `code` of the error or of
-// something in its `cause` chain. The walk is bounded and cycle-safe, and reads codes only: it
-// never reads or returns a message, because those can carry SQL and argument values.
+// something in its `cause` chain. The walk is bounded and cycle-safe and reads codes. The one message
+// it reads is compared with the fixed pool-timeout sentence (FU-BE-197, DL-42) and never returned
+// or logged, because messages can carry SQL and argument values.
 import { HttpException } from '@nestjs/common';
 import { OrgScopeError } from '../database/errors';
 import { Prisma } from '../generated/prisma/client';
@@ -22,6 +23,22 @@ export const LOCK_CONTENTION_DETAIL = 'The service is busy; retry shortly.';
 
 const SQLSTATES = new Set(['55P03', '40P01', '40001']);
 const PRISMA_CODES = new Set(['P2028', 'P2034']);
+
+/**
+ * The token for a pool-wait timeout (FU-BE-197, DL-42): a request waited longer than
+ * DB_CONNECT_TIMEOUT_MS for a free pooled connection. No SQLSTATE exists for it, because no
+ * statement reached Postgres.
+ */
+export const POOL_TIMEOUT_TOKEN = 'POOL_TIMEOUT' as const;
+
+/**
+ * What pg-pool throws when the wait for a free slot runs out. Observed on Prisma 7.10 with
+ * @prisma/adapter-pg (pool-timeout-shape.spec.ts): a bare `Error` with this exact message and no
+ * `code`, `cause` or `meta`, for a plain query, an interactive transaction start and an execute
+ * alike. Prisma's own P2024 means the same and is matched by code. The message is compared, never
+ * returned or logged.
+ */
+const POOL_TIMEOUT_MESSAGE = 'timeout exceeded when trying to connect';
 const MAX_DEPTH = 8;
 
 export function isObject(value: unknown): value is Record<string, unknown> {
@@ -30,7 +47,8 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * The fixed code token (a Postgres SQLSTATE or a Prisma code) when the error is lock contention,
- * otherwise undefined. The result is one of five constants, so it is safe to log.
+ * otherwise undefined. The result is one of six constants (the five contention codes or
+ * POOL_TIMEOUT), so it is safe to log.
  */
 export function lockContentionCode(error: unknown): string | undefined {
   const seen = new Set<unknown>();
@@ -42,6 +60,10 @@ export function lockContentionCode(error: unknown): string | undefined {
     if (node instanceof Prisma.PrismaClientKnownRequestError && PRISMA_CODES.has(node.code)) {
       return node.code === 'P2028' ? 'P2028' : 'P2034';
     }
+    if (node instanceof Prisma.PrismaClientKnownRequestError && node.code === 'P2024') {
+      return POOL_TIMEOUT_TOKEN;
+    }
+    if (node instanceof Error && node.message === POOL_TIMEOUT_MESSAGE) return POOL_TIMEOUT_TOKEN;
     for (const key of ['originalCode', 'code'] as const) {
       const value = node[key];
       if (typeof value === 'string' && SQLSTATES.has(value)) return value;

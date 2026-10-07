@@ -2782,6 +2782,35 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(await slot('heartbeat', inv.sessionId)).toBe(2);
     });
 
+    it('DL-42, FU-BE-197, FR-609: a pool-wait timeout gives the slot back like any busy error; an unrelated Error with another message does not', async () => {
+      const { SessionRateLimiter: Limiter } =
+        jest.requireActual<typeof import('./session-rate-limiter')>('./session-rate-limiter');
+      const limiter = new Limiter(redis);
+      const sid = randomUUID();
+      const pool = (): Promise<never> =>
+        Promise.reject(new Error('timeout exceeded when trying to connect'));
+      await limiter.guarded('pool', sid, 100, 60, pool).catch(() => undefined);
+      expect(await slot('pool', sid)).toBe(0);
+      await limiter
+        .guarded('pool', sid, 100, 60, () => Promise.reject(new Error('something else')))
+        .catch(() => undefined);
+      expect(await slot('pool', sid)).toBe(1);
+    });
+
+    it('DL-42, FU-BE-197, FR-106: a pool-wait timeout after a correct code puts the code back; the same code works on the retry', async () => {
+      const inv = await invite();
+      const code = await otpFor(inv);
+      const spy = jest
+        .spyOn(states, 'transition')
+        .mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'));
+      const first = await post('/start', { invitationToken: inv.token, otp: code });
+      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
+      expect(await sessionRow(inv.sessionId)).toMatchObject({ status: 'INVITED', authEpoch: 0 });
+      spy.mockRestore();
+      expect((await post('/start', { invitationToken: inv.token, otp: code })).status).toBe(200);
+    });
+
     it('DL-37: slots given back are capped per window (2), never below zero, and a release after the window ended takes nothing off the new window', async () => {
       const { SessionRateLimiter: Limiter } =
         jest.requireActual<typeof import('./session-rate-limiter')>('./session-rate-limiter');

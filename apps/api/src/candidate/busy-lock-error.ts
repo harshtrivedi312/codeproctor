@@ -4,29 +4,11 @@
 // shapes Prisma 7 with the pg adapter produces; database/error-scrub.ts reads the same places).
 // Backend A's ProblemFilter turns these into 503 with Retry-After so the client retries; the code
 // here only has to give back what it took BEFORE the failing statement and rethrow the error as it
-// is. FU-BEB-117: when the session-job branch merges, replace this with session/busy-lock.ts.
-const BUSY = new Set(['55P03', '40P01', 'P2034', 'P2028']);
-
-type Probe = {
-  code?: unknown;
-  originalCode?: unknown;
-  meta?: { code?: unknown; driverAdapterError?: { cause?: unknown } };
-  cause?: unknown;
-};
-
-const busy = (value: unknown): boolean => typeof value === 'string' && BUSY.has(value);
+// is. Since FU-BE-197 (DL-42) it is the same predicate as the filter's (a pool-wait timeout
+// counts: the action did not take place).
+// FU-BEB-117: when the session-job branch merges, replace this with session/busy-lock.ts.
+import { lockContentionCode } from '../common/db-contention';
 
 export function isBusyLockError(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth++) {
-    const e = current as Probe;
-    if (busy(e.code) || busy(e.originalCode) || busy(e.meta?.code)) return true;
-    const adapter = e.meta?.driverAdapterError?.cause;
-    if (typeof adapter === 'object' && adapter !== null) {
-      const c = adapter as Probe;
-      if (busy(c.originalCode) || busy(c.code)) return true;
-    }
-    current = e.cause;
-  }
-  return false;
+  return lockContentionCode(error) !== undefined;
 }
