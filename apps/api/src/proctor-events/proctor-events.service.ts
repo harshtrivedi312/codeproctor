@@ -9,17 +9,23 @@
 // The session comes from the CandidateContext only (CS-1); a session id in the body is stripped by
 // the schema. Severity is assigned here from the type (ADR 0005); a client severity never arrives.
 // Never logged: bodies, keystroke text, signatures, keys.
-import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DEFAULT_EVENT_SEVERITY,
-  isClientEventType,
   keystrokeBatchSchema,
   proctorEventBatchSchema,
   shouldPushToLive,
 } from '@codeproctor/shared';
 import type {
   ClientProctorEvent,
+  EventType,
   KeystrokeBatch,
   ProctorEventBatch,
   Severity,
@@ -42,7 +48,10 @@ import { sessionNotActive } from '../session/session-write-gate';
 import { EPOCH_WINDOW, SIGNATURE_FORMAT, hmacOf, sameBytes } from './signature';
 
 /** The scoped client, or the client a `$transaction` callback receives. */
-type BatchDb = Pick<OrgScopedPrismaClient, 'proctorEventBatch' | 'proctorEvent' | 'keystrokeBatch'>;
+type BatchDb = Pick<
+  OrgScopedPrismaClient,
+  'proctorEventBatch' | 'proctorEvent' | 'keystrokeBatch' | 'session'
+>;
 
 /** What the routes need of the session row, read once per request (org scope: the key column). */
 export interface IngestSession {
@@ -68,6 +77,44 @@ const PAUSE_REMOVE: Readonly<Partial<Record<ClientProctorEvent['type'], PauseRea
   FULLSCREEN_RESTORED: 'FULLSCREEN_EXIT',
   SIDE_CAMERA_RECONNECTED: 'SIDE_CAMERA_LOST',
 };
+
+const CANDIDATE_REASONS: readonly PauseReason[] = [
+  'FULLSCREEN_EXIT',
+  'SCREEN_SHARE_STOPPED',
+  'SIDE_CAMERA_LOST',
+];
+const REASON_EVENTS: Readonly<
+  Record<PauseReason, { add: readonly EventType[]; remove: readonly EventType[] }>
+> = {
+  FULLSCREEN_EXIT: { add: ['FULLSCREEN_EXIT'], remove: ['FULLSCREEN_RESTORED'] },
+  SCREEN_SHARE_STOPPED: { add: ['SCREEN_SHARE_STOPPED'], remove: ['SCREEN_SHARE_RESUMED'] },
+  SIDE_CAMERA_LOST: { add: ['SIDE_CAMERA_DISCONNECTED'], remove: ['SIDE_CAMERA_RECONNECTED'] },
+  PROCTOR: { add: [], remove: [] },
+};
+/** Tries before a pause effect gives up on a session whose state keeps changing. */
+const PAUSE_ATTEMPTS = 4;
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+/** True when any string or key in the parsed JSON has U+0000 or a lone surrogate (iterative walk). */
+function hasUnstorableText(root: unknown): boolean {
+  const bad = (text: string): boolean => text.includes('\u0000') || LONE_SURROGATE.test(text);
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (typeof value === 'string') {
+      if (bad(value)) return true;
+    } else if (Array.isArray(value)) {
+      stack.push(...(value as unknown[]));
+    } else if (typeof value === 'object' && value !== null) {
+      for (const [k, v] of Object.entries(value)) {
+        if (bad(k)) return true;
+        stack.push(v);
+      }
+    }
+  }
+  return false;
+}
 
 function coded(
   status: HttpStatus,
@@ -208,11 +255,23 @@ export class ProctorEventsService {
   // ---------- 5. parse ----------
 
   private decode(raw: Buffer): unknown {
+    let value: unknown;
     try {
-      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)) as unknown;
+      value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)) as unknown;
     } catch {
       throw coded(HttpStatus.BAD_REQUEST, 'The batch is not valid JSON.', 'VALIDATION_FAILED');
     }
+    // Postgres jsonb cannot hold U+0000 (22P05) or a lone surrogate. Zod allows both, so a batch
+    // carrying one would fail at the insert with a 500 and the SDK would retry it forever. Refuse it
+    // here with a 400: the SDK drops a 400 batch and counts it (transport.ts), it never loops.
+    if (hasUnstorableText(value)) {
+      throw coded(
+        HttpStatus.BAD_REQUEST,
+        'The batch contains text that cannot be stored.',
+        'VALIDATION_FAILED',
+      );
+    }
+    return value;
   }
 
   private invalidBatch(
@@ -247,7 +306,8 @@ export class ProctorEventsService {
     const { received, windowKeys } = this.verify(ctx, session, raw, signature);
     try {
       const batch = this.parseEvents(raw);
-      const events = batch.events.filter((e) => isClientEventType(e.type));
+      // The shared schema admits CLIENT event types only (server-only types fail validation).
+      const events = batch.events;
       const rows = events.map((e) => ({
         sessionId: ctx.sessionId,
         batchSeq: batch.seq,
@@ -278,6 +338,9 @@ export class ProctorEventsService {
             },
           });
           await db.proctorEvent.createMany({ data: rows });
+          if (LIVE_STATUSES.includes(session.status)) {
+            await this.applyPauseEffects(db, ctx, events, now);
+          }
         },
         (db) =>
           db.proctorEventBatch
@@ -288,9 +351,8 @@ export class ProctorEventsService {
             .then((r) => r?.signature ?? null),
       );
       if (!stored.duplicate) {
-        await this.afterEvents(
+        await this.publishLive(
           ctx,
-          session,
           events,
           rows.map((r) => r.severity),
           now,
@@ -298,6 +360,9 @@ export class ProctorEventsService {
         this.log.log(
           `events stored session=${ctx.sessionId} seq=${String(batch.seq)} n=${String(rows.length)}`,
         );
+      } else if (LIVE_STATUSES.includes(session.status)) {
+        // A retry: make sure the pause that batch implied is in place (idempotent, from history).
+        await this.reapplyPauseEffects(ctx, events, now);
       }
       return stored;
     } finally {
@@ -405,17 +470,6 @@ export class ProctorEventsService {
 
   // ---------- after commit ----------
 
-  private async afterEvents(
-    ctx: CandidateContext,
-    session: IngestSession,
-    events: ProctorEventBatch['events'],
-    severities: ReadonlyArray<Severity>,
-    now: Date,
-  ): Promise<void> {
-    await this.publishLive(ctx, events, severities, now);
-    if (LIVE_STATUSES.includes(session.status)) await this.applyPauseEffects(ctx, events, now);
-  }
-
   /** HIGH events (and forced types) go to `live:{orgId}` for the live view (Step 13). Best effort. */
   private async publishLive(
     ctx: CandidateContext,
@@ -424,17 +478,15 @@ export class ProctorEventsService {
     now: Date,
   ): Promise<void> {
     try {
-      const live = events.filter((e, i) => {
+      for (const [i, e] of events.entries()) {
         const severity = severities[i];
-        return severity !== undefined && shouldPushToLive(e.type, severity);
-      });
-      for (const e of live) {
+        if (severity === undefined || !shouldPushToLive(e.type, severity)) continue;
         await this.redis.publish(
           `live:${ctx.orgId}`,
           JSON.stringify({
             sessionId: ctx.sessionId,
             type: e.type,
-            severity: DEFAULT_EVENT_SEVERITY[e.type],
+            severity,
             occurredAt: clamp(new Date(e.occurredAt), null, now).toISOString(),
           }),
         );
@@ -444,67 +496,104 @@ export class ProctorEventsService {
     }
   }
 
+  // ---------- pause effects ----------
+
   /**
-   * ADR 0002 section 5 / backend.md Step 10: SCREEN_SHARE_STOPPED, FULLSCREEN_EXIT and
-   * SIDE_CAMERA_DISCONNECTED add a pause reason (IN_PROGRESS to PAUSED); the matching resume events
-   * remove it, and the session returns to IN_PROGRESS when no reason is left. The clock does not
-   * change (deadline_at and paused_ms are untouched). A lost race with another state change is not
-   * an error: the batch is already stored.
+   * Which candidate pause reasons are active, from the stored events: for each reason, the latest
+   * add/remove event decides (by clamped time, then id). Derived from history, so applying it again
+   * is idempotent, a duplicate resend cannot re-pause a session that was resumed later, and the
+   * result does not depend on the stored `pause_reasons` list being exact.
+   */
+  private async activeCandidateReasons(db: BatchDb, sessionId: string): Promise<Set<PauseReason>> {
+    const active = new Set<PauseReason>();
+    for (const reason of CANDIDATE_REASONS) {
+      const latest = await db.proctorEvent.findFirst({
+        where: {
+          sessionId,
+          source: 'CLIENT',
+          type: { in: [...REASON_EVENTS[reason].add, ...REASON_EVENTS[reason].remove] },
+        },
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+        select: { type: true },
+      });
+      if (
+        latest !== null &&
+        (REASON_EVENTS[reason].add as readonly string[]).includes(latest.type)
+      ) {
+        active.add(reason);
+      }
+    }
+    return active;
+  }
+
+  /**
+   * ADR 0002 section 5 / backend.md Step 10, inside the batch's own transaction so a stored batch
+   * and its pause stand or fall together:
+   *   - IN_PROGRESS and a candidate reason is active: PAUSED, through SessionStateService.
+   *   - PAUSED and no candidate reason is active and no PROCTOR pause is in force: IN_PROGRESS.
+   * Both are `SessionStateService.transition` calls guarded on the pause reasons that were read, so
+   * a proctor pause added meanwhile is never overwritten or lifted (0 rows, re-read, try again).
+   * While the session is already PAUSED a new reason only becomes an event: the stored reason list
+   * is not edited (SessionStateService has no PAUSED to PAUSED edge yet; see the follow-ups).
+   * The clock does not change (deadline_at, paused_ms and proctor_paused_at are untouched).
    */
   private async applyPauseEffects(
+    db: BatchDb,
     ctx: CandidateContext,
-    events: ProctorEventBatch['events'],
+    events: ReadonlyArray<{ type: ClientProctorEvent['type'] }>,
     now: Date,
   ): Promise<void> {
-    const ordered = [...events].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
-    if (!ordered.some((e) => e.type in PAUSE_ADD || e.type in PAUSE_REMOVE)) return;
-    try {
-      await this.scope.asOrg(ctx, async () => {
-        const current = await this.prisma.client.session.findUnique({
-          where: { id: ctx.sessionId },
-          select: { status: true, pauseReasons: true },
-        });
-        if (current === null || !LIVE_STATUSES.includes(current.status)) return;
-        const reasons = new Set<PauseReason>(current.pauseReasons);
-        for (const e of ordered) {
-          const add = PAUSE_ADD[e.type];
-          const remove = PAUSE_REMOVE[e.type];
-          if (add !== undefined) reasons.add(add);
-          if (remove !== undefined) reasons.delete(remove);
-        }
-        const next = [...reasons];
-        const same =
-          next.length === current.pauseReasons.length &&
-          next.every((r) => current.pauseReasons.includes(r));
-        if (same) return;
-        if (current.status === 'IN_PROGRESS' && next.length > 0) {
+    if (!events.some((e) => e.type in PAUSE_ADD || e.type in PAUSE_REMOVE)) return;
+    for (let attempt = 0; attempt < PAUSE_ATTEMPTS; attempt += 1) {
+      const current = await db.session.findUnique({
+        where: { id: ctx.sessionId },
+        select: { status: true, pauseReasons: true },
+      });
+      if (current === null || !LIVE_STATUSES.includes(current.status)) return;
+      const active = await this.activeCandidateReasons(db, ctx.sessionId);
+      try {
+        if (current.status === 'IN_PROGRESS' && active.size > 0) {
           await this.states.transition({
             sessionId: ctx.sessionId,
             from: 'IN_PROGRESS',
             to: 'PAUSED',
             now,
-            patch: { pauseReasons: next },
+            db,
+            ifPauseReasons: current.pauseReasons,
+            patch: { pauseReasons: [...active] },
           });
-        } else if (current.status === 'PAUSED' && next.length === 0) {
+        } else if (
+          current.status === 'PAUSED' &&
+          active.size === 0 &&
+          !current.pauseReasons.includes('PROCTOR')
+        ) {
           await this.states.transition({
             sessionId: ctx.sessionId,
             from: 'PAUSED',
             to: 'IN_PROGRESS',
             now,
+            db,
+            ifPauseReasons: current.pauseReasons,
             patch: { pauseReasons: [] },
           });
-        } else if (current.status === 'PAUSED') {
-          // Still paused, with a different set of reasons: not a status change, so it is a plain
-          // update guarded on the status (SessionStateService has no PAUSED to PAUSED edge).
-          await this.prisma.client.session.updateMany({
-            where: { id: ctx.sessionId, status: 'PAUSED' },
-            data: { pauseReasons: next },
-          });
         }
-      });
-    } catch (e) {
-      if (e instanceof SessionStateConflictError) return;
-      this.log.warn(`pause effects failed session=${ctx.sessionId}`);
+        return;
+      } catch (e) {
+        if (!(e instanceof SessionStateConflictError)) throw e;
+      }
     }
+    // The state kept changing under us: the transaction rolls back and the client retries (503).
+    throw new ServiceUnavailableException('The session state is changing. Retry the batch.');
+  }
+
+  /** Re-runs the pause effects for a batch that was already stored (idempotent, see above). */
+  private async reapplyPauseEffects(
+    ctx: CandidateContext,
+    events: ReadonlyArray<{ type: ClientProctorEvent['type'] }>,
+    now: Date,
+  ): Promise<void> {
+    await this.scope.asOrg(ctx, () =>
+      this.prisma.client.$transaction((db) => this.applyPauseEffects(db, ctx, events, now)),
+    );
   }
 }
