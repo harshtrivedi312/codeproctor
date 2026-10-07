@@ -243,6 +243,9 @@ describe('NFR-04 environment validation', () => {
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@example.com',
+      // Object storage (BE-09) is required in pilot and production too.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-pilot-media',
     };
 
     it('C-31: defaults to noop and us-east-1 locally', () => {
