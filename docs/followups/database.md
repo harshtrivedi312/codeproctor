@@ -236,7 +236,7 @@ DB-07 and DB-08 items from the Database B (ops) session. IDs are FU-DBB-NN. Rows
 | FU-DBB-27 (a), (b), (c) | The erasure controller guard (a blocker on its PR), retryable error mapping, and two ungated gates. | Backend, Database B. |
 | FU-DBB-26 (g), (h) | Owner decisions on candidate-data retention (OQ-19 event frames, OQ-10 legal hold vs the face tier) must be recorded before the pilot. (m) is a statement, not a to-do. | Owner. |
 | FU-DBB-25 (a) to (e), (g), (j) | `bullmq` is not an `apps/api` dependency, the `set-password` processor does not exist, the job id wording differs from ADR 0006 8.9, and the Redis-down test needs BullMQ: `provision-org` cannot run in the pilot yet. | BE-06, hub (ADR text). |
-| FU-DBB-24 (c) | The staging deploy job should fail when the database URLs lack the certificate-verifying TLS parameter (staging only, synthetic data; the pilot equivalent is tracked under DEP-03). | DEP-01, DEP-03. |
+| FU-DBB-24 (c) | Dropped by C-65 (staging is local only, there is no staging deploy job). The pilot equivalent (the deploy must fail when the database URLs lack the certificate-verifying TLS parameter) is DEP-03. | DEP-03. |
 
 **Later** (should-fix and nits not needed for the pilot): FU-DBB-05, 08, 09, 12 to 17, 19 (root `test:db` script), 21, 24 (b), FU-DBB-25 (f), (h), (i), FU-DBB-26 (a), (d), (e), (k).
 
