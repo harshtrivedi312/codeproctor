@@ -57,7 +57,7 @@ This tab turns each business requirement into testable functional requirements (
   - Declining ends the session without any recording and shows a contact for alternatives or accommodations.
   - No device access or recording starts before the document is signed.
   - Until Legal supplies and approves the text, it is a clearly marked placeholder, and pilot and production refuse it.
-- **FR-402** System check: browser (Chromium required for STANDARD and STRICT), camera, microphone, screen-share support, network speed, single monitor.
+- **FR-402** System check: browser (Chromium required for STANDARD and STRICT), camera, microphone, screen-share support, network speed, single monitor. The system check runs after the consent document is signed (ADR 0002: CONSENTED to VERIFIED), so a candidate on an unsupported browser can still read the consent in their own browser and gets the browser message at this step (A11Y OQ-A11Y-12).
 - **FR-403** Identity check: photo of government ID and a live selfie with liveness prompt (turn head, blink); face match score stored; ID image never used for other purposes. A failed or low-confidence match gets one retry and then goes to manual reviewer comparison; it never rejects the candidate or blocks the test (D-05, ADR 0004).
 - **FR-404** Room scan: candidate rotates the camera 360 degrees and shows the desk surface; stored as a clip.
 - **FR-405** STRICT profile: candidate opens a QR-code link on a phone that streams a side view of the desk.
