@@ -222,6 +222,8 @@ export const envSchema = z
         'COOKIE_SECRET',
         'JWT_CANDIDATE_SECRET',
         'OTP_PEPPER',
+        'JUDGE0_AUTH_TOKEN',
+        'JUDGE0_AUTHZ_TOKEN',
       ] as const) {
         const value = env[name];
         if (value !== undefined && isPlaceholderText(value)) {
@@ -362,8 +364,13 @@ export function isSharedEnv(env: { APP_ENV?: string; NODE_ENV?: string }): boole
   );
 }
 
+/** Matches change-me anywhere, ignoring case, surrounding spaces and leading quotes. */
 function isPlaceholderText(value: string): boolean {
-  return value.toLowerCase().startsWith('change-me');
+  return value
+    .trim()
+    .replace(/^['"]+/, '')
+    .toLowerCase()
+    .includes('change-me');
 }
 
 /** A base64 key whose bytes spell a change-me placeholder (the .env.example values). */
@@ -408,6 +415,8 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   // list it. Pilot and production must not start without a valid one: without it every test start
   // would fail at the candidate's first click (ADR 0013 section 2). Names only, never values.
   const env = result.data;
+  // The parsed APP_ENV is never undefined: an unset one defaults to development, which is local,
+  // so an unset APP_ENV does NOT fail closed here (FU-BE-224).
   if (isSharedEnv(env)) {
     // Every configured wrapping key, not only the active kid: an old kid is still used to unwrap.
     const bad = placeholderSessionKeys(raw);
@@ -417,7 +426,7 @@ export function validateEnv(raw: Record<string, unknown>): Env {
       );
     }
   }
-  if (env.APP_ENV === 'pilot' || env.APP_ENV === 'production' || env.NODE_ENV === 'production') {
+  if (isLiveEnv(env)) {
     const name = `SESSION_KEY_ENC_KEY_${env.SESSION_KEY_ENC_ACTIVE_KID}`;
     const value = raw[name];
     if (typeof value !== 'string' || !aesKey.safeParse(value).success) {

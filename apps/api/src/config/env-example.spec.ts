@@ -75,6 +75,9 @@ describe('.env.example (DL-52, NFR-04)', () => {
         if (['staging', 'pilot', 'production'].includes(appEnv)) {
           for (const n of names) expect(message).toContain(n);
         }
+        if (['prod', 'Production'].includes(appEnv)) {
+          expect(message).toContain(`SESSION_KEY_ENC_KEY_${kid}`);
+        }
         for (const n of names) {
           expect(message).not.toContain(active[n] ?? '\u0000');
         }

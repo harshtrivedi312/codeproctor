@@ -448,6 +448,8 @@ describe('FU-BE-194 database pool settings', () => {
       JWT_CANDIDATE_SECRET: 'change-me-local-candidate-secret-00000000',
       OTP_PEPPER: 'change-me-local-otp-pepper-0000000000000',
       ENCRYPTION_KEY: Buffer.from('change-me-local-encrypt-key-0001').toString('base64'),
+      JUDGE0_AUTH_TOKEN: 'change-me',
+      JUDGE0_AUTHZ_TOKEN: 'change-me',
     };
     const sessionKey = Buffer.from('change-me-local-session-key-0001').toString('base64');
     const good = {
@@ -483,8 +485,33 @@ describe('FU-BE-194 database pool settings', () => {
           APP_ENV: 'development',
           NODE_ENV: 'production',
           OTP_PEPPER: ph.OTP_PEPPER,
+          SESSION_KEY_ENC_KEY_k1: sessionKey,
         }),
       ).toThrow(/OTP_PEPPER/);
+      expect(() =>
+        validateEnv({
+          ...good,
+          ...liveExtras('pilot'),
+          APP_ENV: 'development',
+          NODE_ENV: 'production',
+          SESSION_KEY_ENC_KEY_k1: sessionKey,
+        }),
+      ).toThrow(/SESSION_KEY_ENC_KEY_k1/);
+    });
+
+    it('DL-52 NFR-04: the placeholder match ignores quotes, spaces and offset', () => {
+      const base = { ...good, APP_ENV: 'staging' };
+      const pad = 'x'.repeat(30);
+      expect(() => validateEnv({ ...base, OTP_PEPPER: `"change-me-${pad}` })).toThrow(/OTP_PEPPER/);
+      expect(() => validateEnv({ ...base, OTP_PEPPER: `   CHANGE-ME-${pad}` })).toThrow(
+        /OTP_PEPPER/,
+      );
+      expect(() => validateEnv({ ...base, OTP_PEPPER: `${pad}-change-me` })).toThrow(/OTP_PEPPER/);
+      const offsetKey = Buffer.from('xx-change-me-local-key-000000000').toString('base64');
+      expect(() => validateEnv({ ...base, ENCRYPTION_KEY: offsetKey })).toThrow(/ENCRYPTION_KEY/);
+      expect(() => validateEnv({ ...base, SESSION_KEY_ENC_KEY_k1: offsetKey })).toThrow(
+        /SESSION_KEY_ENC_KEY_k1/,
+      );
     });
 
     it.each(['development', 'test'])('DL-52 NFR-04: placeholders are accepted in %s', (APP_ENV) => {
