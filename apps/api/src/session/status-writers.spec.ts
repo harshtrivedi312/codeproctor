@@ -152,11 +152,33 @@ export function findNonSameValueStatusWrites(source: string): string[] {
       found.push(`${label} ... data must be exactly { status: <identifier> }`);
       continue;
     }
-    // where: only id, orgId and one status entry with the identical expression.
-    const allowed = new Set(['id', 'orgId', 'status']);
+    // where: only id, orgId, one status entry with the identical expression, and at most one
+    // `NOT: { status: <bare expression> }` (the ERASED exclusion of the guardLive branch, #208:
+    // it only narrows the compare-and-set and names no other column).
+    const allowed = new Set(['id', 'orgId', 'status', 'NOT']);
     const statusEntries = where.filter((e) => e.key === 'status');
-    if (where.some((e) => !allowed.has(e.key)) || statusEntries.length !== 1) {
-      found.push(`${label} ... where may only name id, orgId and one status`);
+    const notEntries = where.filter((e) => e.key === 'NOT');
+    const notOk =
+      notEntries.length === 0 ||
+      (notEntries.length === 1 &&
+        (() => {
+          const inner = entries(notEntries[0]?.value ?? '');
+          return (
+            (notEntries[0]?.value ?? '').startsWith('{') &&
+            inner.length === 1 &&
+            inner[0]?.key === 'status' &&
+            bare.test(inner[0].value)
+          );
+        })());
+    if (
+      where.some((e) => !allowed.has(e.key)) ||
+      statusEntries.length !== 1 ||
+      notEntries.length > 1 ||
+      !notOk
+    ) {
+      found.push(
+        `${label} ... where may only name id, orgId, one status and at most one NOT: { status }`,
+      );
     } else if (statusEntries[0]?.value !== data[0].value) {
       found.push(
         `${label} ... data.status (${data[0].value}) differs from where.status (${statusEntries[0]?.value})`,
@@ -239,6 +261,9 @@ describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4
     const good = [
       'await tx.session.updateMany({ where: { id, orgId, status: read }, data: { status: read } });',
       "await tx.session.updateMany({ where: { id, status: 'OPENED' }, data: { status: 'OPENED' } });",
+      // The guardLive branch of #208: the status match plus an ERASED exclusion (only narrows).
+      'await tx.session.updateMany({ where: { id: sessionId, status, NOT: { status: ERASED } }, data: { status } });',
+      "await tx.session.updateMany({ where: { id, status: read, NOT: { status: 'ERASED' } }, data: { status: read } });",
     ];
     for (const code of good) expect(findNonSameValueStatusWrites(code)).toEqual([]);
     const bad = [
@@ -259,6 +284,14 @@ describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4
       'await tx.session.updateMany({ where: { id, status: read, ...w }, data: { status: read } });',
       "await tx.session.updateMany({ where: { id, status: read }, data: { status: read, 'authEpoch': 1 } });",
       'await tx.session.updateMany({ where: { id, status: read }, data: { status: next() } });',
+      // Only ONE `NOT: { status: <bare> }` is allowed next to the status match: no other NOT shape,
+      // no OR/AND, no other column inside NOT, no second NOT.
+      'await tx.session.updateMany({ where: { id, status: read, NOT: { id: other } }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, status: read, NOT: [{ status: ERASED }] }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, status: read, NOT: { status: ERASED, id: x } }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, status: read, NOT: { status: pick() } }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, status: read, NOT: { status: A }, NOT: { status: B } }, data: { status: read } });',
+      'await tx.session.updateMany({ where: { id, status: read, AND: [{ status: A }] }, data: { status: read } });',
     ];
     for (const code of bad) expect(findNonSameValueStatusWrites(code).length).toBeGreaterThan(0);
   });
