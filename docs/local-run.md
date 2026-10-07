@@ -35,7 +35,8 @@ pnpm install
 pnpm demo:up
 ```
 
-`pnpm demo:up` writes `.env` if it is missing, starts the stack, builds the shared package, migrates,
+`pnpm demo:up` writes `.env` if it is missing, checks that every port it needs is free (see "Port already in
+use" below), starts the stack, builds the shared package, migrates,
 seeds, gives the seeded invitation a real link, starts the API and the web app in the background (logs in
 `.demo/`), waits until both answer, and prints the links, the accounts and where the password is. It is safe
 to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
@@ -206,7 +207,7 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | MinIO (the object store) in the stack                 | Works: the two buckets exist at start, an upload and a listing through the S3 API work, and a browser preflight from `http://localhost:3000` is allowed while any other origin is not (checked). |
 | File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log still shows a few `Job consent-pdf failed` lines; the job also emails the consent copy, which needs the candidate mail binding (above). Browser uploads from the candidate screens are not exercised here. |
 | Running candidate code                                | The API accepts `JUDGE0_MODE=stub` and `local-env.mjs` switches it on (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
-| Analysis worker (`apps/worker`)                       | **Not part of `demo:up`.** The face-match service exists (`worker.app:app`, FastAPI) but has no Dockerfile or tuned models yet (the face landmarker model is not downloaded, P-13), and the API's presigned URLs name `localhost:9000`, which a worker inside Docker cannot reach. Without it the identity check answers MANUAL_REVIEW and the candidate continues. The compose file has a `worker` profile as the place for it. |
+| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
 | Proctoring in a real browser against the real API     | Not wired end to end; the browser parts run in mock mode (`/t/demo/test`, `/dev/proctor`).              |
 
 ## 7. Not on `main` yet: what is planned
@@ -219,7 +220,9 @@ These are tracked in the delivery plan; this guide changes as each lands.
 - **Code execution**: Backend A's local stub. Real Judge0 (`infra/judge0`) needs Linux x86, privileged
   containers and cgroup v1, so it is not validated on macOS or Apple Silicon and its isolation is not
   relaxed for a Mac; it runs on the pilot host.
-- **Worker**: a Dockerfile and the model files, then the `worker` profile (Integrity B).
+- **Worker**: the model files (the owner's P-13) so the face match is real instead of MANUAL_REVIEW. The
+  `worker` compose profile (Docker image, linux/amd64 only, slow on Apple silicon) is for later; the demo
+  runs it on the host.
 
 Changes to `infra/docker-compose.yml` get the architecture hub's gate review.
 
@@ -242,8 +245,11 @@ on a local database; agents never run it). Then `pnpm db:migrate` and `pnpm db:s
   say `NEXT_PUBLIC_API_URL=http://localhost:4000/api`; restart `pnpm dev:web` after fixing it.
 - **`db:migrate` or `db:seed` refuses**: the message names the cause: `APP_ENV` must be `development`
   (seed), and every database URL must point at `127.0.0.1` or `localhost`.
-- **Port already in use** (5432, 6379, 4000, 3000): another stack or dev server is running. Stop it,
-  or change the port in `.env` and in `infra/docker-compose.yml` together.
+- **Port already in use** (5432, 6379, 8080, 1025, 8025, 9000, 9001, 4000, 3000, 8000): `pnpm demo:up` checks
+  them first and stops with a message that names the port and what holds it. If it is another checkout's
+  local stack (the containers are called `codeproctor-...`), `demo:up` never stops or reuses it: go to that
+  checkout and run `pnpm dev:infra:down`, then run `demo:up` again. If it is another program,
+  `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows which. There are no port overrides.
 - **API refuses to boot**: it names the missing or invalid `.env` value. A secret shorter than 32
   characters, or a leftover `change-me`, is refused. Delete `.env` and run `local-env.mjs` again.
 - **Signed in, then thrown out at once (Safari)**: see the Browser note in section 4; use Chrome or Firefox.
