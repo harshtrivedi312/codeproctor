@@ -48,6 +48,11 @@ export interface Judge0RawResult {
 }
 
 export interface Judge0Client {
+  /**
+   * Typed signal that this client runs nothing (the local development stub, DL-54, DL-58). Absent
+   * or false for every real client. ExecutionService uses it, never the label text, to decide.
+   */
+  readonly isStub?: boolean;
   /** Runs the submissions and resolves, in input order, once every one has finished. */
   runBatch(submissions: readonly Judge0Submission[]): Promise<Judge0RawResult[]>;
 }

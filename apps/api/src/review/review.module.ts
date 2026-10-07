@@ -1,14 +1,15 @@
 import { Module } from '@nestjs/common';
-import { RecordingStoragePort, UnconfiguredRecordingStorage } from './recording-storage.port';
+import { StorageModule } from '../media/storage.module';
+import { RecordingStoragePort } from './recording-storage.port';
 import { ReviewController } from './review.controller';
 import { ReviewService } from './review.service';
+import { StorageRecordingStorage } from './storage-recording-storage';
 
-// The S3 adapter binds RecordingStoragePort here when it exists (FU-BE-229); until then playback is 503.
+// Playback signs through the shared StorageService (BE-09, FR-703): S3 on pilot and production, R2
+// or MinIO locally, 503 when storage is not configured (FU-BE-229).
 @Module({
+  imports: [StorageModule],
   controllers: [ReviewController],
-  providers: [
-    ReviewService,
-    { provide: RecordingStoragePort, useClass: UnconfiguredRecordingStorage },
-  ],
+  providers: [ReviewService, { provide: RecordingStoragePort, useClass: StorageRecordingStorage }],
 })
 export class ReviewModule {}
