@@ -40,6 +40,8 @@ type Message =
   | { t: 'start'; id: string }
   /** The election participant is done, whatever the result (frees waiters at once). */
   | { t: 'end'; id: string }
+  /** The candidate lost the election: forget its candidacy (does not wake anyone). */
+  | { t: 'retract'; id: string }
   | { t: 'outcome'; id: string; outcome: RefreshOutcome };
 
 const LOCK_NAME = 'cp.refresh';
@@ -102,6 +104,10 @@ function onMessage(data: unknown): void {
     foreignActive.set(m.id, Date.now() + FOREIGN_WAIT_MS);
     return;
   }
+  if (m.t === 'retract') {
+    foreignActive.delete(m.id);
+    return;
+  }
   if (m.t === 'end') {
     foreignActive.delete(m.id);
     // Wake waiters so they re-check; an election waiter with no outcome and nobody left sends.
@@ -161,8 +167,8 @@ export async function coordinateRefresh(
   canSend: () => boolean = () => true,
 ): Promise<RefreshOutcome | null> {
   getChannel();
+  if (waiting === 0) adopted = null;
   waiting += 1;
-  adopted = null;
   try {
     if (hasLocks()) return await withLock(send, canSend);
     if (getChannel()) return await withElection(send, canSend);
@@ -205,39 +211,63 @@ async function withLock(
   });
 }
 
+/** Rounds of election a tab takes part in before it sends regardless (each ends in an outcome, an end or a timeout). */
+const MAX_ELECTION_ROUNDS = 5;
+
 async function withElection(
   send: () => Promise<RefreshOutcome | null>,
   canSend: () => boolean,
 ): Promise<RefreshOutcome | null> {
-  const now = Date.now();
-  for (const [id, expires] of foreignActive) if (expires < now) foreignActive.delete(id);
-  let announced = false;
-  try {
-    if (foreignActive.size === 0) {
-      announced = true;
-      post({ t: 'start', id: myId });
-      // Give a tab that started at the same moment time to announce; the lower id sends.
-      await new Promise((r) => setTimeout(r, ELECTION_MS));
-      const lower = [...foreignActive.keys()].some((id) => id < myId);
-      if (!lower && !adopted) return await sendAndShare(send, canSend);
-    }
-    // Wait for the other tab's outcome. Its `end` message wakes us if it finished without one
-    // (abandoned); only then, or after the long wait, do we send our own.
-    const until = Date.now() + FOREIGN_WAIT_MS;
-    while (!adopted && foreignActive.size > 0 && Date.now() < until) {
-      await waitForAdopted(until - Date.now());
-    }
+  for (let round = 0; round < MAX_ELECTION_ROUNDS; round += 1) {
+    const now = Date.now();
+    for (const [id, expires] of foreignActive) if (expires < now) foreignActive.delete(id);
     if (adopted) return adopted;
-    return await sendAndShare(send, canSend);
-  } finally {
-    if (announced) post({ t: 'end', id: myId });
+    // Every tab that needs a refresh announces itself and the lowest id sends. A tab that lost
+    // waits for the winner's outcome; if the winner ended without one, everyone still waiting
+    // announces again, so losers never wait on each other and never send together.
+    post({ t: 'start', id: myId });
+    await new Promise((r) => setTimeout(r, ELECTION_MS));
+    if (adopted) {
+      post({ t: 'retract', id: myId });
+      return adopted;
+    }
+    const lower = [...foreignActive.keys()].some((id) => id < myId);
+    if (!lower) {
+      try {
+        return await sendAndShare(send, canSend);
+      } finally {
+        post({ t: 'end', id: myId });
+      }
+    }
+    post({ t: 'retract', id: myId });
+    await waitForAdopted(FOREIGN_WAIT_MS);
+    if (adopted) return adopted;
   }
+  return sendAndShare(send, canSend);
 }
 
-/** Runs `fn` while holding the cross-tab refresh lock (a logout must not overlap a refresh). */
-export function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Runs `fn` while holding the cross-tab refresh lock (a logout must not overlap a refresh). With
+ * `timeoutMs` the wait for the lock is bounded: after it `fn` runs anyway (it must make its own
+ * check that it is still wanted). Without Web Locks `fn` just runs.
+ */
+export async function withRefreshLock<T>(fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
   if (!hasLocks()) return fn();
-  return navigator.locks.request(LOCK_NAME, fn);
+  let started = false;
+  const guarded = (): Promise<T> => {
+    started = true;
+    return fn();
+  };
+  try {
+    return await navigator.locks.request(
+      LOCK_NAME,
+      timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) },
+      guarded,
+    );
+  } catch (error) {
+    if (started) throw error;
+    return fn(); // the wait for the lock timed out (or the lock API failed): go on without it
+  }
 }
 
 /** Test-only: forget all coordination state (a fresh tab). */

@@ -350,6 +350,63 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(1);
   });
 
+  it('election: three tabs, the winner abandons: the others re-elect, one sends, one request in all', async () => {
+    installFakes(false);
+    const calls = refreshServer(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return HttpResponse.json(sessionFor('tok-next'));
+    });
+    const ids = ['id-1', 'id-2', 'id-3'];
+    const tabs: Tab[] = [];
+    for (const id of ids) {
+      const spy = vi.spyOn(crypto, 'randomUUID').mockReturnValue(id);
+      tabs.push(await openTab());
+      spy.mockRestore();
+    }
+    const [t1, t2, t3] = tabs as [Tab, Tab, Tab];
+    const p = tabs.map((t) => t.auth.refreshSession());
+    await flush();
+    t1.auth.invalidateRefreshes(); // the lowest id (the winner) abandons before it sends
+    const results = await Promise.all(p);
+    expect(results[0]).toBeNull();
+    expect(results[1]?.accessToken).toBe('tok-next');
+    expect(results[2]?.accessToken).toBe('tok-next');
+    expect(calls.n).toBe(1);
+    expect([t2, t3].every((t) => t.token.getAccessToken() === 'tok-next')).toBe(true);
+  });
+
+  it('election: a tab whose session ended while it waited sends nothing', async () => {
+    installFakes(false);
+    const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
+    const a = await openTab();
+    const pa = a.auth.refreshSession();
+    await flush();
+    window.localStorage.setItem(a.auth.SIGN_OUT_MARKER_KEY, '1');
+    expect(await pa).toBeNull();
+    expect(calls.n).toBe(0);
+  });
+
+  it('no coordination available: canSend still guards the send', async () => {
+    installFakes(false);
+    globalThis.BroadcastChannel = undefined as unknown as typeof BroadcastChannel;
+    const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
+    const a = await openTab();
+    window.localStorage.setItem(a.auth.SIGN_OUT_MARKER_KEY, '1');
+    expect(await a.auth.refreshSession()).toBeNull();
+    expect(calls.n).toBe(0);
+  });
+
+  it('withRefreshLock: a bounded wait goes on without the lock after the timeout', async () => {
+    const { withRefreshLock } = await import('@/lib/refresh-coordination');
+    void navigator.locks.request('cp.refresh', () => new Promise<void>(() => undefined)); // held forever
+    let ran = false;
+    await withRefreshLock(() => {
+      ran = true;
+      return Promise.resolve();
+    }, 40);
+    expect(ran).toBe(true);
+  });
+
   it('a logout waits for a refresh in another tab (same lock)', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((r) => (release = r));

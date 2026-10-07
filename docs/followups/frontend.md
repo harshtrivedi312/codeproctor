@@ -721,3 +721,9 @@ None of this exists in the API yet. Every route, body, limit and error word belo
 - Deliberate deviation from contract section 1: after a busy or network failure of setup/confirm the password stays in the dialog state (needed for the outcome check and regenerate); it is cleared on success, password failure and close.
 - Follow-up: the BroadcastChannel is opened at module load (needed so a start announcement is never missed); a lazy open with a catch-up handshake would avoid an always-on channel per tab.
 - Follow-up: the staff list is read as the first page only (no paging parameters in the web contract); page through it once the openapi models `page` and `total`.
+
+**Review round 2 (PR #288)**
+
+- Fixed: the logout is sent inside the refresh lock only if `startedIn === getGeneration()` and the sign-out is still pending (another tab having confirmed it counts as done); the generation is captured right after `beginSignOut()`/`publishSession(null)` in `signOut` and `signOutRevoked`, and the whole sign-out is tracked by `trackLogout` from its start (a set, so several can overlap); the lock wait is bounded (15 s, then the same check); election losers retract and re-elect when the winner ends without an outcome; BUSY retries of the refresh use the same `canSend`.
+- Follow-up: the login, 2FA verify and enroll calls that set the refresh cookie are NOT wrapped in the lock (not invasive enough to do blind: the response must also reach `beginSession` inside the lock to close the window). A logout acquiring the lock between the cookie-setting response and `beginSession` could still revoke the new cookie; the window is a few milliseconds.
+- Follow-up: the `pageSize` parameter is not in the openapi for `GET /v1/admin/users`, so the list read cannot ask for 100; it treats a full first page (50) as unknown.

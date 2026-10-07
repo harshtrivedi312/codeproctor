@@ -9,6 +9,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { BUSY_CODE } from '@/lib/api/busy';
 import { api } from '@/lib/api/client';
 import { useAuth } from './auth-provider';
 import { safeNextPath, twoFactorCodeSchema } from './schemas';
@@ -51,7 +52,7 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
   async function onSubmit(values: FormValues): Promise<void> {
     setServerError(null);
     try {
-      const { data, response } = await api.POST('/v1/auth/2fa/verify', {
+      const { data, error, response } = await api.POST('/v1/auth/2fa/verify', {
         body: { challengeToken, code: values.code.trim() },
       });
       if (data) {
@@ -69,7 +70,7 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
         finishedRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=recovery-unconfirmed');
-      } else if (response.status === 503) {
+      } else if (response.status === 503 && error?.code === BUSY_CODE) {
         // Never retried here: a code works once inside its 30 s step, so sending the same one
         // again would be refused as a replay and counted as a failed attempt.
         setServerError('busy');

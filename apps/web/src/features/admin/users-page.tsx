@@ -284,6 +284,8 @@ function InviteDialog({
   const qc = useQueryClient();
   const [serverError, setServerError] = React.useState<string | null>(null);
   const [unknownOutcome, setUnknownOutcome] = React.useState<string | null>(null);
+  // A late answer from the list read must not land in a dialog that was closed or reopened.
+  const checkId = React.useRef(0);
   const {
     register,
     handleSubmit,
@@ -307,9 +309,10 @@ function InviteDialog({
         if (isServerFailure(e)) {
           // Outcome unknown: read the list, never send again for the user.
           setServerError(null);
-          void checkInviteOutcome(qc, values.email).then((found) =>
-            setUnknownOutcome(INVITE_UNKNOWN_TEXT[found]),
-          );
+          const mine = (checkId.current += 1);
+          void checkInviteOutcome(qc, values.email).then((found) => {
+            if (checkId.current === mine) setUnknownOutcome(INVITE_UNKNOWN_TEXT[found]);
+          });
           return;
         }
         setServerError(
@@ -332,6 +335,7 @@ function InviteDialog({
           reset();
           setServerError(null);
           setUnknownOutcome(null);
+          checkId.current += 1;
         }
         onOpenChange(next);
       }}

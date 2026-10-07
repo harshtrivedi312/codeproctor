@@ -36,6 +36,9 @@ export interface PendingChallenge {
   challengeToken: string;
 }
 
+/** Longest a logout waits for the cross-tab refresh lock before it goes on (still checked first). */
+const LOGOUT_LOCK_WAIT_MS = 15_000;
+
 export const LOGIN_PATH = '/admin/login';
 /** Shown once on the login page after turning 2FA off. A fixed word, nothing about the user. */
 export const TWO_FACTOR_OFF_LOGIN_PATH = '/admin/login?reason=two-factor-off';
@@ -84,6 +87,13 @@ interface AuthContextValue {
   signOut: () => Promise<void>;
 }
 
+/** Tracks a whole sign-out (not only its logout call) so a sign-in waits for it. Call the result when done. */
+function trackSignOut(): () => void {
+  let done: () => void = () => undefined;
+  trackLogout(new Promise<void>((resolve) => (done = resolve)));
+  return done;
+}
+
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }): React.JSX.Element {
@@ -111,24 +121,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
    * Asks the server to end the session. Success, or 401 (there is no valid session left, so
    * nothing can be restored), clears the pending marker; anything else leaves it set.
    */
-  const confirmLogout = React.useCallback(async () => {
-    const startedIn = getGeneration();
+  const confirmLogout = React.useCallback(async (generationAtSignOut?: number) => {
+    // The generation the sign-out began under, captured by the caller before any await. A sign-in
+    // that lands later (this tab or another) bumps it and the logout below is then never sent.
+    const startedIn = generationAtSignOut ?? getGeneration();
     logoutOutstanding.current += 1;
     // Inside the cross-tab refresh lock, so a logout never overlaps a refresh in another tab (a
-    // refresh on a family the logout is revoking looks like token reuse, TC-005). The marker is
-    // cleared inside the lock too, so a queued tab still sees "sign-out pending" when it wakes.
+    // refresh on a family the logout is revoking looks like token reuse, TC-005). The wait for the
+    // lock is bounded. Whatever the wait was, the logout is sent only if this sign-out is still the
+    // current state: same generation and the sign-out still pending. A sign-in during the wait
+    // bumps the generation (this tab's own sign-in, or another tab's epoch event, which does so
+    // while a logout is outstanding), and its new cookie must not be revoked.
     const call = withRefreshLock(async (): Promise<boolean> => {
+      if (startedIn !== getGeneration()) return false; // a sign-in since: not ours to revoke
+      if (!isSignOutPending()) return true; // another tab already confirmed this sign-out
       try {
         const { response } = await api.POST('/v1/auth/logout', {
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        const confirmed = response.ok || response.status === 401;
-        if (confirmed && startedIn === getGeneration()) confirmSignedOut();
-        return confirmed;
+        return response.ok || response.status === 401;
       } catch {
         return false;
       }
-    }).catch(() => false);
+    }, LOGOUT_LOCK_WAIT_MS).catch(() => false);
     trackLogout(call);
     const ok = await call;
     logoutOutstanding.current -= 1;
@@ -252,6 +267,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     // late 401 cannot start a refresh.
     const settled = beginSignOut();
     publishSession(null);
+    // From here until the logout is answered, a sign-in must wait (settleSession), and the logout
+    // belongs to this generation, captured before any await.
+    const generationAtSignOut = getGeneration();
+    const finished = trackSignOut();
     await settled;
     try {
       // The session listener also cancels and clears on the user change; this is explicit so the
@@ -263,8 +282,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       // Nothing to do: the logout call below must still run.
     }
     try {
-      await confirmLogout();
+      await confirmLogout(generationAtSignOut);
     } finally {
+      finished();
       // Whatever the server said, this browser has forgotten the session. If the server did not
       // confirm, the pending marker stays set so a reload does not restore it (FR-104).
       router.replace('/admin/login');
@@ -289,6 +309,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       // family the server just revoked (that would look like token reuse, TC-005).
       const settled = beginSignOut();
       publishSession(null);
+      const generationAtSignOut = getGeneration();
+      const finished = trackSignOut();
       await settled;
       await queryClient.cancelQueries();
       queryClient.clear();
@@ -297,8 +319,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       if (unconfirmed) {
         // Same as after a 204 on main: end the family and clear the cookie. confirmLogout leaves the
         // marker set (and the login screen's Retry) if the server did not answer.
-        await confirmLogout();
+        try {
+          await confirmLogout(generationAtSignOut);
+        } finally {
+          finished();
+        }
       } else {
+        finished();
         // The server already revoked the session: nothing to confirm, no logout to retry. Cleared last.
         confirmSignedOut();
       }

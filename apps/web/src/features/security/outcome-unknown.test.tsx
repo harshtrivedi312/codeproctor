@@ -18,7 +18,7 @@ import {
   seedMockTwoFactor,
   seedMockTwoFactorOff,
 } from '@/mocks/auth-handlers';
-import { mockFaultRequests, setMockOutcomeUnknown } from '@/mocks/fault-handlers';
+import { mockFaultRequests, setMockBusy, setMockOutcomeUnknown } from '@/mocks/fault-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
@@ -209,6 +209,22 @@ describe('2FA enroll/confirm answers the fixed 500 (FR-102, TC-003)', () => {
     );
     expect(calls['POST /v1/auth/2fa/enroll/confirm']).toBe(1);
     expect(getAccessToken()).toBeNull();
+  });
+
+  it('FR-102: a 503 BUSY on enroll/confirm says the service is busy, not that the code was wrong', async () => {
+    const calls = watchCalls();
+    setMockBusy({ route: '/v1/auth/2fa/enroll/confirm', methods: ['POST'], count: 1 });
+    renderWithAuth(<Flow />);
+    const u = userEvent.setup();
+    await u.type(screen.getAllByLabelText('Work email')[0]!, MOCK_USERS.reviewer.email);
+    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
+    await u.click(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByTestId('manual-key');
+    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
+    expect(await screen.findByText('The service is busy')).toBeInTheDocument();
+    expect(screen.queryByText('That code did not match')).not.toBeInTheDocument();
+    expect(calls['POST /v1/auth/2fa/enroll/confirm']).toBe(1);
   });
 
   it('FR-102: the sign-in page says what to expect and that the codes were lost', async () => {

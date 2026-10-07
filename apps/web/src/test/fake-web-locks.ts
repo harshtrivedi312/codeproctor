@@ -13,7 +13,8 @@ export function createFakeLocks(): Pick<LockManager, 'request'> {
     return s;
   };
   const request = ((name: string, a: unknown, b?: unknown): Promise<unknown> => {
-    const options = typeof a === 'function' ? {} : (a as { ifAvailable?: boolean });
+    const options =
+      typeof a === 'function' ? {} : (a as { ifAvailable?: boolean; signal?: AbortSignal });
     const cb = (typeof a === 'function' ? a : b) as Callback;
     const state = stateOf(name);
     const release = (): void => {
@@ -35,6 +36,17 @@ export function createFakeLocks(): Pick<LockManager, 'request'> {
         void cb(null).then(resolve, reject);
       } else {
         state.queue.push(run);
+        options.signal?.addEventListener(
+          'abort',
+          () => {
+            const at = state.queue.indexOf(run);
+            if (at >= 0) {
+              state.queue.splice(at, 1);
+              reject(new DOMException('The lock request was aborted', 'AbortError'));
+            }
+          },
+          { once: true },
+        );
       }
     });
   }) as LockManager['request'];

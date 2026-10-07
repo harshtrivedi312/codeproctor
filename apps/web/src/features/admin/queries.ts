@@ -73,6 +73,9 @@ export function useStaffUsers() {
  * 8, FU-BE-208): the user row may exist and the mail may or may not have gone out. Reads the user
  * list (never sends again) and says whether the address is in it. 'unknown': the list could not be read.
  */
+/** The API's default page size (api-contract section 6); the web contract has no paging parameters yet. */
+const LIST_PAGE_SIZE = 50;
+
 export async function checkInviteOutcome(
   qc: QueryClient,
   email: string,
@@ -92,8 +95,6 @@ export async function checkInviteOutcome(
     return 'unknown';
   }
 }
-const LIST_PAGE_SIZE = 50;
-
 /** What to tell the user after the unknown-outcome 500 on an invite, given what the list says. */
 export const INVITE_UNKNOWN_TEXT = {
   found:

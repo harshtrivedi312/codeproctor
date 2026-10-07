@@ -119,14 +119,15 @@ export function confirmSignedOut(): void {
 
 export const SIGN_OUT_MARKER_KEY = SIGN_OUT_MARKER;
 
-let logoutInFlight: Promise<unknown> | null = null;
+const logoutsInFlight = new Set<Promise<unknown>>();
 
-/** Records the logout call in flight so a sign-in can wait for it (it must not revoke the new login). */
+/**
+ * Records a sign-out (or its logout call) in flight so a sign-in can wait for it (it must not
+ * revoke the new login). Call it as soon as the sign-out starts, not only when the logout is sent.
+ */
 export function trackLogout(call: Promise<unknown>): void {
-  const mine = call.finally(() => {
-    if (logoutInFlight === mine) logoutInFlight = null;
-  });
-  logoutInFlight = mine;
+  const mine: Promise<unknown> = call.then(noop, noop).finally(() => logoutsInFlight.delete(mine));
+  logoutsInFlight.add(mine);
 }
 
 /** Resolves when any refresh and any logout call in flight have finished, whatever their result. */
@@ -137,7 +138,7 @@ export async function settleSession(): Promise<void> {
   });
   const settled = (async () => {
     await settleRefresh();
-    if (logoutInFlight) await logoutInFlight.then(noop, noop);
+    if (logoutsInFlight.size > 0) await Promise.all([...logoutsInFlight]);
   })();
   // Never hang a sign-in on a stuck request.
   await Promise.race([settled, limit]);
@@ -246,10 +247,8 @@ async function doRefresh(): Promise<AuthSession | null> {
   const startedIn = generation;
   try {
     await mockingReady;
-    const outcome = await coordinateRefresh(
-      () => sendRefresh(startedIn),
-      () => startedIn === generation && !isSignOutPending(),
-    );
+    const canSend = (): boolean => startedIn === generation && !isSignOutPending();
+    const outcome = await coordinateRefresh(() => sendRefresh(canSend), canSend);
     if (!outcome || startedIn !== generation) return null;
     return applyOutcome(startedIn, outcome);
   } catch {
@@ -284,7 +283,7 @@ function applyOutcome(startedIn: number, outcome: RefreshOutcome): AuthSession |
 }
 
 /** Sends the one refresh request, with the bounded 503 BUSY wait. Null: abandoned (sign-out here). */
-async function sendRefresh(startedIn: number): Promise<RefreshOutcome | null> {
+async function sendRefresh(canSend: () => boolean): Promise<RefreshOutcome | null> {
   try {
     const send = () =>
       fetch(`${apiBaseUrl}/v1/auth/refresh`, {
@@ -302,24 +301,25 @@ async function sendRefresh(startedIn: number): Promise<RefreshOutcome | null> {
       attempt += 1
     ) {
       const wait = busyDelayMs(response.headers.get('retry-after'));
-      if (startedIn !== generation || waited + wait > MAX_TOTAL_WAIT_MS) break;
+      if (!canSend() || waited + wait > MAX_TOTAL_WAIT_MS) break;
       busyStore.waitStart();
       let go: boolean;
       try {
-        go = await pause(wait, () => startedIn === generation);
+        go = await pause(wait, canSend);
       } finally {
         busyStore.waitEnd();
       }
       if (!go) return null;
       waited += wait;
+      if (!canSend()) return null;
       response = await send();
     }
-    if (startedIn !== generation) return null;
+    if (!canSend()) return null;
     if (await isBusyResponse(response)) return { kind: 'busy' };
     if (!response.ok) return { kind: 'signed-out' };
     return { kind: 'session', session: (await response.json()) as AuthSession };
   } catch {
-    return startedIn === generation ? { kind: 'error' } : null;
+    return canSend() ? { kind: 'error' } : null;
   }
 }
 

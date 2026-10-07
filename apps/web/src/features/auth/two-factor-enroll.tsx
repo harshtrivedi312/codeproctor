@@ -11,6 +11,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
+import { BUSY_CODE } from '@/lib/api/busy';
 import { api } from '@/lib/api/client';
 import type { AuthSession } from '@/lib/auth-session';
 import { useAuth } from './auth-provider';
@@ -106,7 +107,7 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
   async function onSubmit(values: FormValues): Promise<void> {
     setServerError(null);
     try {
-      const { data, response } = await api.POST('/v1/auth/2fa/enroll/confirm', {
+      const { data, error, response } = await api.POST('/v1/auth/2fa/enroll/confirm', {
         body: { challengeToken: challengeToken ?? '', code: values.code },
       });
       if (data) {
@@ -126,7 +127,7 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
         leavingRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=enroll-unconfirmed');
-      } else if (response.status === 503) {
+      } else if (response.status === 503 && error?.code === BUSY_CODE) {
         // Never retried: the same code cannot be used twice inside its 30 s step.
         setServerError('busy');
         setValue('code', '');
