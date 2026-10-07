@@ -409,7 +409,7 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
     expect(counted).toBe(Number((live.rows[0] as { n: string }).n));
   });
 
-  it.each([
+  it.each<[string, () => Promise<unknown>]>([
     [
       'a select of orgId',
       () => client.scheduledWindow.findMany({ select: { startsAt: true, orgId: true } }),
@@ -428,9 +428,7 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
     ['another model', () => client.session.findMany({ select: { id: true } })],
   ])('TC-008 under SCHEDULE_CAPACITY, %s is refused before any statement', async (_what, run) => {
     const before = await statementCount();
-    const error = await failure(
-      orgContext.runSystem('SCHEDULE_CAPACITY', run as () => Promise<unknown>),
-    );
+    const error = await failure(orgContext.runSystem('SCHEDULE_CAPACITY', run));
     expect(error).toBeInstanceOf(OrgScopeViolationError);
     expect(await statementCount()).toBe(before);
   });
