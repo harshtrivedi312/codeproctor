@@ -2,6 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiFailure } from '@/features/admin/queries';
 import { api, type Schemas } from '@/lib/api/client';
+import { BUSY_CODE } from '@/lib/api/busy';
 import { getGeneration } from '@/lib/auth-session';
 import { detailSignature } from './draft';
 
@@ -25,7 +26,12 @@ function fail(response: Response, error: unknown): never {
   const body = error && typeof error === 'object' ? (error as Record<string, unknown>) : {};
   const text = (v: unknown) => (typeof v === 'string' ? v : '');
   const errors = Array.isArray(body.errors) ? body.errors.map((e) => text(e)).filter(Boolean) : [];
-  throw new ApiFailure(response.status, text(body.detail) || text(body.message), '', errors);
+  throw new ApiFailure(
+    response.status,
+    text(body.detail) || text(body.message),
+    body.code === BUSY_CODE ? BUSY_CODE : '',
+    errors,
+  );
 }
 
 // A safety stop far above any real organisation (20,000 tests), never reached in practice.
@@ -35,11 +41,12 @@ const MAX_PAGES = 200;
 export function useTests() {
   return useQuery({
     queryKey: testKeys.list,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const items: TestSummary[] = [];
       for (let page = 1; page <= MAX_PAGES; page += 1) {
         const { data, error, response } = await api.GET('/v1/tests', {
           params: { query: { page, pageSize: 100 } },
+          signal,
         });
         if (!data) fail(response, error);
         items.push(...data.items);
