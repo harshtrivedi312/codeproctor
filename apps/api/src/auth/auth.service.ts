@@ -107,17 +107,19 @@ interface TxPhase {
 }
 
 /**
- * True only when a failed transaction certainly rolled back (FU-BE-208, DL-37): it never started,
- * or a statement-level lock error (55P03, 40P01, 40001, P2034) hit before the callback finished.
- * P2028 (the outcome can be unknown), a connection loss and any failure after the callback
- * finished (the commit) are NOT clean. `extra` adds callback-body failures the caller knows are
- * rollbacks too (a refusal thrown by our own code before the callback finished).
+ * True only when a failed transaction certainly rolled back (FU-BE-208, DL-37, api-contract
+ * section 8): it never started (pool wait, contention on BEGIN), or a lock-contention error hit
+ * before the callback finished (55P03, 40P01, 40001, P2034, and P2028 inside the callback, which
+ * is a rollback), or the commit itself failed with 40001 or 40P01 (a serialization failure or
+ * deadlock at COMMIT is a rollback). Anything else after the callback finished (P2028, P1017, a
+ * connection error at COMMIT) is an unknown outcome. `extra` adds callback-body failures the
+ * caller knows are rollbacks too (a refusal thrown by our own code before the callback finished).
  */
 function isCleanRollback(phase: TxPhase, e: unknown, extra?: (e: unknown) => boolean): boolean {
   if (!phase.started) return true;
-  if (phase.finished) return false;
   const code = lockContentionCode(e);
-  return (code !== undefined && code !== 'P2028') || (extra?.(e) ?? false);
+  if (phase.finished) return code === '40001' || code === '40P01';
+  return code !== undefined || (extra?.(e) ?? false);
 }
 
 /** Gives a used-step TOTP key back after a clean rollback; never throws (FU-BE-208). */

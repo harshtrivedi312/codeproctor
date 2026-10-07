@@ -1,0 +1,413 @@
+// FU-BE-208 (Trap A), DL-37, FR-101, FR-102: the TOTP used-step key is written when a code
+// verifies. If the database work after it rolls back CLEANLY (503 BUSY invites a retry), the key is
+// given back, so the honest retry with the same code works and is not counted as a replay. On an
+// UNKNOWN outcome (P2028, a failure after the work finished) the key stays. No TC id covers it in
+// docs/test-cases.md; names cite the decision ids and FRs.
+import type { INestApplication } from '@nestjs/common';
+import { hash } from '@node-rs/argon2';
+import type { Redis } from 'ioredis';
+import { authenticator } from 'otplib';
+import request from 'supertest';
+import type { App } from 'supertest/types';
+import type { TokenService } from '../common/auth/token.service';
+import type { TokenValidityService } from '../common/auth/token-validity.service';
+import { createPrismaClient } from '../database/create-prisma-client';
+import type { PrismaService } from '../database/prisma.service';
+import { PrismaClient, UserRole } from '../generated/prisma/client';
+import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
+import type { AuthService } from './auth.service';
+import { encryptSecret, passwordVersion } from './crypto.util';
+import { ARGON2_OPTIONS } from './password.service';
+import type { TotpService } from './totp.service';
+
+const API = '/api/v1/auth';
+const PASSWORD = 'Correct-Horse-9';
+const SECRET = 'JBSWY3DPEHPK3PXP';
+
+interface Body {
+  status: string;
+  challengeToken: string;
+  manualKey: string;
+}
+
+describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, FR-101, FR-102)', () => {
+  let infra: TestInfra;
+  let app: INestApplication<App>;
+  let prisma: PrismaClient;
+  let orgId: string;
+  let authService: AuthService;
+  let tokenService: TokenService;
+  let totp: TotpService;
+  let redis: Redis;
+  let appPrisma: PrismaService;
+  let validity: TokenValidityService;
+  let seq = 0;
+
+  beforeAll(async () => {
+    infra = await startInfra();
+    await applyMigrations(infra);
+    applyEnv(infra, { THROTTLE_AUTH_LIMIT: '10000' });
+    prisma = createPrismaClient(process.env.DATABASE_URL ?? '');
+    orgId = (await prisma.organization.create({ data: { name: 'Mark Org' } })).id;
+    jest.resetModules();
+    const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
+    const { Test } = jest.requireActual<typeof import('@nestjs/testing')>('@nestjs/testing');
+    const { configureApp } = jest.requireActual<typeof import('../bootstrap')>('../bootstrap');
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    app = moduleRef.createNestApplication<INestApplication<App>>();
+    configureApp(app);
+    await app.init();
+    authService = app.get(
+      jest.requireActual<typeof import('./auth.service')>('./auth.service').AuthService,
+    );
+    tokenService = app.get(
+      jest.requireActual<typeof import('../common/auth/token.service')>(
+        '../common/auth/token.service',
+      ).TokenService,
+    );
+    totp = app.get(
+      jest.requireActual<typeof import('./totp.service')>('./totp.service').TotpService,
+    );
+    redis = app.get<Redis>(
+      jest.requireActual<typeof import('../infrastructure/infrastructure.module')>(
+        '../infrastructure/infrastructure.module',
+      ).REDIS_CLIENT,
+    );
+    appPrisma = app.get(
+      jest.requireActual<typeof import('../database/prisma.service')>('../database/prisma.service')
+        .PrismaService,
+    );
+    validity = app.get(
+      jest.requireActual<typeof import('../common/auth/token-validity.service')>(
+        '../common/auth/token-validity.service',
+      ).TokenValidityService,
+    );
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  afterAll(async () => {
+    await app?.close();
+    await prisma?.$disconnect();
+    await infra?.stop();
+  });
+
+  const lockError = (): Error => Object.assign(new Error('lock wait'), { code: '55P03' });
+  // The app was built after jest.resetModules(), so error classes must come from the same registry
+  // the service checks with instanceof.
+  const p2028 = (): Error => {
+    const { Prisma } = jest.requireActual<typeof import('../generated/prisma/client')>(
+      '../generated/prisma/client',
+    );
+    return new Prisma.PrismaClientKnownRequestError('Transaction API error', {
+      code: 'P2028',
+      clientVersion: 'test',
+    });
+  };
+
+  async function createUser(opts: {
+    role?: UserRole;
+    totp: boolean;
+  }): Promise<{ id: string; email: string }> {
+    const email = `mark${++seq}@example.com`;
+    const key = Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64');
+    const user = await prisma.user.create({
+      data: {
+        orgId,
+        email,
+        fullName: `Mark ${seq}`,
+        role: opts.role ?? UserRole.RECRUITER,
+        passwordHash: await hash(PASSWORD, ARGON2_OPTIONS),
+        totpSecretEnc: opts.totp ? encryptSecret(SECRET, key) : null,
+        totpEnabled: opts.totp,
+      },
+    });
+    return { id: user.id, email };
+  }
+
+  const login = (email: string): request.Test =>
+    request(app.getHttpServer()).post(`${API}/login`).send({ email, password: PASSWORD });
+  const challengeFor = async (email: string): Promise<string> =>
+    ((await login(email).expect(200)).body as Body).challengeToken;
+  const verify2fa = (challengeToken: string, code: string): request.Test =>
+    request(app.getHttpServer()).post(`${API}/2fa/verify`).send({ challengeToken, code });
+  const failedLogins = async (id: string): Promise<number> =>
+    (await prisma.user.findUniqueOrThrow({ where: { id } })).failedLogins;
+  async function accessFor(id: string): Promise<string> {
+    const u = await prisma.user.findUniqueOrThrow({ where: { id } });
+    return tokenService.sign(
+      {
+        sub: u.id,
+        org: u.orgId,
+        role: u.role,
+        kind: 'access',
+        pwv: passwordVersion(u.passwordHash ?? ''),
+      },
+      900,
+    );
+  }
+  const spyOnService = (name: 'audit' | 'startSession' | 'clearFailures'): jest.SpyInstance =>
+    jest.spyOn(authService as unknown as Record<typeof name, () => Promise<unknown>>, name);
+  /** The transaction runs to its last statement, then fails with P2028: an unknown outcome. */
+  function failAfterCallback(error: () => Error = p2028): jest.SpyInstance {
+    const client = appPrisma.client;
+    const real = client.$transaction.bind(client) as (
+      fn: (tx: unknown) => Promise<unknown>,
+      opts?: unknown,
+    ) => Promise<unknown>;
+    return jest.spyOn(client, '$transaction').mockImplementationOnce(((
+      fn: (tx: unknown) => Promise<unknown>,
+      opts?: unknown,
+    ) =>
+      real(async (tx) => {
+        await fn(tx);
+        throw error();
+      }, opts)) as unknown as typeof client.$transaction);
+  }
+  const markKey = (userId: string): string =>
+    `auth:totp:used:${userId}:${Math.floor(Date.now() / 1000 / 30)}`;
+
+  describe('login with a TOTP code (completeLogin)', () => {
+    it('FU-BE-208, DL-37, FR-102: a clean rollback (503 BUSY) gives the code back: the retry with the SAME code signs in and the failed_logins counter is unchanged', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+      const challenge = await challengeFor(u.email);
+      const code = authenticator.generate(SECRET);
+      spyOnService('startSession').mockRejectedValueOnce(lockError());
+      const res = await verify2fa(challenge, code).expect(503);
+      expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+      expect(await failedLogins(u.id)).toBe(0);
+      await verify2fa(challenge, code).expect(200);
+      expect(await failedLogins(u.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: a lock error after the refresh-family INSERT returned is an unknown outcome: the mark stays and the retry is a replay counted once', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+      const challenge = await challengeFor(u.email);
+      const code = authenticator.generate(SECRET);
+      spyOnService('clearFailures').mockRejectedValueOnce(lockError());
+      await verify2fa(challenge, code).expect(503);
+      expect(await redis.exists(markKey(u.id))).toBe(1);
+      expect(await failedLogins(u.id)).toBe(0);
+      await verify2fa(challenge, code).expect(400);
+      expect(await failedLogins(u.id)).toBe(1);
+    });
+
+    it('FU-BE-208, FR-102: a successful login keeps its mark: the same code cannot be replayed with a fresh challenge', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+      const code = authenticator.generate(SECRET);
+      await verify2fa(await challengeFor(u.email), code).expect(200);
+      expect(await redis.exists(markKey(u.id))).toBe(1);
+      await verify2fa(await challengeFor(u.email), code).expect(400);
+    });
+
+    it('FU-BE-208, FR-102, TC-002: wrong codes are still counted and the fifth locks the account; nothing releases', async () => {
+      const u = await createUser({ role: UserRole.REVIEWER, totp: true });
+      const challenge = await challengeFor(u.email);
+      for (let i = 1; i <= 5; i += 1) {
+        await verify2fa(challenge, '000000').expect(400);
+        expect(await failedLogins(u.id)).toBe(i);
+      }
+      const row = await prisma.user.findUniqueOrThrow({ where: { id: u.id } });
+      expect(row.lockedUntil).not.toBeNull();
+      // Locked: even the right code is refused like a wrong one.
+      await verify2fa(challenge, authenticator.generate(SECRET)).expect(400);
+    });
+
+    it('FU-BE-208: release deletes only the key this request set, never one set by another request', async () => {
+      const u = await createUser({ totp: true });
+      const mark: { release?: () => Promise<void> } = {};
+      const key = markKey(u.id);
+      expect(
+        await totp.verify(
+          u.id,
+          encryptSecret(SECRET, Buffer.from(process.env.ENCRYPTION_KEY ?? '', 'base64')),
+          authenticator.generate(SECRET),
+          mark,
+        ),
+      ).toBe(true);
+      await redis.set(key, 'someone-else', 'EX', 60);
+      await mark.release?.();
+      expect(await redis.get(key)).toBe('someone-else');
+      await redis.del(key);
+    });
+  });
+
+  describe('enrollment confirm, signed in (confirmEnrollment)', () => {
+    async function startedEnrollment(): Promise<{ id: string; token: string; key: string }> {
+      const u = await createUser({ totp: false });
+      const token = await accessFor(u.id);
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/setup/start`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ currentPassword: PASSWORD })
+          .expect(200)
+      ).body as Body;
+      return { id: u.id, token, key: start.manualKey };
+    }
+    const confirm = (token: string, code: string): request.Test =>
+      request(app.getHttpServer())
+        .post(`${API}/2fa/setup/confirm`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: PASSWORD, code });
+
+    it('FU-BE-208, DL-37, FR-102: a clean rollback inside the transaction (55P03, 503 BUSY) gives the code back: the retry with the SAME code enables TOTP, counter unchanged', async () => {
+      const e = await startedEnrollment();
+      const code = authenticator.generate(e.key);
+      spyOnService('audit').mockRejectedValueOnce(lockError());
+      await confirm(e.token, code).expect(503);
+      expect(await failedLogins(e.id)).toBe(0);
+      await confirm(e.token, code).expect(200);
+      expect(await failedLogins(e.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+      const e = await startedEnrollment();
+      const code = authenticator.generate(e.key);
+      failAfterCallback();
+      await confirm(e.token, code).expect(503);
+      expect(await redis.exists(markKey(e.id))).toBe(1);
+      await confirm(e.token, code).expect(400);
+      expect(await failedLogins(e.id)).toBe(1);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: P2028 INSIDE the callback and 40P01 at commit are rollbacks: each gives the code back', async () => {
+      const e = await startedEnrollment();
+      const code = authenticator.generate(e.key);
+      spyOnService('audit').mockRejectedValueOnce(p2028());
+      await confirm(e.token, code).expect(503);
+      failAfterCallback(() => Object.assign(new Error('deadlock'), { code: '40P01' }));
+      await confirm(e.token, code).expect(503);
+      await confirm(e.token, code).expect(200);
+      expect(await failedLogins(e.id)).toBe(0);
+    });
+
+    it('FU-BE-208, FR-102: wrong enrollment codes still count and lock at 5', async () => {
+      const e = await startedEnrollment();
+      for (let i = 1; i <= 5; i += 1) {
+        await confirm(e.token, '000000').expect(400);
+        expect(await failedLogins(e.id)).toBe(i);
+      }
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: e.id } })).lockedUntil).not.toBe(
+        null,
+      );
+    });
+  });
+
+  describe('forced enrollment at login (confirmEnrollmentWithChallenge)', () => {
+    async function startedChallenge(): Promise<{ id: string; challenge: string; key: string }> {
+      const u = await createUser({ role: UserRole.SUPER_ADMIN, totp: false });
+      const challenge = await challengeFor(u.email);
+      const start = (
+        await request(app.getHttpServer())
+          .post(`${API}/2fa/enroll/start`)
+          .send({ challengeToken: challenge })
+          .expect(200)
+      ).body as Body;
+      return { id: u.id, challenge, key: start.manualKey };
+    }
+    const confirm = (challengeToken: string, code: string): request.Test =>
+      request(app.getHttpServer()).post(`${API}/2fa/enroll/confirm`).send({ challengeToken, code });
+
+    it('FU-BE-208, DL-37, FR-102: a clean rollback gives the code back: the retry with the SAME code and challenge signs in, counter unchanged', async () => {
+      const e = await startedChallenge();
+      const code = authenticator.generate(e.key);
+      spyOnService('audit').mockRejectedValueOnce(lockError());
+      await confirm(e.challenge, code).expect(503);
+      expect(await failedLogins(e.id)).toBe(0);
+      await confirm(e.challenge, code).expect(200);
+      expect(await failedLogins(e.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+      const e = await startedChallenge();
+      const code = authenticator.generate(e.key);
+      failAfterCallback();
+      await confirm(e.challenge, code).expect(503);
+      expect(await redis.exists(markKey(e.id))).toBe(1);
+      await confirm(e.challenge, code).expect(400);
+      expect(await failedLogins(e.id)).toBe(1);
+    });
+
+    it('FU-BE-208, FR-102: wrong codes still count and lock at 5', async () => {
+      const e = await startedChallenge();
+      for (let i = 1; i <= 5; i += 1) {
+        await confirm(e.challenge, '000000').expect(400);
+        expect(await failedLogins(e.id)).toBe(i);
+      }
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: e.id } })).lockedUntil).not.toBe(
+        null,
+      );
+    });
+  });
+
+  describe('disable 2FA (disableTwoFactor)', () => {
+    const disable = (token: string, totpCode: string): request.Test =>
+      request(app.getHttpServer())
+        .post(`${API}/2fa/disable`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: PASSWORD, totpCode });
+    async function enrolled(): Promise<{ id: string; token: string }> {
+      const u = await createUser({ totp: true });
+      return { id: u.id, token: await accessFor(u.id) };
+    }
+
+    it('FU-BE-208, DL-37, FR-102: a clean rollback (55P03, 503 BUSY) gives the code back: the retry with the SAME code disables 2FA, counter unchanged', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockRejectedValueOnce(lockError());
+      await disable(d.token, code).expect(503);
+      expect(await failedLogins(d.id)).toBe(0);
+      await disable(d.token, code).expect(204);
+      expect(await failedLogins(d.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: a Redis outage while writing the token marker (our own 503 inside the transaction) is a clean rollback too', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      const { ServiceUnavailableException } =
+        jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+      jest
+        .spyOn(validity, 'invalidateIssuedTokens')
+        .mockRejectedValueOnce(new ServiceUnavailableException('down'));
+      await disable(d.token, code).expect(503);
+      await disable(d.token, code).expect(204);
+      expect(await failedLogins(d.id)).toBe(0);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      failAfterCallback();
+      await disable(d.token, code).expect(503);
+      expect(await redis.exists(markKey(d.id))).toBe(1);
+      await disable(d.token, code).expect(403);
+      expect(await failedLogins(d.id)).toBe(1);
+    });
+
+    it('FU-BE-208, DL-37, FR-102: P2028 INSIDE the callback and 40P01 at commit are rollbacks: each gives the code back', async () => {
+      const d = await enrolled();
+      const code = authenticator.generate(SECRET);
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockRejectedValueOnce(p2028());
+      await disable(d.token, code).expect(503);
+      // The token marker would end the caller's token at once; keep the token usable for the retry.
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      failAfterCallback(() => Object.assign(new Error('deadlock'), { code: '40P01' }));
+      await disable(d.token, code).expect(503);
+      await disable(d.token, code).expect(204);
+      expect(await failedLogins(d.id)).toBe(0);
+    });
+
+    it('FU-BE-208, FR-102: wrong codes still count and lock at 5', async () => {
+      const d = await enrolled();
+      for (let i = 1; i <= 5; i += 1) {
+        await disable(d.token, '000000').expect(403);
+        expect(await failedLogins(d.id)).toBe(i);
+      }
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).lockedUntil).not.toBe(
+        null,
+      );
+    });
+  });
+});
