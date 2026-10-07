@@ -11,6 +11,7 @@ import {
   LOCK_IMPORT_ALLOWED_FILES,
   LOCK_NAMES,
   RETENTION_LOCK_FILE,
+  SESSION_PROCESSOR_CLASS,
   SESSION_PROCESSOR_FILE,
   SESSION_STATE_FILE,
   SESSION_STATE_CLASS,
@@ -785,6 +786,34 @@ export class S {
     );
   });
 
+  it.each([
+    ['guardLive', 'async guardLive(tx: SessionLockTx'],
+    ['lockForAccommodation', 'async lockForAccommodation(tx: SessionLockTx'],
+    ['lockAnySession', 'async lockAnySession(tx: SessionLockTx'],
+    ['proctorResume', 'async proctorResume(sessionId: string)'],
+  ])(
+    'TC-008 N-2 a decorator above the %s method fails: a pinned method takes none',
+    (name, header) => {
+      const text = STATE_TEXT.replace(`  ${header}`, `  @Expose()\n  ${header}`);
+      expect(text).not.toEqual(STATE_TEXT);
+      expect(state(text)).toEqual([
+        `${SESSION_STATE_FILE}: the ${name} method carries a decorator or other code above it: a pinned method takes none`,
+      ]);
+    },
+  );
+
+  it('TC-008 N-2 a decorator on the class, and blank lines above a method, are fine', () => {
+    const decoratedClass = STATE_TEXT.replace(
+      'export class SessionStateService {',
+      '@Injectable()\nexport class SessionStateService {',
+    );
+    expect(decoratedClass).not.toEqual(STATE_TEXT);
+    expect(state(decoratedClass)).toEqual([]);
+    expect(
+      state(STATE_TEXT.replace('\n  async lockAnySession(', '\n\n\n  async lockAnySession(')),
+    ).toEqual([]);
+  });
+
   it('TC-008 N-1 an arrow type in a parameter type is not a default (its => is not an =)', () => {
     const text = STATE_TEXT.replace(
       'async lockAnySession(tx: SessionLockTx, sessionId: string) {',
@@ -1134,6 +1163,61 @@ describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lo
 
   it('TC-008 the file as Backend B writes it passes', () => {
     expect(processor(PROCESSOR_TEXT)).toEqual([]);
+  });
+
+  // ---- N-3 (review r3 of #208): the two methods are the SessionJobProcessor class's own ------------------------------
+
+  it('TC-008 N-3 a helper class above the processor with its own withLiveSession is not the one counted: a third door to guardLive fails', () => {
+    const helper = `export class LiveHelper {
+  async withLiveSession(sid: string, fn: () => Promise<void>) {
+    return this.prisma.client.$transaction(async (tx) => {
+      if ((await this.state.guardLive(tx, sid)) === 'LIVE') await fn();
+    });
+  }
+}
+
+`;
+    // The processor keeps its own withLiveSession, so .guardLive( is now called twice: once in each class.
+    expect(processor(helper + PROCESSOR_TEXT)).toEqual([
+      `${SESSION_PROCESSOR_FILE}: 2 .guardLive( calls, exactly one is allowed, inside withLiveSession`,
+    ]);
+    // The helper takes over the only call: the processor's method no longer holds it.
+    const moved =
+      helper +
+      PROCESSOR_TEXT.replace(
+        "if ((await this.state.guardLive(tx, sid)) === 'LIVE') await fn();",
+        'await fn();',
+      );
+    expect(processor(moved)).toEqual([
+      `${SESSION_PROCESSOR_FILE}: the .guardLive( call is not inside withLiveSession`,
+    ]);
+  });
+
+  it('TC-008 N-3 a file whose processor class has another name fails (no class, and the methods are not found)', () => {
+    const renamed = PROCESSOR_TEXT.replace(
+      'export abstract class SessionJobProcessor {',
+      'export abstract class JobRunner {',
+    );
+    expect(processor(renamed)).toEqual(
+      expect.arrayContaining([
+        `${SESSION_PROCESSOR_FILE}: no class ${SESSION_PROCESSOR_CLASS} with a body found`,
+      ]),
+    );
+  });
+
+  // ---- N-2 (review r3 of #208): a pinned method takes no decorator --------------------------------------------------
+
+  it.each([
+    ['a one-line decorator', '  @Expose()\n'],
+    ['a decorator over several lines', "  @Expose({\n    as: 'live',\n  })\n"],
+  ])('TC-008 N-2 %s above withLiveSession fails', (_what, decorator) => {
+    const text = PROCESSOR_TEXT.replace(
+      '  protected async withLiveSession(',
+      `${decorator}  protected async withLiveSession(`,
+    );
+    expect(processor(text)).toEqual([
+      `${SESSION_PROCESSOR_FILE}: the withLiveSession method carries a decorator or other code above it: a pinned method takes none`,
+    ]);
   });
 
   it('TC-008 .guardLive( outside withLiveSession, or twice, or not at all, fails', () => {

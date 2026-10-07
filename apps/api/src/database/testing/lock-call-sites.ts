@@ -61,6 +61,8 @@ export const SESSION_STATE_FILE = 'session/session-state.service.ts';
 export const SESSION_STATE_CLASS = 'SessionStateService';
 /** SessionJobProcessor (Backend B): `withLiveSession` and `withAnySession`. */
 export const SESSION_PROCESSOR_FILE = 'session/session-job.processor.ts';
+/** The class of that file: the two methods are looked up in its body, not in another class of the file (N-3). */
+export const SESSION_PROCESSOR_CLASS = 'SessionJobProcessor';
 /** The accommodation writers (Backend B): the STAFF PATCH, redact-note and video-check PUT. */
 export const ACCOMMODATIONS_FILE = 'session/accommodations.ts';
 /** The retention org-job site (Database B): `RetentionRepository.casAccommodations`, in a plain `runInOrg`. */
@@ -254,6 +256,18 @@ export function findMethod(code: string, name: string, within?: BodySpan): Metho
 
 const inside = (index: number, span: BodySpan): boolean =>
   index > span.bodyStart && index < span.bodyEnd;
+
+/**
+ * N-2 (review r3 of #208): true when what stands directly above the method's header (blank lines skipped, comments are
+ * already stripped) is the end of the previous member or the class's opening brace (`}`, `;` or `{`). Anything else is
+ * a decorator (`@Expose()`, also over several lines) or other code, which a pinned method may not carry: a decorator
+ * can take `descriptor.value` and hand the method out under no name.
+ */
+function startsCleanly(code: string, span: MethodSpan): boolean {
+  const lineStart = code.lastIndexOf('\n', span.nameIndex - 1) + 1;
+  const above = code.slice(0, lineStart).replace(/\s+$/, '');
+  return /[{};]$/.test(above);
+}
 
 // ---- imports of the cores ---------------------------------------------------------------------------------------------
 
@@ -496,6 +510,10 @@ export function stateFileProblems(path: string, code: string): string[] {
     const wrapper = findMethod(code, name, stateClass);
     if (wrapper === undefined) {
       out.push(`${path}: no wrapper method ${name} with a body found`);
+    } else if (!startsCleanly(code, wrapper)) {
+      out.push(
+        `${path}: the ${name} method carries a decorator or other code above it: a pinned method takes none`,
+      );
     }
     const locals = imports.named.get(name) ?? [];
     if (locals.includes(name)) {
@@ -568,6 +586,11 @@ export function stateFileProblems(path: string, code: string): string[] {
     const resume = findMethod(code, 'proctorResume', stateClass);
     const calls = memberCalls(code, 'guardLive');
     if (resume === undefined) out.push(`${path}: no proctorResume method with a body found`);
+    else if (!startsCleanly(code, resume)) {
+      out.push(
+        `${path}: the proctorResume method carries a decorator or other code above it: a pinned method takes none`,
+      );
+    }
     if (calls.length !== 1) {
       out.push(
         `${path}: ${calls.length} .guardLive( member calls (any receiver), exactly one is allowed, inside proctorResume`,
@@ -616,10 +639,21 @@ export function processorFileProblems(path: string, code: string): string[] {
     ['guardLive', 'withLiveSession'],
     ['lockAnySession', 'withAnySession'],
   ];
+  // N-3 (review r3 of #208): the two methods are looked up in the SessionJobProcessor class only, so a helper class of
+  // the same file with its own withLiveSession is not the one counted (it would be a third door to guardLive).
+  const processorClass = findClassBody(code, SESSION_PROCESSOR_CLASS);
+  if (processorClass === undefined) {
+    out.push(`${path}: no class ${SESSION_PROCESSOR_CLASS} with a body found`);
+  }
   for (const [name, method] of entries) {
-    const span = findMethod(code, method);
+    const span = findMethod(code, method, processorClass);
     const calls = indexesOf(code, new RegExp(`\\.\\s*${name}\\s*\\(`));
     if (span === undefined) out.push(`${path}: no ${method} method with a body found`);
+    else if (!startsCleanly(code, span)) {
+      out.push(
+        `${path}: the ${method} method carries a decorator or other code above it: a pinned method takes none`,
+      );
+    }
     if (calls.length !== 1) {
       out.push(
         `${path}: ${calls.length} .${name}( calls, exactly one is allowed, inside ${method}`,
