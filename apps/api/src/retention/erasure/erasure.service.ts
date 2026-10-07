@@ -159,7 +159,12 @@ export class ErasureService {
       // Look again once the job has had time to run. This is a look-again, NOT a fence time: the fence
       // time is recorded below the first time a session is READ as ERASED. The polls are bounded by the
       // age of the erasure request (see FENCE_POLL_*); the daily sweep is the retry after that.
-      const ageSeconds = (current().getTime() - requestedAt.getTime()) / 1000;
+      // Measured from the later of the request and the close of the last hold: a request whose hold closed
+      // weeks later still gets its fast polls (the same base as the C-06 deadline).
+      const closed = await inOrg(() => this.repo.holdClosedAt(candidateId));
+      const base = closed !== null && closed > requestedAt ? closed : requestedAt;
+      const nowAt = current();
+      const ageSeconds = (nowAt.getTime() - base.getTime()) / 1000;
       if (ageSeconds < FENCE_POLL_WINDOW_SECONDS) {
         const after =
           ageSeconds < FENCE_POLL_FAST_WINDOW_SECONDS
@@ -169,7 +174,7 @@ export class ErasureService {
           orgId,
           candidateId,
           requestId,
-          runAt: new Date(current().getTime() + after * 1000),
+          runAt: new Date(nowAt.getTime() + after * 1000),
         });
       }
     }

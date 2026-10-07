@@ -824,10 +824,36 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     await svc.run(h.A.orgId, cid, at(600_000)); // 10 min old: slow polls
     expect(fence.calls).toHaveLength(3);
     expect(scheduler.polls).toHaveLength(3);
+    expect(scheduler.polls[0]!.getTime() - at(0).getTime()).toBeLessThanOrEqual(60_000);
+    expect(scheduler.polls[1]!.getTime() - at(30_000).getTime()).toBeLessThanOrEqual(15_100);
     expect(scheduler.polls[2]!.getTime() - at(600_000).getTime()).toBeGreaterThanOrEqual(300_000);
     await svc.run(h.A.orgId, cid, at(2 * 3_600_000)); // over an hour: only the daily sweep retries
     expect(fence.calls).toHaveLength(4);
     expect(scheduler.polls).toHaveLength(3);
     expect(await completedRows(cid)).toHaveLength(0);
+  });
+
+  it('TC-094 #26 C-06: a hold that closes long after the request still gets fast polls (measured from the hold close)', async () => {
+    await setup(h.A, {
+      submittedDaysAgo: 3,
+      anchorDaysAgo: 3,
+      openAppeal: true,
+      status: 'APPEALED',
+    });
+    const sid = sessionIdOf(h.A);
+    const cid = await candidateOf(h.A);
+    const { svc, fence, scheduler } = service();
+    fence.deferred = true;
+    await svc.requestErasure({ orgId: h.A.orgId, candidateId: cid, actorId: ACTOR(), now: NOW });
+    const closed = at(20 * 86_400_000);
+    await h.owner.appeal.updateMany({
+      where: { sessionReview: { sessionId: sid } },
+      data: { status: 'UPHELD', resolvedAt: closed },
+    });
+    await h.owner.session.update({ where: { id: sid }, data: { status: 'COMPLETED' } });
+    await svc.run(h.A.orgId, cid, new Date(closed.getTime() + 5_000));
+    expect(fence.calls).toHaveLength(1);
+    expect(scheduler.polls).toHaveLength(1);
+    expect(scheduler.polls[0]!.getTime() - closed.getTime()).toBeLessThan(60_000);
   });
 });

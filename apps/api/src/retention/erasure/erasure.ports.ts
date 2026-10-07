@@ -32,6 +32,7 @@ export abstract class SessionFencePort {
     orgId: string;
     sessionId: string;
     closeOpenAppeal: boolean;
+    /** When THIS fence request is made (not the candidate's erasure request time). */
     requestedAt: Date;
   }): Promise<void>;
 }
