@@ -117,6 +117,9 @@ export const envSchema = z
     // Issuer label shown in authenticator apps.
     TOTP_ISSUER: z.string().min(1).default('CodeProctor'),
     // Code runner (BE-05, FR-503). Unset means runs fail as "unavailable". Token is a secret.
+    // JUDGE0_MODE=stub (DL-56) swaps in an in-process fake that runs nothing. Local development only
+    // (localAdapterProblem); it needs no JUDGE0_URL or tokens.
+    JUDGE0_MODE: z.enum(['real', 'stub']).default('real'),
     JUDGE0_URL: z.url().optional(),
     JUDGE0_AUTH_TOKEN: z.string().min(1).optional(),
     // Judge0 AUTHZ token (X-Auth-User): needed to DELETE submissions after use. Never log.
@@ -149,7 +152,11 @@ export const envSchema = z
     // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
     // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
     // role). SES_ENDPOINT is for tests only and is refused outside development and test.
-    EMAIL_PROVIDER: z.enum(['ses', 'noop']).default('noop'),
+    EMAIL_PROVIDER: z.enum(['ses', 'noop', 'smtp-dev']).default('noop'),
+    // smtp-dev (DL-54): plain SMTP, no auth, no TLS, to a local Mailpit. Local development only: the
+    // guard in localAdapterProblem refuses it unless APP_ENV is exactly development.
+    SMTP_DEV_HOST: z.string().min(1).default('127.0.0.1'),
+    SMTP_DEV_PORT: port.default(1025),
     AWS_REGION: z
       .string()
       .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/, 'must look like us-east-1')
@@ -175,6 +182,32 @@ export const envSchema = z
     SES_FROM_ADDRESS: emptyAsUnset(z.email()),
     SES_CONFIGURATION_SET: emptyAsUnset(z.string().min(1)),
     SES_ENDPOINT: emptyAsUnset(z.url()),
+    // Object storage (BE-09, ADR 0001 section 2.1, ADR 0013 section 5.7): one S3-compatible
+    // interface. Cloudflare R2 on staging (synthetic data only), AWS S3 on pilot and production;
+    // only these values differ. Unset locally and on a fresh staging: the media routes then answer
+    // 503 STORAGE_UNCONFIGURED. The two credentials are secrets (never log); both or neither (AWS
+    // may use the instance role).
+    // Empty for AWS S3; https://<account>.r2.cloudflarestorage.com for R2.
+    // An empty value (a copied .env template line such as `S3_REGION=`) counts as unset, like the
+    // SES settings above (DL-52): the live-environment checks below still require real values.
+    S3_ENDPOINT: emptyAsUnset(z.url()),
+    // The AWS region, or `auto` for R2.
+    S3_REGION: emptyAsUnset(z.string().min(1)),
+    S3_MEDIA_BUCKET: emptyAsUnset(
+      z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a valid bucket name'),
+    ),
+    S3_ACCESS_KEY_ID: emptyAsUnset(z.string().min(1)),
+    S3_SECRET_ACCESS_KEY: emptyAsUnset(z.string().min(1)),
+    S3_FORCE_PATH_STYLE: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Sign `If-None-Match: *` on chunk PUTs (ADR 0013 section 5.5 control 3). AWS S3 supports it;
+    // R2 is not verified (BE-09 spike), so it stays off until a staging check proves it.
+    S3_CONDITIONAL_WRITES: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
   })
   .superRefine((env, ctx) => {
     const live = isLiveEnv(env);
@@ -185,7 +218,7 @@ export const envSchema = z
         message: 'must be less than HTTP_REQUEST_TIMEOUT_MS',
       });
     }
-    if (live) {
+    if (live && env.JUDGE0_MODE === 'real') {
       // The code runner holds candidate source and test data: it must be configured, authenticated
       // with a strong token, and not reached over plain HTTP unless it is on this host.
       if (!env.JUDGE0_URL) {
@@ -249,6 +282,14 @@ export const envSchema = z
           message: 'is a local placeholder and is refused in staging, pilot and production',
         });
       }
+    }
+    const emailProblem = localAdapterProblem(env.EMAIL_PROVIDER === 'smtp-dev', env, 'smtp-dev');
+    if (emailProblem !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['EMAIL_PROVIDER'], message: emailProblem });
+    }
+    const judgeProblem = localAdapterProblem(env.JUDGE0_MODE === 'stub', env, 'stub');
+    if (judgeProblem !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['JUDGE0_MODE'], message: judgeProblem });
     }
     if (live && env.EMAIL_PROVIDER !== 'ses') {
       ctx.addIssue({
@@ -341,6 +382,36 @@ export const envSchema = z
         }
       }
     }
+    if ((env.S3_ACCESS_KEY_ID === undefined) !== (env.S3_SECRET_ACCESS_KEY === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['S3_SECRET_ACCESS_KEY'],
+        message: 'S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together',
+      });
+    }
+    if (deployed) {
+      for (const key of ['S3_REGION', 'S3_MEDIA_BUCKET'] as const) {
+        if (env[key] === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: 'is required in pilot and production',
+          });
+        }
+      }
+      if (env.S3_ENDPOINT !== undefined) {
+        const url = new URL(env.S3_ENDPOINT);
+        // Pilot and production use AWS S3 (ADR 0001 section 2.1): an R2 or other endpoint there
+        // would send candidate media to a store the pilot has no agreement with.
+        if (url.protocol !== 'https:' || !url.hostname.endsWith('.amazonaws.com')) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['S3_ENDPOINT'],
+            message: 'must be unset or an https *.amazonaws.com endpoint in pilot and production',
+          });
+        }
+      }
+    }
     if (
       env.JWT_CANDIDATE_SECRET !== undefined &&
       env.JWT_CANDIDATE_SECRET === env.JWT_ACCESS_SECRET
@@ -370,6 +441,21 @@ export function isSharedEnv(env: { APP_ENV?: string; NODE_ENV?: string }): boole
     env.APP_ENV === undefined ||
     !LOCAL_APP_ENVS.includes(env.APP_ENV)
   );
+}
+
+/**
+ * Local-only adapters (smtp-dev mail, Judge0 stub; DL-54, DL-56, NFR-04) are an allowlist: only
+ * APP_ENV exactly 'development' may use them, and NODE_ENV=production always refuses. Unset,
+ * misspelled, test, staging, pilot and production all refuse. Fixed message, no values.
+ */
+export function localAdapterProblem(
+  active: boolean,
+  env: { APP_ENV?: string; NODE_ENV?: string },
+  value: string,
+): string | undefined {
+  if (!active) return undefined;
+  if (env.APP_ENV === 'development' && env.NODE_ENV !== 'production') return undefined;
+  return `${value} is allowed only when APP_ENV is exactly development (local use only)`;
 }
 
 /** Matches change-me anywhere, ignoring case, surrounding spaces and leading quotes. */
@@ -465,6 +551,22 @@ export function validateEnv(raw: Record<string, unknown>): Env {
         typeof url === 'string' && url !== '' ? databaseUrlProblem(url) : undefined;
       if (urlProblem !== undefined) problems.push(`DATABASE_URL: ${urlProblem}`);
     }
+    // The schema may have stopped before its own refinements ran, so repeat the local-adapter guard
+    // here: an unset or misspelled APP_ENV must still name the variables (DL-54, DL-56).
+    const emailProblem = localAdapterProblem(
+      raw['EMAIL_PROVIDER'] === 'smtp-dev',
+      { APP_ENV: appEnv, NODE_ENV: nodeEnv },
+      'smtp-dev',
+    );
+    const judgeProblem = localAdapterProblem(
+      raw['JUDGE0_MODE'] === 'stub',
+      { APP_ENV: appEnv, NODE_ENV: nodeEnv },
+      'stub',
+    );
+    if (emailProblem !== undefined && !problems.some((x) => x.startsWith('EMAIL_PROVIDER: ')))
+      problems.push(`EMAIL_PROVIDER: ${emailProblem}`);
+    if (judgeProblem !== undefined && !problems.some((x) => x.startsWith('JUDGE0_MODE: ')))
+      problems.push(`JUDGE0_MODE: ${judgeProblem}`);
     throw new Error(`Invalid environment: ${problems.join('; ')}`);
   }
   // The wrapping key is named by the active kid (SESSION_KEY_ENC_KEY_<kid>), so the schema cannot

@@ -12,6 +12,8 @@ import type { Env } from './config/env';
 import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { CandidateModule } from './candidate/candidate.module';
+import { GradingModule } from './grading/grading.module';
+import { SubmissionsModule } from './submissions/submissions.module';
 import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
 import { ReviewModule } from './review/review.module';
@@ -23,6 +25,8 @@ import { TokenModule } from './common/auth/token.service';
 import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
 import { MailModule } from './mail/mail.module';
+import { MediaModule } from './media/media.module';
+import { RetentionModule } from './retention/retention.module';
 import { ipBucket } from './client-errors/ip-bucket';
 import { ClientErrorsModule } from './client-errors/client-errors.module';
 import { HealthModule } from './health/health.module';
@@ -124,6 +128,10 @@ function areaOf(context: ExecutionContext): Area {
     AuditModule,
     AuthModule,
     CandidateModule,
+    MediaModule,
+    RetentionModule.forRoot({ objectStore: MediaModule }),
+    SubmissionsModule,
+    GradingModule,
     UsersModule,
     OrgSettingsModule,
     TestsModule,

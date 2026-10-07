@@ -28,6 +28,8 @@ export const CANDIDATE_PROBLEM_CODES = [
   'WINDOW_NOT_OPEN',
   'SESSION_NOT_ACTIVE',
   'SESSION_PAUSED',
+  'SECTION_NOT_OPEN',
+  'SUBMIT_LIMIT_REACHED',
   'ILLEGAL_TRANSITION',
   'SESSION_STATE_CONFLICT',
   'CONSENT_NOT_CONFIGURED',
@@ -47,6 +49,14 @@ export const CANDIDATE_PROBLEM_CODES = [
   // is named for its first users, the candidate routes, and is the one list of CodedHttpException codes.
   'SESSION_ERASED',
   'LOCK_BUSY',
+  // Media presign and confirm (BE-09, ADR 0013 section 5.5).
+  'SEQ_CONFLICT',
+  'CHUNK_NOT_PRESIGNED',
+  'UPLOAD_NOT_FOUND',
+  'UPLOAD_MISMATCH',
+  'PRESIGN_QUOTA_EXCEEDED',
+  'STORAGE_UNCONFIGURED',
+  'STORAGE_UNAVAILABLE',
 ] as const;
 export type CandidateProblemCode = (typeof CANDIDATE_PROBLEM_CODES)[number];
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
