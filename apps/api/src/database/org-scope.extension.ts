@@ -52,8 +52,8 @@
 //     `orderBy` on a relation and `_count` follow foreign keys blindly, so any foreign key that
 //     crosses orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the
 //     reviewer user row of another org, password hash included, if reviewer_id points there.
-// (d) Rule (i) covers 26 foreign keys, not only the staff references and
-//     test_questions.question_version_id (RULE_I_REFERENCES in org-scope-relations.ts, 26 keys: 13
+// (d) Rule (i) covers 27 foreign keys, not only the staff references and
+//     test_questions.question_version_id (RULE_I_REFERENCES in org-scope-relations.ts, 27 keys: 14
 //     staff and 13 cross-chain). The main cross-chain ones: session_questions
 //     to test_questions, question_versions and question_variants; session_sections to
 //     test_sections; consents to consent_texts; keystroke_batches to session_questions;

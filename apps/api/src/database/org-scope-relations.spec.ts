@@ -36,18 +36,18 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
     expect(findRelationProblems(real())).toEqual([]);
   });
 
-  it('TC-008 the schema has 59 foreign keys: 9 ORG_ID, 21 SCOPE_HOP, 3 COMPOSITE and 26 RULE_I', () => {
-    const expected = { ORG_ID: 9, SCOPE_HOP: 21, COMPOSITE: 3, RULE_I: 26, total: 59 };
-    // Counted from schema.prisma and the scope map alone, and from the table: both are 59.
-    expect(schemaForeignKeys(readSchemaModels())).toHaveLength(59);
+  it('TC-008 the schema has 62 foreign keys: 10 ORG_ID, 21 SCOPE_HOP, 4 COMPOSITE and 27 RULE_I (59 before ADR 0017 4.7, C-53)', () => {
+    const expected = { ORG_ID: 10, SCOPE_HOP: 21, COMPOSITE: 4, RULE_I: 27, total: 62 };
+    // Counted from schema.prisma and the scope map alone, and from the table: both are 62.
+    expect(schemaForeignKeys(readSchemaModels())).toHaveLength(62);
     expect(countClasses(readSchemaModels(), ORG_SCOPE)).toEqual(expected);
     expect(tally(FK_CLASSES)).toEqual(expected);
   });
 
-  it('TC-008 the 26 RULE_I references are 13 staff references and 13 cross-chain references', () => {
+  it('TC-008 the 27 RULE_I references are 14 staff references and 13 cross-chain references', () => {
     const kinds = (kind: RuleIKind): number => FK_CLASSES.filter((k) => k.ruleI === kind).length;
     expect({ staff: kinds('staff'), crossChain: kinds('cross-chain') }).toEqual({
-      staff: 13,
+      staff: 14,
       crossChain: 13,
     });
     // Only RULE_I keys carry a kind.
@@ -55,8 +55,8 @@ describe('foreign key classification (NFR-04, FR-103; FU-DB-64)', () => {
     expect(FK_CLASSES.filter((k) => k.fkClass === 'RULE_I' && k.ruleI === undefined)).toEqual([]);
   });
 
-  it('TC-008 RULE_I_REFERENCES is the 26 foreign keys rule (i) applies to', () => {
-    expect(RULE_I_REFERENCES).toHaveLength(26);
+  it('TC-008 RULE_I_REFERENCES is the 27 foreign keys rule (i) applies to', () => {
+    expect(RULE_I_REFERENCES).toHaveLength(27);
     expect(RULE_I_REFERENCES.every((k) => k.fkClass === 'RULE_I')).toBe(true);
     const ids = RULE_I_REFERENCES.map((k) => `${k.model}.${k.field}`);
     // The ones the review and the follow-ups name.

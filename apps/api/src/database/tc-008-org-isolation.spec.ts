@@ -3,10 +3,10 @@
 // by `prisma migrate deploy`. The code under test connects as app_user through the real client
 // factory, so the real grants are in force. Fixtures and checks use the owner role.
 //
-// Two tenants (A and B) hold one row in each of the 31 models, including the models that have no
+// Two tenants (A and B) hold one row in each of the 32 models, including the models that have no
 // org_id and are scoped only through a parent chain (proctor_events through their session,
 // test_cases through their question version and question). What is covered:
-//   - For every one of the 31 models, as A against B's row: findMany, findFirst, findFirstOrThrow,
+//   - For every one of the 32 models, as A against B's row: findMany, findFirst, findFirstOrThrow,
 //     findUnique, findUniqueOrThrow, count, aggregate and groupBy find nothing; update, updateMany,
 //     updateManyAndReturn, delete and deleteMany change nothing (B's rows are compared before and
 //     after). Positive controls prove A still reads and updates its own row, and that A and B
@@ -93,6 +93,7 @@ const TOUCH: Record<ModelName, Record<string, unknown>> = {
   Appeal: { resolutionNote: 'changed' },
   WebhookEndpoint: { url: 'https://hooks.example.test/changed' },
   WebhookDelivery: { error: 'changed' },
+  ScheduledWindow: { status: 'DONE' },
 };
 
 const ALL_ROLES = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'] as const;

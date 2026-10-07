@@ -1076,7 +1076,7 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
 
   it('TC-008 the refusal covers every relation field of every model a candidate can query', () => {
     // Every relation side in the relation table, on every allowlisted model, in include, select,
-    // where and orderBy. 118 relation fields exist in all (59 foreign keys, both sides); those of the
+    // where and orderBy. 124 relation fields exist in all (62 foreign keys, both sides); those of the
     // allowed models are walked.
     let checked = 0;
     for (const model of Object.keys(CANDIDATE_MODELS) as ModelName[]) {
