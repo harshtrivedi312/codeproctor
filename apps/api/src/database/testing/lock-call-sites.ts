@@ -278,6 +278,8 @@ interface LockImports {
   readonly named: Map<LockName, string[]>;
   /** The names of `import * as ns from '.../session-locks'`. */
   readonly namespaces: string[];
+  /** The names of a default import, `import core from` or `import core, { ... } from` (the whole module, N-4). */
+  readonly defaults: string[];
   /**
    * The names that hold the whole core without an `import { } from` statement: `import x = require('...')`,
    * `const x = require('...')`, `const x = await import('...')` (also `let` and `var`).
@@ -308,8 +310,17 @@ function parseLockImports(code: string): LockImports {
   const ranges: Array<[number, number]> = [];
   const named = new Map<LockName, string[]>();
   const namespaces: string[] = [];
+  const defaults: string[] = [];
   const handles: string[] = [];
-  const statement = /import\s+(?:type\s+)?([^;]*?)\s+from\s*(['"`])([^'"`\n]+)\2\s*;?/g;
+  // N-4 (review r3 of #208): a strict import clause at the start of a line, not a lazy `[^;]*?`, so a template literal or
+  // a string that holds `import ... from '...session-locks'` cannot fake an import range and hide a mention inside it.
+  const specifier = `(?:type\\s+)?${IDENT}(?:\\s+as\\s+${IDENT})?`;
+  const namedClause = `\\{\\s*(?:${specifier}\\s*,\\s*)*(?:${specifier}\\s*)?\\}`;
+  const clause = `(?:${IDENT}\\s*,\\s*)?(?:${namedClause}|\\*\\s*as\\s+${IDENT})|${IDENT}`;
+  const statement = new RegExp(
+    `(?<=^|\\n)[ \\t]*import\\s+(?:type\\s+)?(${clause})\\s*from\\s*(['"\`])([^'"\`\\n]+)\\2[ \\t]*;?`,
+    'g',
+  );
   for (const match of code.matchAll(statement)) {
     if (!LOCKS_SPECIFIER.test(match[3] as string)) continue;
     const start = match.index;
@@ -317,6 +328,8 @@ function parseLockImports(code: string): LockImports {
     const clause = match[1] as string;
     const namespace = new RegExp(`\\*\\s*as\\s+(${IDENT})`).exec(clause);
     if (namespace !== null) namespaces.push(namespace[1] as string);
+    const defaultName = new RegExp(`^\\s*(${IDENT})\\s*(?:,|$)`).exec(clause);
+    if (defaultName !== null) defaults.push(defaultName[1] as string);
     const braces = /\{([^}]*)\}/.exec(clause);
     if (braces === null) continue;
     for (const part of (braces[1] as string).split(',')) {
@@ -338,7 +351,14 @@ function parseLockImports(code: string): LockImports {
   }
   // Every other way to reach the module: counted from the specifiers, so a form this parser does not know still counts.
   const reached = specifiersOf(code).filter((specifier) => LOCKS_SPECIFIER.test(specifier)).length;
-  return { ranges, named, namespaces, handles, others: Math.max(0, reached - ranges.length) };
+  return {
+    ranges,
+    named,
+    namespaces,
+    defaults,
+    handles,
+    others: Math.max(0, reached - ranges.length),
+  };
 }
 
 const inRanges = (index: number, ranges: ReadonlyArray<[number, number]>): boolean =>
@@ -495,6 +515,11 @@ export function stateFileProblems(path: string, code: string): string[] {
   if (imports.namespaces.length > 0) {
     out.push(
       `${path}: a namespace import of database/session-locks is refused: import the locks by name, each under an alias`,
+    );
+  }
+  if (imports.defaults.length > 0) {
+    out.push(
+      `${path}: a default import of database/session-locks is refused: import the locks by name, each under an alias`,
     );
   }
   if (imports.others > 0) {
@@ -891,7 +916,7 @@ export function findLockExports(
     }
     // A namespace import, or a handle from `import x = require(...)`, `const x = require(...)` or `await import(...)`, is
     // the whole core under one name: refused, and its name is an alias like the others.
-    const wholeCore = [...imports.namespaces, ...imports.handles];
+    const wholeCore = [...imports.namespaces, ...imports.defaults, ...imports.handles];
     const aliases = aliasesOf(code, [...names, ...wholeCore]);
     const found = new Set<string>();
     if (wholeCore.length > 0) found.add('imports database/session-locks as a namespace');

@@ -814,6 +814,46 @@ export class S {
     ).toEqual([]);
   });
 
+  // ---- N-4 (review r3 of #208): a strict import clause, so text cannot fake an import range ---------------------------
+
+  it('TC-008 N-4 a template literal that looks like an import of the core does not hide the wrapper held under a new name', () => {
+    const text =
+      STATE_TEXT +
+      "\nconst a = `import `, { lockAnySession: run } = this, z = ` from '../database/session-locks'`;\n";
+    expect(state(text)).toContain(
+      `${SESSION_STATE_FILE}: lockAnySession is mentioned other than as its wrapper definition or a member call`,
+    );
+  });
+
+  it('TC-008 N-4 the import as prettier wraps it (one name per line, a trailing comma) is still parsed', () => {
+    const wrapped = STATE_TEXT.replace(
+      /^import \{[^\n]*session-locks';\n/,
+      "import {\n  guardLive as coreGuardLive,\n  lockAnySession as coreLockAnySession,\n  lockForAccommodation as coreLockForAccommodation,\n} from '../database/session-locks';\n",
+    );
+    expect(wrapped).not.toEqual(STATE_TEXT);
+    expect(state(wrapped)).toEqual([]);
+  });
+
+  it.each([
+    [
+      'a default plus named import',
+      "import core, { guardLive as g } from '../database/session-locks';",
+    ],
+    ['a default import alone', "import core from '../database/session-locks';"],
+  ])(
+    'TC-008 N-4 %s of the core is refused: a default import holds the whole module',
+    (_what, extra) => {
+      expect(state(STATE_TEXT + '\n' + extra)).toContain(
+        `${SESSION_STATE_FILE}: a default import of database/session-locks is refused: import the locks by name, each under an alias`,
+      );
+    },
+  );
+
+  it('TC-008 N-4 an import statement inside a string is not an import, so it is a finding', () => {
+    const extra = 'const s = "import { guardLive as g } from \'../database/session-locks\'";';
+    expect(state(STATE_TEXT + '\n' + extra)).not.toEqual([]);
+  });
+
   it('TC-008 N-1 an arrow type in a parameter type is not a default (its => is not an =)', () => {
     const text = STATE_TEXT.replace(
       'async lockAnySession(tx: SessionLockTx, sessionId: string) {',
@@ -1581,6 +1621,21 @@ describe('S-B, S3, S4: no export of a lock, an alias, or a wrapper of one (FR-70
     // A named import with no use of a lock name is fine, and a namespace of another module is not this module.
     expect(exported("import { SessionLockTx } from '../database/session-locks';")).toEqual([]);
     expect(exported("import * as other from '../database/other';\nexport { other };")).toEqual([]);
+  });
+
+  it('TC-008 N-4 a default import of the core is the whole module too: exporting it is found', () => {
+    for (const imp of [
+      "import core from '../database/session-locks';",
+      "import core, { SessionLockTx } from '../database/session-locks';",
+    ]) {
+      for (const text of [`${imp}\nexport { core };`, `${imp}\nexport const c = core;`]) {
+        const found = exported(text);
+        expect({ text, exports: found.some((line) => line.includes('exports ')) }).toEqual({
+          text,
+          exports: true,
+        });
+      }
+    }
   });
 
   it("TC-008 N4 TypeScript's `export =` form is found, for a name, an object, an array and an alias", () => {
