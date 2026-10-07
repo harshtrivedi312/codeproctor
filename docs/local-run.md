@@ -50,6 +50,10 @@ an existing `.env`; delete the file to start again. Never put these values anywh
 `pnpm db:migrate` and `pnpm db:seed` refuse to run unless every database URL points at this machine and
 `APP_ENV` is `development`. That is deliberate (ADR 0009): they can never touch another environment.
 
+**The local `.env` is for this laptop only.** Staging and the pilot refuse its placeholder-style values
+and need their own real, generated secrets from their own store (ADR 0009). Never copy this file to
+another machine or environment, and never commit it.
+
 Adminer (a database browser) is at <http://localhost:8080>: system PostgreSQL, server `postgres`, user
 `codeproctor`, the `POSTGRES_PASSWORD` from your `.env`, database `codeproctor`.
 
