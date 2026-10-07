@@ -153,12 +153,12 @@ describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-
   it('TC-003, NFR-04: a bare driver adapter error from a failed transaction commit is logged without its values, keeping kind and SQLSTATE', () => {
     const { Logger } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
     const secret = 'leaked-token-hash-4f9c';
-    const error = Object.assign(new Error(`could not serialize: ${secret}`), {
+    const error = Object.assign(new Error(`invalid input: ${secret}`), {
       name: 'DriverAdapterError',
       cause: {
-        kind: 'TransactionWriteConflict',
-        originalCode: '40001',
-        originalMessage: `row (${secret}) conflicted`,
+        kind: 'InvalidInputValue',
+        originalCode: '22P02',
+        originalMessage: `value (${secret}) rejected`,
         detail: `Key (token_hash)=(${secret})`,
       },
     });
@@ -174,8 +174,8 @@ describe('ProblemFilter scrubs Prisma errors before logging (TC-003, NFR-04, FU-
         }),
       );
       expect(logged).not.toContain(secret);
-      expect(logged).toContain('TransactionWriteConflict');
-      expect(logged).toContain('40001');
+      expect(logged).toContain('InvalidInputValue');
+      expect(logged).toContain('22P02');
     } finally {
       spy.mockRestore();
     }

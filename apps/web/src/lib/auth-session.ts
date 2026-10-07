@@ -1,5 +1,13 @@
 import type { Schemas } from '@/lib/api/client';
 import { setAccessToken } from '@/lib/auth-token';
+import {
+  MAX_BUSY_RETRIES,
+  MAX_TOTAL_WAIT_MS,
+  busyDelayMs,
+  busyStore,
+  isBusyResponse,
+  pause,
+} from '@/lib/api/busy';
 import { apiBaseUrl } from '@/lib/env';
 import { mockingReady } from '@/lib/mock-ready';
 
@@ -39,6 +47,7 @@ export function publishSession(session: AuthSession | null): void {
     // such as a request waiting for a 401 or a save in flight, must be dropped (FR-103, FR-104).
     generation += 1;
     inFlight = null;
+    busyStore.reset();
   } else if (nextRole !== currentRole) {
     // Same person, other role: drop work started under the old role (FR-103). The refresh in
     // flight (if this publish came from one) is left alone.
@@ -231,12 +240,41 @@ async function doRefresh(): Promise<AuthSession | null> {
   const startedIn = generation;
   try {
     await mockingReady;
-    const response = await fetch(`${apiBaseUrl}/v1/auth/refresh`, {
-      method: 'POST',
-      credentials: 'include',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    const send = () =>
+      fetch(`${apiBaseUrl}/v1/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    let response = await send();
+    // 503 BUSY is lock contention: the refresh did not happen (the token was not rotated), so
+    // asking again is safe. The same bounded wait as every other call; it never signs anyone out.
+    let waited = 0;
+    for (
+      let attempt = 0;
+      attempt < MAX_BUSY_RETRIES && (await isBusyResponse(response));
+      attempt += 1
+    ) {
+      const wait = busyDelayMs(response.headers.get('retry-after'));
+      if (startedIn !== generation || waited + wait > MAX_TOTAL_WAIT_MS) break;
+      busyStore.waitStart();
+      let go: boolean;
+      try {
+        go = await pause(wait, () => startedIn === generation);
+      } finally {
+        busyStore.waitEnd();
+      }
+      if (!go) return null;
+      waited += wait;
+      response = await send();
+    }
     if (startedIn !== generation) return null;
+    if (await isBusyResponse(response)) {
+      // Still busy: the session is exactly as it was. Not a sign-out; the screen says so.
+      busyStore.setRefreshBusy(true);
+      return null;
+    }
+    busyStore.setRefreshBusy(false);
     if (!response.ok) {
       publishSession(null);
       return null;

@@ -1,8 +1,9 @@
 # QA-01: test suite gate. Fails when any test that names a P1 test case fails (packages/qa/src/p1-gate.ts)
 # and prints coverage per module. Uses the same pinned official actions as ci.yml. The p1-gate job
-# uses no secrets, so it is safe on pull requests from forks. The ZAP and k6 jobs run only on a manual
-# dispatch (never on pull requests), only against hosts in the repository variable QA_STAGING_HOSTS,
-# and the k6 job reads the secret K6_SESSIONS_JSON from the `staging` environment.
+# uses no secrets, so it is safe on pull requests from forks. The ZAP job runs only on a manual
+# dispatch (never on pull requests), only against hosts in the repository variable QA_STAGING_HOSTS.
+# C-63: no GitHub environments and no Actions secrets; k6 runs from the pilot's k6 runner instance
+# (packages/qa/k6/README.md), not from this workflow.
 name: QA
 
 on:
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'Base URL of the environment for the ZAP baseline scan or the k6 run (staging only)'
+        description: 'Base URL of the environment for the ZAP baseline scan (staging only)'
         required: false
         type: string
       api_url:
@@ -23,7 +24,7 @@ on:
         description: 'Which dispatch job to run'
         required: false
         type: choice
-        options: [none, zap-baseline, k6-load, k6-code-run]
+        options: [none, zap-baseline]
         default: none
 
 permissions:
@@ -152,7 +153,7 @@ jobs:
 
   zap-baseline:
     name: OWASP ZAP baseline (TC-093)
-    # Dispatch from main only: a branch must not run unreviewed code with the staging secret.
+    # Dispatch from main only: a branch must not run unreviewed code against a staging host.
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.scan == 'zap-baseline'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -243,64 +244,3 @@ jobs:
           name: zap-report
           path: zap
           retention-days: 7
-
-  k6:
-    name: k6 load (TC-090, TC-091)
-    # Dispatch from main only: a branch must not run unreviewed code with the staging secret.
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.scan == 'k6-load' || inputs.scan == 'k6-code-run')
-    runs-on: ubuntu-24.04
-    environment: staging
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Allow only staging hosts
-        env:
-          TARGET: ${{ inputs.target_url }}
-          STAGING_HOSTS: ${{ vars.QA_STAGING_HOSTS }}
-        run: |
-          case "$TARGET" in
-            https://*) ;;
-            *) echo "Give an https staging URL." >&2; exit 1 ;;
-          esac
-          host="${TARGET#https://}"; host="${host%%[/:?#]*}"; host="${host,,}"
-          case "$host" in
-            *prod*|*pilot*) echo "Host $host looks like production or pilot; refused." >&2; exit 1 ;;
-          esac
-          if [ -z "$STAGING_HOSTS" ]; then
-            echo "Set the repository variable QA_STAGING_HOSTS (comma separated hostnames) first." >&2; exit 1
-          fi
-          case ",${STAGING_HOSTS//[[:space:]]/}," in
-            *",$host,"*) echo "Target host $host is allowed." ;;
-            *) echo "Host $host is not in QA_STAGING_HOSTS." >&2; exit 1 ;;
-          esac
-      # The seeded load sessions come from an environment secret that holds staging-only values:
-      # K6_SESSIONS_JSON, the JSON list described in packages/qa/k6/README.md. Add it before the
-      # first run. It is passed to the container by name (docker -e SESSIONS_JSON, k6 reads it from its environment), so it never appears in an argument list.
-      # Images are pinned by digest (the tags were latest/stable on 2026-10-02). Bump deliberately.
-      - name: Run k6
-        env:
-          TARGET: ${{ inputs.target_url }}
-          SCRIPT: ${{ inputs.scan == 'k6-load' && 'tc-090-load.js' || 'tc-091-code-run.js' }}
-          SESSIONS_JSON: ${{ secrets.K6_SESSIONS_JSON }}
-        run: |
-          host="${TARGET#https://}"; host="${host%%[/:?#]*}"
-          mkdir -p k6-out && chmod 777 k6-out
-          # k6 prints the full presigned URL (host, media object key, signature) on a transport error.
-          # URLs are redacted before they reach the job log; pipefail keeps k6's exit code.
-          set -o pipefail
-          docker run --rm -v "$PWD/packages/qa/k6:/k6:ro" -v "$PWD/k6-out:/out:rw" -w /k6 \
-            -e SESSIONS_JSON \
-            -e ALLOWED_HOSTS="$host" \
-            grafana/k6@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
-            run -e API_BASE_URL="${TARGET%/}/api/v1" \
-            --summary-export=/out/summary.json "$SCRIPT" 2>&1 \
-            | sed -E 's#https?://[^" ]*#<url-redacted>#g'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ !cancelled() }}
-        with:
-          name: k6-summary
-          path: k6-out/summary.json
-          retention-days: 7
-          if-no-files-found: ignore
