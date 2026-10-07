@@ -1076,7 +1076,7 @@ export interface components {
       language: components['schemas']['Language'];
       testCaseId: string | null;
       position: number | null;
-      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value it does not know. */
+      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE, LOCAL_STUB (a run on the local execution stub, not real execution). A client must cope with a value it does not know. */
       verdict: string;
       /** @description Only for a visible (sample) slot, never a hidden one */
       actualOutput?: string;
