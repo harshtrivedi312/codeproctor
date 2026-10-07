@@ -370,6 +370,9 @@ Decisions taken by the Delivery Lead under the owner's delegation (order, priori
 | DL-56 | 2026-10-07 | Technical. Local names: `EMAIL_PROVIDER=smtp-dev` with `SMTP_DEV_HOST` and `SMTP_DEV_PORT`, and `JUDGE0_MODE=stub|real`. Both are allowed only with APP_ENV=development | DL-54 |
 | DL-57 | 2026-10-07 | Technical. For the local demo, the identity worker runs natively on the Mac rather than in Docker, so presigned localhost URLs work. Integrity B provides the start command and a pinned-checksum model-fetch script | DL-52 |
 | DL-58 | 2026-10-07 | Technical. Local stub runs show the verdict LOCAL_STUB, "local stub, not real execution", and stub-graded answers are "not graded (local stub)": the score stays null, never 0 or a fail (#298, #187) | Never a verdict |
+| DL-59 | 2026-10-07 | Sprint process, under D-67. A reviewed, green PR merges even when main has since changed only `docs/followups/*.md` in files it also touches, provided GitHub shows no merge conflict. Those files don't affect CI | Throughput; follow-ups are notes |
+| DL-60 | 2026-10-07 | Technical. The CI verify job's timeout goes from 15 to 25 minutes (#302), because the job normally takes 11 to 12 minutes and was being cancelled under load. No cost on a public repository | Green runs were being lost |
+| DL-61 | 2026-10-07 | Sprint process, at the owner's direction to merge reviewed PRs at once. When main has changed the same file in disjoint parts and `git merge-tree` shows a clean merge, a reviewed, green PR merges without another CI round on the combined head. Main CI is watched, and any break is fixed forward. Used for #119 over #294's env.ts edits | D-67 speed; low risk when the changes are disjoint |
 
 ### Parked for the owner
 
