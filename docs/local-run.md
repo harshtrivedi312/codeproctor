@@ -162,6 +162,14 @@ It prints the candidate's email and the link (`http://localhost:3000/t/<token>`)
 new link; the old one stops working. The link opens the gate page ("Demo Corp"). Asking for the
 email code then fails with "The code could not be sent": see section 7.
 
+## Your camera, your microphone, your data
+
+The local demo uses your real camera and microphone. Recordings, the ID photo and the selfie are stored
+only in the local MinIO and PostgreSQL containers, on this Mac. To remove them, run `pnpm demo:down
+--infra`, then delete the Docker volumes (`docker volume rm codeproctor_minio_data
+codeproctor_postgres_data`; a person runs this, it deletes all local data). Use a synthetic candidate
+name and the seeded test mailbox (Mailpit), and never upload a real ID document.
+
 ## 5. No backend: mock mode
 
 ```bash
