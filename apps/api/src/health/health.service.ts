@@ -69,7 +69,7 @@ export class HealthService {
    * while a ping waits for a pool slot or a connection does it end at DB_CONNECT_TIMEOUT_MS.
    */
   private pingPrisma(): Promise<void> {
-    const now = Date.now();
+    const now = performance.now();
     const current = this.ping;
     if (current) {
       const fresh =
@@ -82,7 +82,7 @@ export class HealthService {
     this.ping = entry;
     // Per entry: an abandoned ping settling late must not touch the entry that replaced it.
     const settled = (): void => {
-      entry.settledAt = Date.now();
+      entry.settledAt = performance.now();
     };
     entry.result.then(settled, settled);
     return entry.result;

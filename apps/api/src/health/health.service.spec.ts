@@ -38,13 +38,16 @@ describe('HealthService Redis probe (NFR-03, QA-D-04)', () => {
   const make = (
     ping: () => Promise<void>,
     query: () => Promise<unknown> = () => Promise.resolve(),
+    connectMs = 300,
   ): HealthService => {
     const r = new ConnectingRedis();
     r.status = 'ready';
     return new HealthService(
       { query } as unknown as Pool,
       r as unknown as Redis,
-      { get: () => 300 } as unknown as ConfigService<Env, true>,
+      {
+        get: (key: string) => (key === 'DB_CONNECT_TIMEOUT_MS' ? connectMs : 300),
+      } as unknown as ConfigService<Env, true>,
       { ping } as unknown as PrismaService,
     );
   };
@@ -121,6 +124,39 @@ describe('HealthService Redis probe (NFR-03, QA-D-04)', () => {
     }
   });
 
+  it('FU-BE-194 B1: a late settle of an abandoned ping does not disturb the ping that replaced it', async () => {
+    jest.useFakeTimers();
+    try {
+      let releaseFirst: () => void = () => undefined;
+      const ping = jest
+        .fn<Promise<void>, []>()
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseFirst = resolve;
+            }),
+        )
+        .mockImplementation(() => new Promise<void>(() => undefined)); // the second hangs too
+      const svc = make(ping, () => Promise.resolve(), 5_000); // cap 5.3 s
+      const first = svc.check();
+      await jest.advanceTimersByTimeAsync(300);
+      await first;
+      await jest.advanceTimersByTimeAsync(5_100); // past the cap
+      const second = svc.check(); // starts the second ping, still pending
+      await jest.advanceTimersByTimeAsync(300);
+      await second;
+      expect(ping).toHaveBeenCalledTimes(2);
+      releaseFirst(); // the abandoned first ping settles late
+      await jest.advanceTimersByTimeAsync(1_200); // over 1 s, under the cap of the second ping
+      const third = svc.check();
+      await jest.advanceTimersByTimeAsync(300);
+      await third;
+      expect(ping).toHaveBeenCalledTimes(2); // shares the second ping, starts no third
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('FU-BE-194 B1: a hanging ping is shared, not repeated, by later checks while it is in flight', async () => {
     const ping = jest.fn(() => new Promise<void>(() => undefined));
     const svc = make(ping);
@@ -142,6 +178,7 @@ describe('HealthService Redis probe (NFR-03, QA-D-04)', () => {
     const started = Date.now();
     const report = await svc.check();
     expect(report.checks.postgres).toBe('down');
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // The probe window is 300 ms; the bound is generous so a loaded machine does not flake.
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

@@ -41,7 +41,7 @@ describe('Login on a cold app (FU-BE-194, FR-101, NFR-09)', () => {
     await prisma.$disconnect();
     monitor = new Client({ connectionString: process.env.DATABASE_URL });
     await monitor.connect();
-    baseline = await clientBackends();
+    baseline = await settledClientBackends();
 
     jest.resetModules();
     const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
@@ -62,6 +62,20 @@ describe('Login on a cold app (FU-BE-194, FR-101, NFR-09)', () => {
     return rows[0]?.n ?? 0;
   }
 
+  // A backend left over from the seed client's $disconnect can be counted and then disappear, so
+  // wait until the count is the same on three reads 100 ms apart.
+  async function settledClientBackends(): Promise<number> {
+    let last = await clientBackends();
+    let stable = 0;
+    for (let i = 0; i < 100 && stable < 3; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const now = await clientBackends();
+      stable = now === last ? stable + 1 : 0;
+      last = now;
+    }
+    return last;
+  }
+
   afterAll(async () => {
     await monitor?.end();
     await app?.close();
@@ -70,8 +84,8 @@ describe('Login on a cold app (FU-BE-194, FR-101, NFR-09)', () => {
 
   it('FU-BE-194, NFR-09: when the app finishes starting, it already holds a database connection (warm-up ran before traffic)', async () => {
     // Before the fix the app opened its first connection on the first request, so nothing was
-    // added here. The baseline is taken before app.init(). The connection exists right after boot only: it closes after DB_IDLE_TIMEOUT_MS (60 s) without traffic.
-    expect(baseline).toBeGreaterThanOrEqual(0);
+    // added here. The baseline is taken before app.init(). The connection exists right after
+    // boot only: it closes after DB_IDLE_TIMEOUT_MS (60 s) without traffic.
     expect((await clientBackends()) - baseline).toBeGreaterThanOrEqual(1);
   });
 

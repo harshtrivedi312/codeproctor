@@ -85,8 +85,8 @@ export const envSchema = z
     DB_CONNECT_TIMEOUT_MS: positiveInt.max(60_000).default(5_000),
     // How long an idle pooled connection stays open. pg-pool's own default is 10 s, which would close
     // the warmed-up connection 10 s after boot and bring the cold connect back for the first user
-    // after a quiet spell (C-43).
-    DB_IDLE_TIMEOUT_MS: positiveInt.max(3_600_000).default(60_000),
+    // after a quiet spell (C-43). Keep it below any NAT or proxy idle timeout in the database path.
+    DB_IDLE_TIMEOUT_MS: positiveInt.max(300_000).default(60_000),
     // Upper bound of the best-effort start-up warm-up query; it never fails boot (NFR-09).
     DB_WARMUP_TIMEOUT_MS: positiveInt.max(60_000).default(5_000),
     // Number of reverse proxies in front of the API (0 locally, 1 behind Caddy). FU-BE-08.

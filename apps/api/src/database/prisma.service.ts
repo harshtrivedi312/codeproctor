@@ -28,6 +28,10 @@ export class PrismaService implements OnModuleInit, OnApplicationShutdown {
       max: config.get('DB_POOL_MAX', { infer: true }),
       connectionTimeoutMillis: config.get('DB_CONNECT_TIMEOUT_MS', { infer: true }),
       idleTimeoutMillis: config.get('DB_IDLE_TIMEOUT_MS', { infer: true }),
+      // The adapter already listens for idle-client errors, so Postgres ending an idle connection
+      // (restart, failover) cannot crash the process. Log the error name only: a message can carry
+      // the connection string.
+      onPoolError: (err) => this.logger.warn(`database pool error (${err.name})`),
     });
     this.warmupTimeoutMs = config.get('DB_WARMUP_TIMEOUT_MS', { infer: true });
     this.client = createOrgScopedClient(this.base, orgContext);

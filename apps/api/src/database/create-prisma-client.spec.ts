@@ -43,4 +43,19 @@ describe('createPrismaClient pool options (FU-BE-194)', () => {
       idleTimeoutMillis: DEFAULT_IDLE_TIMEOUT_MS,
     });
   });
+
+  it('FU-BE-194: TCP keep-alive is on so a dead peer is noticed while a connection is idle', () => {
+    createPrismaClient(URL);
+    expect(lastConfig()).toMatchObject({ keepAlive: true, keepAliveInitialDelayMillis: 30_000 });
+  });
+
+  it('FU-BE-194: the pool error handler reaches the adapter for pool and connection errors', () => {
+    const onPoolError = jest.fn();
+    createPrismaClient(URL, { onPoolError });
+    const calls = (PrismaPg as unknown as jest.Mock).mock.calls as unknown[][];
+    const options = calls[calls.length - 1]?.[1] as Record<string, (e: Error) => void>;
+    options.onPoolError?.(new Error('x'));
+    options.onConnectionError?.(new Error('y'));
+    expect(onPoolError).toHaveBeenCalledTimes(2);
+  });
 });
