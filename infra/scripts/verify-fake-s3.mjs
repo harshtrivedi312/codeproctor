@@ -9,10 +9,11 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** @returns {Promise<{ port: number, faults: { failList: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], close: () => Promise<void> }>} */
+/** failList: every listing answers 500; failHead: every HEAD answers a bare 403.
+ * @returns {Promise<{ port: number, faults: { failList: boolean, failHead: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], close: () => Promise<void> }>} */
 export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
-  const faults = { failList: false };
+  const faults = { failList: false, failHead: false };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
   const objects = new Map();
   /** @type {Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>} */
@@ -74,6 +75,7 @@ export async function startFakeS3({ versioned = false } = {}) {
           { 'content-type': 'application/xml' },
         );
       }
+      if (req.method === 'HEAD' && faults.failHead) return send(403);
       if (req.method === 'GET' || req.method === 'HEAD') {
         const wanted = url.searchParams.get('versionId');
         const history = versions.get(path) ?? [];
