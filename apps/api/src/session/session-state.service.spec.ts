@@ -15,38 +15,12 @@ import type { PrismaClient } from '../generated/prisma/client.js';
 import type { SessionStatus } from '../generated/prisma/enums.js';
 import { createInvitation, createTenant } from '../candidate/testing/fixtures';
 import type { Tenant } from '../candidate/testing/fixtures';
-import {
-  SessionLockPort,
-  SessionLockRetryError,
-  SessionNotFoundError,
-  type SessionLockState,
-  type SessionTx,
-} from './session-lock.port';
+import { SessionLockRetryError } from '../database/errors';
 import { IllegalTransitionError, SessionStateConflictError } from './session-state.errors';
 import { SessionStateService } from './session-state.service';
 import { SESSION_STATUSES, TRANSITIONS } from './session-transitions';
 
-class TestLock extends SessionLockPort {
-  next: SessionLockState | Error = 'LIVE';
-  /** When true, the double looks the row up through the (org-filtered) transaction client first. */
-  orgFiltered = false;
-  async guardLive(tx?: SessionTx, sessionId?: string): Promise<SessionLockState> {
-    if (this.orgFiltered && tx !== undefined && sessionId !== undefined) {
-      const row = await tx.session.findUnique({ where: { id: sessionId }, select: { id: true } });
-      if (row === null) throw new SessionNotFoundError();
-    }
-    return this.next instanceof Error ? Promise.reject(this.next) : Promise.resolve(this.next);
-  }
-  lockAnySession(): Promise<SessionLockState> {
-    return this.guardLive();
-  }
-  lockForAccommodation(): Promise<SessionStatus> {
-    return Promise.reject(new Error('unused'));
-  }
-}
-
 describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
-  const lock = new TestLock();
   const redis = { status: 'ready', expire: jest.fn(() => Promise.resolve(1)) };
   let db: MigratedDatabase;
   let owner: PrismaClient;
@@ -66,7 +40,6 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
     service = new SessionStateService(
       prisma,
       orgContext,
-      lock,
       { get: () => 300 } as never,
       redis as never,
     );
@@ -314,7 +287,6 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
     });
 
     beforeEach(() => {
-      lock.next = 'LIVE';
       redis.expire.mockClear();
     });
 
@@ -393,7 +365,8 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
 
     it('ADR 0013 5.7: an ERASED session writes nothing, resets no TTL, emits no event and answers 409 SESSION_ERASED', async () => {
       const p = await paused();
-      lock.next = 'ERASED';
+      // A real ERASED row: the lock core reads it and answers ERASED (the enum has the member since #91).
+      await owner.session.update({ where: { id: p.sessionId }, data: { status: 'ERASED' } });
       const before = await snapshot(p.sessionId);
       const error: unknown = await asStaff(() =>
         service.proctorResume({
@@ -417,7 +390,8 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
         Object.assign(new Error('x'), { code: 'P2034' }),
       ];
       for (const e of busy) {
-        lock.next = e;
+        // The lock core has its own specs (database/session-locks*.spec.ts); here the wrapper fails as it would.
+        const lockSpy = jest.spyOn(service, 'guardLive').mockRejectedValue(e);
         const error: unknown = await asStaff(() =>
           service.proctorResume({
             sessionId: p.sessionId,
@@ -426,14 +400,16 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
         ).catch((x: unknown) => x);
         expect((error as { getStatus(): number }).getStatus()).toBe(503);
         expect(error).toMatchObject({ code: 'LOCK_BUSY', extensions: { retryAfterSeconds: 2 } });
+        lockSpy.mockRestore();
       }
       expect(await snapshot(p.sessionId)).toEqual(before);
       expect(redis.expire).not.toHaveBeenCalled();
       // Another error is not turned into 503.
-      lock.next = new Error('unrelated');
+      const unrelated = jest.spyOn(service, 'guardLive').mockRejectedValue(new Error('unrelated'));
       await expect(
         asStaff(() => service.proctorResume({ sessionId: p.sessionId })),
       ).rejects.toThrow('unrelated');
+      unrelated.mockRestore();
     });
 
     it('P-3: a session that is not paused by a proctor is 409 SESSION_STATE_CONFLICT, a missing or foreign one is 404', async () => {
@@ -453,8 +429,7 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
         status: 'PAUSED',
         session: { pauseReasons: ['PROCTOR'], deadlineAt: new Date(Date.now() + 60_000) },
       });
-      // The test lock does not look at the row: the 404 comes from the service's own scoped read.
-      lock.next = 'LIVE';
+      // The real lock core reads the row through the org-filtered client: a foreign session is not found.
       await expect(
         asStaff(() => service.proctorResume({ sessionId: theirs.sessionId })),
       ).rejects.toMatchObject({ status: 404 });
@@ -609,10 +584,17 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
                       get(sess, m, rr) {
                         if (m !== 'updateMany') return Reflect.get(sess, m, rr) as unknown;
                         return async (args: unknown) => {
-                          await owner.session.update({
-                            where: { id: p.sessionId },
-                            data: { pauseReasons: changed },
-                          });
+                          // The real lock holds the sessions row until commit, so another connection
+                          // cannot change it any more (it would wait, and time out). The change is made
+                          // in the same transaction, after the read and before the service's write; the
+                          // lock's own compare-and-set (data is only { status }) passes through.
+                          const data = (args as { data: Record<string, unknown> }).data;
+                          if (Object.keys(data).join() !== 'status') {
+                            await (sess as { update(a: unknown): Promise<unknown> }).update({
+                              where: { id: p.sessionId },
+                              data: { pauseReasons: changed },
+                            });
+                          }
                           return (sess as { updateMany(a: unknown): Promise<unknown> }).updateMany(
                             args,
                           );
@@ -636,7 +618,8 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
           spy.mockRestore();
         }
         const row = await owner.session.findUniqueOrThrow({ where: { id: p.sessionId } });
-        expect([label, row.pauseReasons]).toEqual([label, changed]);
+        // The conflict rolled the whole transaction back, the in-transaction change included.
+        expect([label, row.pauseReasons]).toEqual([label, start]);
         expect([label, Number(row.pausedMs)]).toEqual([label, 0]);
         expect([
           label,
@@ -645,29 +628,25 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
       }
     });
 
-    it('ADR 0013 5.7 (when #208 binds, FU-BEB-121): a foreign session that is ERASED answers 404, not 409 SESSION_ERASED (no cross-org existence oracle)', async () => {
-      // A lock double that, like the real core, finds the row through the org-filtered client.
+    it('ADR 0013 5.7, FU-BEB-121: a foreign session that is ERASED answers 404, not 409 SESSION_ERASED (no cross-org existence oracle)', async () => {
+      // The real lock core finds the row through the org-filtered client.
       const other = await createTenant(owner, 'resume-oracle');
       const theirs = await createInvitation(owner, other, {
         status: 'PAUSED',
         session: { pauseReasons: ['PROCTOR'], deadlineAt: new Date(Date.now() + 60_000) },
       });
-      lock.orgFiltered = true;
-      lock.next = 'ERASED';
-      try {
-        const error: unknown = await asStaff(() =>
-          service.proctorResume({ sessionId: theirs.sessionId }),
-        ).catch((e: unknown) => e);
-        expect((error as { getStatus(): number }).getStatus()).toBe(404);
-        // The same ERASED answer for a session of the caller's own org is the 409.
-        const mine = await paused();
-        const own: unknown = await asStaff(() =>
-          service.proctorResume({ sessionId: mine.sessionId }),
-        ).catch((e: unknown) => e);
-        expect(own).toMatchObject({ code: 'SESSION_ERASED' });
-      } finally {
-        lock.orgFiltered = false;
-      }
+      await owner.session.update({ where: { id: theirs.sessionId }, data: { status: 'ERASED' } });
+      const error: unknown = await asStaff(() =>
+        service.proctorResume({ sessionId: theirs.sessionId }),
+      ).catch((e: unknown) => e);
+      expect((error as { getStatus(): number }).getStatus()).toBe(404);
+      // The same ERASED answer for a session of the caller's own org is the 409.
+      const mine = await paused();
+      await owner.session.update({ where: { id: mine.sessionId }, data: { status: 'ERASED' } });
+      const own: unknown = await asStaff(() =>
+        service.proctorResume({ sessionId: mine.sessionId }),
+      ).catch((e: unknown) => e);
+      expect(own).toMatchObject({ code: 'SESSION_ERASED' });
     });
 
     it('P-3: two resumes at once credit once: one succeeds and the other is a 409 conflict', async () => {

@@ -251,9 +251,6 @@ describe('Only SessionStateService writes sessions.status (FR-106, ADR 0013 CS-4
   it('FR-106, #208: only session-state.service.ts imports the lock core', () => {
     const importers = sources(SRC)
       .filter((f) => f.path !== LOCK_CORE)
-      // The unwired port only names the module in comments and an error message, it imports
-      // nothing; the combined #208 + flip PR deletes the file (FU-BEB-111).
-      .filter((f) => f.path !== 'session/session-lock.port.ts')
       .filter((f) => /['"`][^'"`\n]*\bsession-locks(?:\.[jt]s)?['"`]/.test(f.text))
       .map((f) => f.path)
       .filter((p) => p !== OWNER);

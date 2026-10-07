@@ -9,22 +9,20 @@
 //   withAnySession(job, sid, orgId, fn)  the same lock, but `fn` also runs on an ERASED session. Only
 //                                     for the jobs of ADR 0013 section 5.7 that must (ANY_SESSION_JOBS).
 //
-// Errors. SessionNotFoundError drops the job (outcome DROPPED, logged with ids only, no retry).
-// SessionLockRetryError is rethrown so BullMQ retries. Any other error rolls back and propagates.
+// Both locks are the SessionStateService wrappers over Database A's lock core (database/session-locks).
+//
+// Errors. SessionNotFoundError (the core's) drops the job (outcome DROPPED, logged with ids only, no
+// retry). SessionLockRetryError and the busy codes (55P03, 40P01, P2034, P2028) are rethrown as
+// SessionLockRetryError so BullMQ retries. Any other error rolls back and propagates.
 // The transaction stays short: no external call (Judge0, the worker, HTTP) inside `fn`.
 import { Logger } from '@nestjs/common';
-import { UnrecoverableError } from 'bullmq';
 import { isBusyLockError } from './busy-lock';
+import { SessionLockRetryError, SessionNotFoundError } from '../database/errors';
 import { OrgContextService } from '../database/org-context';
 import type { OrgScope } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
-import {
-  SessionLockPort,
-  SessionLockRetryError,
-  SessionLockUnavailableError,
-  SessionNotFoundError,
-} from './session-lock.port';
-import type { SessionTx } from './session-lock.port';
+import { SessionStateService } from './session-state.service';
+import type { SessionTx } from './session-state.service';
 
 /**
  * The jobs allowed to run on an ERASED session (ADR 0013 section 5.7: ingest close and key
@@ -72,7 +70,7 @@ export abstract class SessionJobProcessor {
   protected constructor(
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
-    private readonly locks: SessionLockPort,
+    private readonly state: SessionStateService,
   ) {}
 
   /** The scope the caller is in right now (for an enqueue that must match the caller's session). */
@@ -87,8 +85,8 @@ export abstract class SessionJobProcessor {
     fn: (tx: SessionTx) => Promise<T>,
   ): Promise<LiveResult<T>> {
     const result = await this.run(sessionId, orgId, async (tx) => {
-      const state = await this.locks.guardLive(tx, sessionId);
-      if (state === 'ERASED') return { outcome: 'ERASED' } as const;
+      const lock = await this.state.guardLive(tx, sessionId);
+      if (lock === 'ERASED') return { outcome: 'ERASED' } as const;
       return { outcome: 'LIVE', value: await fn(tx) } as const;
     });
     return result;
@@ -110,8 +108,9 @@ export abstract class SessionJobProcessor {
     return this.run(sessionId, orgId, async (tx) => {
       // lockAnySession locks in any status, ERASED included, and `fn` runs either way; the outcome
       // only tells the caller what the row was (ADR 0013 section 5.7).
-      const state = await this.locks.lockAnySession(tx, sessionId);
-      return { outcome: state, value: await fn(tx) } as const;
+      const status = await this.state.lockAnySession(tx, sessionId);
+      const outcome = (status as string) === 'ERASED' ? ('ERASED' as const) : ('LIVE' as const);
+      return { outcome, value: await fn(tx) } as const;
     });
   }
 
@@ -137,9 +136,6 @@ export abstract class SessionJobProcessor {
       // Postgres lock_timeout (55P03) and deadlock (40P01), or Prisma's own transaction conflict
       // (P2034): the lock was busy, so the job retries. Never swallowed, never a 500 to a candidate.
       if (isBusyLockError(e)) throw new SessionLockRetryError();
-      // The lock layer is not wired: retrying cannot help, so the job fails for good (the message
-      // is the class name only).
-      if (e instanceof SessionLockUnavailableError) throw new UnrecoverableError(e.name);
       // SessionLockRetryError and every other error: the transaction rolled back and the error
       // propagates, so BullMQ retries the job (attempts and backoff are the job's options).
       throw e;

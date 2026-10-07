@@ -15,7 +15,6 @@ import { startMigratedDatabase } from '../database/testing/migrated-postgres';
 import type { MigratedDatabase } from '../database/testing/migrated-postgres';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import type { SessionStatus } from '../generated/prisma/enums.js';
-import { StubSessionLockPort } from './session-lock.port';
 import { InMemoryVerifyConditions } from './testing/in-memory-verify-conditions';
 import { SessionStateService } from './session-state.service';
 import { SessionStatus as AllStatuses } from '../generated/prisma/enums.js';
@@ -38,12 +37,8 @@ describe('verify-session job (FR-402, FR-403, FR-404, ADR 0013 CS-4.7, ADR 0015)
   let other: Tenant;
   const conditions = new InMemoryVerifyConditions();
   const warns: string[] = [];
-  const savedEnv = { node: process.env.NODE_ENV, app: process.env.APP_ENV };
 
   beforeAll(async () => {
-    // The stub lock answers LIVE only when both are "test".
-    process.env.NODE_ENV = 'test';
-    process.env.APP_ENV = 'test';
     [db, redisBox] = await Promise.all([
       startMigratedDatabase(),
       new RedisContainer('redis:8.8').start(),
@@ -63,8 +58,7 @@ describe('verify-session job (FR-402, FR-403, FR-404, ADR 0013 CS-4.7, ADR 0015)
       config,
       prisma,
       orgContext,
-      new StubSessionLockPort(),
-      new SessionStateService(prisma, orgContext, new StubSessionLockPort(), config, redis),
+      new SessionStateService(prisma, orgContext, config, redis),
       conditions,
       redis,
     );
@@ -77,8 +71,6 @@ describe('verify-session job (FR-402, FR-403, FR-404, ADR 0013 CS-4.7, ADR 0015)
   }, 240_000);
 
   afterAll(async () => {
-    process.env.NODE_ENV = savedEnv.node;
-    process.env.APP_ENV = savedEnv.app;
     await queue?.close();
     await jobs?.onApplicationShutdown();
     redis?.disconnect();
@@ -146,9 +138,18 @@ describe('verify-session job (FR-402, FR-403, FR-404, ADR 0013 CS-4.7, ADR 0015)
     expect(warns).toEqual([]);
   });
 
+  it('ADR 0013 5.7, FR-505: an ERASED session (a real row, the real lock core answers ERASED) writes nothing and the conditions are not evaluated', async () => {
+    const id = await sessionIn('ERASED');
+    const before = await owner.session.findUniqueOrThrow({ where: { id } });
+    expect(await jobs.process({ orgId: tenant.orgId, sessionId: id })).toBe('DROPPED');
+    expect(await owner.session.findUniqueOrThrow({ where: { id } })).toEqual(before);
+    expect(conditions.calls).toBe(0);
+    expect(warns).toEqual([`verify-session dropped: session ${id} is erased`]);
+  });
+
   it('FR-505: every other status is dropped untouched, with an ids-only log (no illegal transition)', async () => {
     for (const status of Object.values(AllStatuses)) {
-      if (status === 'CONSENTED' || status === 'VERIFIED') continue;
+      if (status === 'CONSENTED' || status === 'VERIFIED' || status === 'ERASED') continue;
       const id = await sessionIn(status);
       warns.length = 0;
       expect(await jobs.process({ orgId: tenant.orgId, sessionId: id })).toBe('DROPPED');
