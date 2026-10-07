@@ -246,8 +246,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         },
       };
     }
+    // The INSERT inside startSession is its own committed statement (no transaction here).
+    const insert = { done: false };
     try {
-      return await this.startSession(user);
+      return await this.startSession(user, this.prisma.client, undefined, insert);
     } catch (e) {
       // A reset landed while the password was being verified: the sign-in is refused and the
       // reserved attempt is given back, as the password was right when it was checked.
@@ -260,7 +262,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // here, with no transaction: the refresh-family INSERT may already have committed when
       // clearFailures fails, leaving a family whose token was never delivered (unusable; FU-BE-184). Failed-guess counts (wrong
       // password, wrong code) are never refunded, so contention cannot erase an attacker's count.
-      if (lockContentionCode(e) !== undefined)
+      // FU-BE-220: once the INSERT returned it may be a landed commit: no refund then (the retry
+      // pays one more counted attempt, which fails closed).
+      if (lockContentionCode(e) !== undefined && !insert.done)
         await this.refundAttempt(user).catch(() => undefined);
       throw e;
     }
@@ -588,13 +592,15 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       const clean = isCleanRollback(phase, e);
       const unknownOutcome = phase.started && phase.finished && !clean;
       if (clean) await releaseMark(mark);
-      // The code was right, so the reservation is not a failed guess (FU-BE-192).
-      await this.refundAttempt(user).catch(() => undefined);
+      // FU-BE-220: a reservation is given back only when nothing could have committed. After an
+      // unknown outcome the counter keeps it (fails closed: at most one extra counted attempt).
       if (unknownOutcome) {
         throw new OutcomeUnknownError(
           openSession ? 'auth.2fa.enroll.confirm' : 'auth.2fa.setup.confirm',
         );
       }
+      // The code was right and the transaction rolled back or never ran: not a failed guess.
+      await this.refundAttempt(user).catch(() => undefined);
       if (e instanceof AlreadyEnrolledSignal) {
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
@@ -665,6 +671,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // The TOTP path has no transaction: the family INSERT is one statement, so a lock error before
     // it returned is a clean failure; once it returned, a later failure is not (FU-BE-208).
     const insert = { done: false };
+    // The recovery-code path is a transaction: `finished` is set when its callback returned, so a
+    // failure after that is judged like every other commit-phase failure (FU-BE-208, FU-BE-220).
+    const phase: TxPhase = { started: true, finished: false };
     try {
       if (/^\d{6}$/.test(code)) {
         if (!(await this.verifyTotp(user, secret, code, mark))) {
@@ -688,14 +697,16 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         );
         if (used !== 1) throw new WrongRecoveryCodeSignal();
         await this.audit(user, 'AUTH_RECOVERY_CODE_USED', ctx, {}, tx);
-        return this.startSession(user, tx, secret);
+        const opened = await this.startSession(user, tx, secret);
+        phase.finished = true;
+        return opened;
       });
     } catch (e) {
       // FU-BE-208: only a statement-level lock error before the INSERT returned is certainly clean.
       if (
         !wrongCode &&
         !insert.done &&
-        isCleanRollback({ started: true, finished: false }, e) &&
+        isCleanRollback(phase, e) &&
         // Defensive: the signal is only thrown after the INSERT returned (insert.done), so this
         // never matters today; it keeps a refused session from ever releasing the mark.
         !(e instanceof PasswordChangedSignal)
@@ -713,7 +724,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // oracle, so this request's reservation goes back. A wrong code (failCode) is never refunded.
       if (
         !wrongCode &&
+        // FU-BE-220: never after a landed or possibly landed commit (the INSERT returned, or the
+        // recovery transaction failed at COMMIT with anything but a rollback code).
+        !insert.done &&
         lockContentionCode(e) !== undefined &&
+        isCleanRollback(phase, e) &&
         !(isObject(e) && this.refundedErrors.has(e))
       ) {
         await this.refundAttempt(user).catch(() => undefined);
@@ -803,8 +818,13 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     } catch (e) {
       // FU-BE-208: after a clean rollback the same code must work again. A Redis outage while
       // writing the token marker (our own 503, thrown before the callback finished) is one too.
-      if (isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException)) {
-        await releaseMark(mark);
+      const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
+      if (clean) await releaseMark(mark);
+      // FU-BE-208 / FU-BE-219: after the callback returned, anything that is not a rollback may
+      // have committed. The mark stays, no refund (the reservation was given back before the
+      // transaction only because both factors had already verified).
+      if (phase.started && phase.finished && !clean) {
+        throw new OutcomeUnknownError('auth.2fa.disable');
       }
       throw e;
     }

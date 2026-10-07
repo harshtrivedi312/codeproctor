@@ -147,6 +147,9 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       900,
     );
   }
+  /** Spies on the private give-back of one reserved attempt (FU-BE-220). */
+  const spyRefund = (): jest.SpyInstance =>
+    jest.spyOn(authService as unknown as { refundAttempt: () => Promise<void> }, 'refundAttempt');
   const spyOnService = (name: 'audit' | 'startSession' | 'clearFailures'): jest.SpyInstance =>
     jest.spyOn(authService as unknown as Record<typeof name, () => Promise<unknown>>, name);
   /**
@@ -260,8 +263,11 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         async (_n, make) => {
           const e = await started();
           const code = authenticator.generate(e.key);
+          const refund = spyRefund();
           commitThenFail(make);
           expectFixed500(await confirm(e.token, code));
+          // FU-BE-220: only the password step's refund; none after the landed commit.
+          expect(refund).toHaveBeenCalledTimes(1);
           expect(await enabledInDb(e.id)).toEqual({ on: true, hashes: 10 });
           expect(await markCount(e.id)).toBe(1);
           expect(await failedLogins(e.id)).toBe(0);
@@ -275,13 +281,17 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       it('DL-37, FU-BE-208, FR-102: P2028 at COMMIT with the commit NOT landed is the same fixed 500; 2FA is off, the mark stays, and the retry of the code is a replay counted once', async () => {
         const e = await started();
         const code = authenticator.generate(e.key);
+        const refund = spyRefund();
         failAfterCallback();
         expectFixed500(await confirm(e.token, code));
         expect(await enabledInDb(e.id)).toEqual({ on: false, hashes: 0 });
         expect(await markCount(e.id)).toBe(1);
-        expect(await failedLogins(e.id)).toBe(0);
-        await confirm(e.token, code).expect(400);
+        // FU-BE-220: nothing is given back after an unknown outcome: the reservation stays (+1).
+        // The only refund call is the password step's, made before the confirm transaction.
+        expect(refund).toHaveBeenCalledTimes(1);
         expect(await failedLogins(e.id)).toBe(1);
+        await confirm(e.token, code).expect(400);
+        expect(await failedLogins(e.id)).toBe(2);
       });
 
       it('DL-37, FU-BE-208: the unknown-outcome error log carries only traceId, errorName and the route', async () => {
@@ -304,8 +314,11 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         async (_n, make) => {
           const e = await started();
           const code = authenticator.generate(e.key);
+          const refund = spyRefund();
           failAfterCallback(make);
           const res = await confirm(e.token, code).expect(503);
+          // The password step's refund plus exactly one for the rolled-back confirm (FU-BE-220).
+          expect(refund).toHaveBeenCalledTimes(2);
           expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
           expect((res.body as { code?: string }).code).toBe('BUSY');
           expect(await markCount(e.id)).toBe(0);
@@ -330,8 +343,8 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         expect(await failedLogins(e.id)).toBe(1);
         failAfterCallback();
         expectFixed500(await confirm(e.token, authenticator.generate(e.key)));
-        // The verified reservation was given back; the wrong guess stays counted.
-        expect(await failedLogins(e.id)).toBe(1);
+        // Wrong guess counted (1) plus the kept reservation of the unknown outcome (FU-BE-220).
+        expect(await failedLogins(e.id)).toBe(2);
       });
     });
 
@@ -364,9 +377,11 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         async (_n, make) => {
           const e = await started();
           const code = authenticator.generate(e.key);
+          const refund = spyRefund();
           commitThenFail(make);
           const res = await confirm(e.challenge, code);
           expectFixed500(res);
+          expect(refund).not.toHaveBeenCalled(); // FU-BE-220
           expect(res.headers['set-cookie']).toBeUndefined();
           expect(await enabledInDb(e.id)).toEqual({ on: true, hashes: 10 });
           expect(await liveFamilies(e.id)).toBe(1);
@@ -401,8 +416,10 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         async (_n, make) => {
           const e = await started();
           const code = authenticator.generate(e.key);
+          const refund = spyRefund();
           failAfterCallback(make);
           const res = await confirm(e.challenge, code).expect(503);
+          expect(refund).toHaveBeenCalledTimes(1); // FU-BE-220: exactly once, a real rollback
           expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
           expect(await markCount(e.id)).toBe(0);
           await confirm(e.challenge, code).expect(200);
@@ -424,7 +441,8 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
         expect(await failedLogins(e.id)).toBe(1);
         failAfterCallback();
         expectFixed500(await confirm(e.challenge, authenticator.generate(e.key)));
-        expect(await failedLogins(e.id)).toBe(1);
+        // Wrong guess counted (1) plus the kept reservation of the unknown outcome (FU-BE-220).
+        expect(await failedLogins(e.id)).toBe(2);
       });
     });
   });
@@ -447,11 +465,14 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       const challenge = await challengeFor(u.email);
       const code = authenticator.generate(SECRET);
       spyOnService('clearFailures').mockRejectedValueOnce(lockError());
+      const refund = spyRefund();
       await verify2fa(challenge, code).expect(503);
       expect(await markCount(u.id)).toBe(1);
-      expect(await failedLogins(u.id)).toBe(0);
-      await verify2fa(challenge, code).expect(400);
+      // FU-BE-220: the INSERT returned (a landed commit): no refund, the reservation stays (+1).
+      expect(refund).not.toHaveBeenCalled();
       expect(await failedLogins(u.id)).toBe(1);
+      await verify2fa(challenge, code).expect(400);
+      expect(await failedLogins(u.id)).toBe(2);
     });
 
     it('FU-BE-208, FR-102: a successful login keeps its mark: the same code cannot be replayed with a fresh challenge', async () => {
@@ -584,7 +605,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(res.headers['retry-after']).toBeUndefined();
       expect(await markCount(e.id)).toBe(1);
       await confirm(e.token, code).expect(400);
-      expect(await failedLogins(e.id)).toBe(1);
+      expect(await failedLogins(e.id)).toBe(2); // kept reservation + counted replay (FU-BE-220)
     });
 
     it('FU-BE-208, DL-37, FR-102: P2028 INSIDE the callback and 40P01 at commit are rollbacks: each gives the code back', async () => {
@@ -664,7 +685,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(res.headers['retry-after']).toBeUndefined();
       expect(await markCount(e.id)).toBe(1);
       await confirm(e.challenge, code).expect(401);
-      expect(await failedLogins(e.id)).toBe(0);
+      expect(await failedLogins(e.id)).toBe(1); // the kept reservation (FU-BE-220)
     });
 
     it('FU-BE-208, FR-102: wrong codes still count and lock at 5', async () => {
@@ -724,16 +745,48 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
       expect(await failedLogins(d.id)).toBe(0);
     });
 
-    it('FU-BE-208, DL-37, FR-102: P2028 after the callback finished (at COMMIT) keeps the mark: the retry is a replay, counted once', async () => {
+    it.each(unknownCases)(
+      'FU-BE-208, FU-BE-219, DL-37, FR-102: %s with the commit landed is the fixed 500; 2FA is off, the mark is kept, no refund after it, and the retry is a 409',
+      async (_n, make) => {
+        const d = await enrolled();
+        const code = authenticator.generate(SECRET);
+        jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+        commitThenFail(make);
+        expectFixed500(await disable(d.token, code));
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(
+          false,
+        );
+        expect(await markCount(d.id)).toBe(1);
+        expect(await failedLogins(d.id)).toBe(0);
+        // 2FA is already off: the retry is the existing 409, never a second disable.
+        await disable(d.token, code).expect(409);
+      },
+    );
+
+    it('FU-BE-208, FU-BE-219, DL-37, FR-102: P2028 at COMMIT with nothing committed is the same fixed 500; 2FA stays on, the mark is kept, and the retry is a counted replay (403)', async () => {
       const d = await enrolled();
       const code = authenticator.generate(SECRET);
       jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
       failAfterCallback();
-      await disable(d.token, code).expect(503);
+      expectFixed500(await disable(d.token, code));
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: d.id } })).totpEnabled).toBe(true);
       expect(await markCount(d.id)).toBe(1);
       await disable(d.token, code).expect(403);
       expect(await failedLogins(d.id)).toBe(1);
     });
+
+    it.each(rollbackCases)(
+      'FU-BE-208, FU-BE-219, DL-37, FR-102: %s at commit on disable stays 503 BUSY and the same code then disables 2FA (204)',
+      async (_n, make) => {
+        const d = await enrolled();
+        const code = authenticator.generate(SECRET);
+        jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+        failAfterCallback(make);
+        const res = await disable(d.token, code).expect(503);
+        expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
+        await disable(d.token, code).expect(204);
+      },
+    );
 
     it('FU-BE-208, DL-37, FR-102: P2028 INSIDE the callback and 40P01 at commit are rollbacks: each gives the code back', async () => {
       const d = await enrolled();
