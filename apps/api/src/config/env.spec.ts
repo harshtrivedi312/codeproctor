@@ -671,17 +671,75 @@ describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
     },
   );
 
-  it('DL-55 FU-BE-225: a malformed URL keeps the existing error and is not echoed', () => {
-    let message = '';
-    try {
-      validateEnv({ ...good, APP_ENV: 'staging', DATABASE_URL: 'not a url change-me' });
-    } catch (e) {
-      message = String(e);
-    }
-    // The existing schema only requires a non-empty string; the check must not crash on it.
-    expect(message).not.toContain('TypeError');
-    expect(message).not.toContain('not a url');
+  // Each of these is a way the runtime driver (pg) would still end up with a change-me password.
+  const bypasses: Record<string, string> = {
+    'raw password when decoding fails': 'postgresql://u:change-me%ZZ@db.internal/secretdb',
+    'password query parameter, no userinfo password':
+      'postgresql://app_user@db.internal:5432/secretdb?password=change-me',
+    'password query parameter over a strong userinfo password':
+      'postgresql://u:strongpw@db.internal/secretdb?password=change-me',
+    'any password query parameter, even a strong one':
+      'postgresql://u@db.internal/secretdb?password=x7Kq9ZpL2mVw',
+    'unparseable URL (dummy-host fallback in pg)': 'postgresql://u:change-me@/secretdb',
+  };
+  const sharedCases: Array<[string, Record<string, string>]> = [
+    ['staging', { APP_ENV: 'staging' }],
+    ['pilot', { APP_ENV: 'pilot' }],
+    ['production', { APP_ENV: 'production' }],
+    ['NODE_ENV=production', { APP_ENV: 'development', NODE_ENV: 'production' }],
+  ];
+
+  describe.each(sharedCases)('DL-55 FU-BE-225 NFR-04 shared env %s', (_label, envVars) => {
+    const base = { ...good, ...liveExtras('pilot'), ...envVars };
+
+    it.each(Object.entries(bypasses))(
+      'DL-55 FU-BE-225: refuses %s, naming DATABASE_URL and echoing no URL part',
+      (_name, url) => {
+        let message = '';
+        try {
+          validateEnv({ ...base, DATABASE_URL: url });
+        } catch (e) {
+          message = String(e);
+        }
+        expect(message).toMatch(/DATABASE_URL/);
+        for (const part of ['change-me', 'app_user', 'db.internal', 'secretdb', 'strongpw'])
+          expect(message).not.toContain(part);
+      },
+    );
+
+    it('DL-55 FU-BE-225: a generated userinfo password and no password parameter is accepted', () => {
+      expect(() =>
+        validateEnv({ ...base, DATABASE_URL: `${generated}?sslmode=require` }),
+      ).not.toThrow();
+    });
+
+    it('DL-55 FU-BE-225: refuses a change-me PGPASSWORD, naming only the variable', () => {
+      let message = '';
+      try {
+        validateEnv({ ...base, PGPASSWORD: 'Change-Me-pg-secret' });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message).toMatch(/PGPASSWORD/);
+      expect(message).not.toContain('Change-Me');
+      expect(() => validateEnv({ ...base, PGPASSWORD: 'x7Kq9ZpL2mVw' })).not.toThrow();
+    });
   });
+
+  it('DL-55 FU-BE-225: an invalid APP_ENV (fails closed) still refuses a change-me PGPASSWORD by name', () => {
+    expect(() => validateEnv({ ...good, APP_ENV: 'prod', PGPASSWORD: 'change-me' })).toThrow(
+      /PGPASSWORD/,
+    );
+  });
+
+  it.each(['development', 'test'])(
+    'DL-55 FU-BE-225: %s keeps accepting the template URL, a password parameter, an unparseable URL and PGPASSWORD',
+    (APP_ENV) => {
+      for (const DATABASE_URL of Object.values(bypasses))
+        expect(validateEnv({ ...good, APP_ENV, DATABASE_URL }).APP_ENV).toBe(APP_ENV);
+      expect(() => validateEnv({ ...good, APP_ENV, PGPASSWORD: 'change-me' })).not.toThrow();
+    },
+  );
 });
 
 /** Settings pilot and production need besides the secrets, so only the placeholders can fail. */

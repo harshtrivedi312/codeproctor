@@ -41,7 +41,7 @@ function emptyAsUnset<T extends z.ZodType>(schema: T) {
 export const envSchema = z
   .object({
     // NODE_ENV is a library hint only (it can add strictness, never remove it): APP_ENV is the one
-    // authority for what the deployment is (DL-55). It stays optional because no guard needs it.
+    // authority for what the deployment is (DL-55). It has a default and can only add strictness.
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     // Required, no default (DL-55, FU-BE-224, NFR-04): an unset, empty or misspelled value refuses
     // to boot, so a forgotten APP_ENV cannot make a shared deployment behave like development.
@@ -238,12 +238,9 @@ export const envSchema = z
           });
         }
       }
-      if (urlPasswordIsPlaceholder(env.DATABASE_URL)) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['DATABASE_URL'],
-          message: 'has a local placeholder password, refused in staging, pilot and production',
-        });
+      const urlProblem = databaseUrlProblem(env.DATABASE_URL);
+      if (urlProblem !== undefined) {
+        ctx.addIssue({ code: 'custom', path: ['DATABASE_URL'], message: urlProblem });
       }
       if (isPlaceholderKey(env.ENCRYPTION_KEY)) {
         ctx.addIssue({
@@ -384,13 +381,35 @@ function isPlaceholderText(value: string): boolean {
     .includes('change-me');
 }
 
-/** True when a URL's decoded password is a change-me placeholder. A malformed URL is not judged here. */
-function urlPasswordIsPlaceholder(url: string): boolean {
+/**
+ * Why a DATABASE_URL is refused in a shared environment, or undefined when it is acceptable. It
+ * mirrors what the runtime driver (pg via pg-connection-string) would use, and fails closed:
+ * - an unparseable URL is refused (pg has fallbacks, such as a dummy host, that `new URL` lacks);
+ * - any `password` query parameter is refused (pg copies search params first, so it would override
+ *   the userinfo password);
+ * - the password in the userinfo is checked decoded, and raw when decoding fails.
+ * Returns a fixed message; never any part of the URL.
+ */
+function databaseUrlProblem(url: string): string | undefined {
+  let parsed: URL;
   try {
-    return isPlaceholderText(decodeURIComponent(new URL(url).password));
+    parsed = new URL(url);
   } catch {
-    return false;
+    return 'cannot be parsed as a URL, which is refused in staging, pilot and production';
   }
+  if (parsed.searchParams.has('password')) {
+    return 'must not carry a password query parameter in staging, pilot and production; put the password in the userinfo';
+  }
+  let decoded: string | undefined;
+  try {
+    decoded = decodeURIComponent(parsed.password);
+  } catch {
+    decoded = undefined;
+  }
+  if (isPlaceholderText(parsed.password) || (decoded !== undefined && isPlaceholderText(decoded))) {
+    return 'has a local placeholder password, refused in staging, pilot and production';
+  }
+  return undefined;
 }
 
 /** A base64 key whose bytes spell a change-me placeholder (the .env.example values). */
@@ -412,6 +431,15 @@ function placeholderSessionKeys(raw: Record<string, unknown>): string[] {
     .map(([name]) => name);
 }
 
+/**
+ * PGPASSWORD is not in the schema, but pg falls back to it when the DATABASE_URL has no password,
+ * so a change-me value there is the same hazard. Names only, never the value.
+ */
+function placeholderPgPassword(raw: Record<string, unknown>): string[] {
+  const value = raw['PGPASSWORD'];
+  return typeof value === 'string' && isPlaceholderText(value) ? ['PGPASSWORD'] : [];
+}
+
 const PLACEHOLDER_MESSAGE =
   'is a local placeholder and is refused in staging, pilot and production';
 
@@ -427,7 +455,7 @@ export function validateEnv(raw: Record<string, unknown>): Env {
     const appEnv = typeof raw['APP_ENV'] === 'string' ? raw['APP_ENV'] : undefined;
     const nodeEnv = typeof raw['NODE_ENV'] === 'string' ? raw['NODE_ENV'] : undefined;
     if (isSharedEnv({ APP_ENV: appEnv, NODE_ENV: nodeEnv })) {
-      for (const name of placeholderSessionKeys(raw))
+      for (const name of [...placeholderSessionKeys(raw), ...placeholderPgPassword(raw)])
         problems.push(`${name}: ${PLACEHOLDER_MESSAGE}`);
     }
     throw new Error(`Invalid environment: ${problems.join('; ')}`);
@@ -439,7 +467,7 @@ export function validateEnv(raw: Record<string, unknown>): Env {
   // The parsed APP_ENV is always one of the five values (it has no default, DL-55).
   if (isSharedEnv(env)) {
     // Every configured wrapping key, not only the active kid: an old kid is still used to unwrap.
-    const bad = placeholderSessionKeys(raw);
+    const bad = [...placeholderSessionKeys(raw), ...placeholderPgPassword(raw)];
     if (bad.length > 0) {
       throw new Error(
         `Invalid environment: ${bad.map((n) => `${n}: ${PLACEHOLDER_MESSAGE}`).join('; ')}`,
