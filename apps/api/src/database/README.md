@@ -749,6 +749,11 @@ Five tests pin it, all with an **empty** list outside the defining file today:
       first from the processor, and the controller calls `proctorResume` from outside the file: a state method that
       called one of them, say a `closeIngest` that locks any session, would be reachable from a SERVICE job and write
       into an ERASED session; one that called `proctorResume` would be a second door to `guardLive`).
+    - **`proctorResume` is treated like a lock name in this file** (SF-1 of the r3 review): every bare mention is its
+      method definition (`const { proctorResume } = this`, a string or a log message that says it fails), and **every
+      member mention is refused, called or not** (`{ resume: this.proctorResume }`, `Reflect.apply(this.proctorResume,
+...)`, `.call`, `.apply`, `.bind`, a read through any receiver). The scan sees only this file: **who calls
+      `proctorResume` from OTHER files is a review point until FU-DB-189's AST gate, not a pin**.
     - **Write the wrappers as methods with a body** (the scan looks for `async name(...) {`), and keep inline object
       types out of their return types.
   - **The processor file** (`session-job.processor.ts`), once it names a lock: `.guardLive(` **exactly once, inside `withLiveSession`**;

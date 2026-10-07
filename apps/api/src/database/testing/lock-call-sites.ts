@@ -20,7 +20,9 @@
 //        (`this.`, `self.`, `this?.`, `(this as X).`, `super.`): exactly ONE `.guardLive(` call, inside the
 //        brace-matched `proctorResume` body, and ZERO `.lockAnySession(`, `.lockForAccommodation(` and
 //        `.proctorResume(` calls (the accommodation routes call the second from session/accommodations.ts, the jobs
-//        call the first from the processor, the controller calls proctorResume from outside the file).
+//        call the first from the processor, the controller calls proctorResume from outside the file). `proctorResume`
+//        is treated like a lock name: every bare mention is its definition, every member mention (called or not) is
+//        refused. Who calls it from OTHER files is a review point until FU-DB-189, not a pin.
 //      - SESSION_PROCESSOR_FILE: `.guardLive(` exactly once, inside `withLiveSession`; `.lockAnySession(` exactly once,
 //        inside `withAnySession`; every mention of a lock name is a member call.
 //      - the accommodation and retention files: every mention of a lock name is a member call.
@@ -89,7 +91,7 @@ export const LOCK_CALLER_RULES = {
     `import x = require, require(, import( or re-export of the module) and called exactly once, inside the wrapper ` +
     `method of the same name in the ${SESSION_STATE_CLASS} class, whose whole body is return <alias>(<param1>, ` +
     `<param2>); nowhere else; member calls counted with any receiver: one .guardLive( call, inside proctorResume, ` +
-    `and no .lockAnySession(, .lockForAccommodation( or .proctorResume( call`,
+    `and no .lockAnySession( or .lockForAccommodation( call; proctorResume is treated like a lock name: every bare mention is its definition and every member mention is refused`,
   processorFile:
     'no lock named at all (before the switch-over), or: .guardLive( exactly once, inside withLiveSession, and ' +
     '.lockAnySession( exactly once, inside withAnySession, every mention of a lock name a member call',
@@ -553,14 +555,29 @@ export function stateFileProblems(path: string, code: string): string[] {
     } else if (resume !== undefined && !inside(calls[0] as number, resume)) {
       out.push(`${path}: the .guardLive( call is not inside proctorResume`);
     }
-    // proctorResume is the one door to guardLive: nothing in the file may call it (a call, an optional call, .call, .apply, .bind).
-    const resumeCalls = memberMentions(code, 'proctorResume').filter(({ end }) =>
+    // proctorResume is the one door to guardLive, and it is treated like a lock name: nothing in the file may reach it.
+    // A member CALL (a call, an optional call, .call, .apply, .bind) ...
+    const resumeMembers = memberMentions(code, 'proctorResume');
+    const resumeCalls = resumeMembers.filter(({ end }) =>
       /^\s*(?:\(|\?\.\s*\(|\.\s*(?:call|apply|bind)\b)/.test(code.slice(end)),
     );
     if (resumeCalls.length > 0) {
       out.push(
         `${path}: ${resumeCalls.length} .proctorResume( member calls in the state file (any receiver), none are allowed: the controller calls it from outside the file`,
       );
+    }
+    // ... and every other member mention: a held reference (`{ resume: this.proctorResume }`, `Reflect.apply(this.proctorResume, ...)`).
+    if (resumeMembers.length > resumeCalls.length) {
+      out.push(
+        `${path}: proctorResume is referenced as a property, not called, in the state file (any receiver): the controller reaches it from outside the file`,
+      );
+    }
+    // Every bare mention is the method's own definition (`const { proctorResume } = this`, a string or a log message are not).
+    for (const index of bareMentions(code, 'proctorResume')) {
+      if (!isDefinitionLike(code, index, 'proctorResume')) {
+        out.push(`${path}: proctorResume is mentioned other than as its method definition`);
+        break;
+      }
     }
   }
   return [...new Set(out)];

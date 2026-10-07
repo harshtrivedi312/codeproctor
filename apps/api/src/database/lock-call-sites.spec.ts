@@ -174,7 +174,7 @@ describe('the real paths and the rules in words (S-B of the re-review of #208): 
     expect(LOCK_CALLER_RULES.import).toContain('import { x as alias } from');
     expect(LOCK_CALLER_RULES.stateFile).toContain('alias');
     expect(LOCK_CALLER_RULES.stateFile).toContain('return <alias>(<param1>, <param2>);');
-    expect(LOCK_CALLER_RULES.stateFile).toContain('.proctorResume(');
+    expect(LOCK_CALLER_RULES.stateFile).toContain('proctorResume is treated like a lock name');
     expect(LOCK_CALLER_RULES.stateFile).toContain('no lock named at all');
     expect(LOCK_CALLER_RULES.processorFile).toContain('no lock named at all');
     expect(LOCK_CALLER_RULES.processorFile).toContain('withAnySession');
@@ -742,6 +742,54 @@ export class S {
       ]);
     },
   );
+
+  // ---- SF-1 (review r3 of #208): proctorResume is treated like a lock name, so a held reference is no way round ----------
+
+  const RESUME_REFERENCE = `${SESSION_STATE_FILE}: proctorResume is referenced as a property, not called, in the state file (any receiver): the controller reaches it from outside the file`;
+  const RESUME_BARE = `${SESSION_STATE_FILE}: proctorResume is mentioned other than as its method definition`;
+
+  it.each([
+    [
+      'a reference held in an object and called with .call',
+      'const h = { resume: this.proctorResume };\n    await h.resume.call(this, sid);',
+    ],
+    ['Reflect.apply', 'await Reflect.apply(this.proctorResume, this, [sid]);'],
+    [
+      'a function put in a list',
+      'const fs = [this.proctorResume];\n    await fs[0]?.call(this, sid);',
+    ],
+    ['a function handed to another call', 'register(this.proctorResume);'],
+    ['a read through another receiver', 'const f = other.proctorResume;'],
+    ['a read with a line break after the dot', 'const f = this.\n      proctorResume;'],
+  ])(
+    'TC-008 SF-1 %s fails: every member mention of proctorResume is refused, called or not',
+    (_what, body) => {
+      expect(state(withMethod(body))).toEqual([RESUME_REFERENCE]);
+    },
+  );
+
+  it.each([
+    ['a destructuring of this', 'const { proctorResume } = this;\n    await proctorResume(sid);'],
+    ['a bare call', 'await proctorResume(sid);'],
+    ['a log message', "this.logger.log('proctorResume failed');"],
+    ['a bracket access', "await this['proctorResume'](sid);"],
+    ['an object property', 'const h = { proctorResume: 1 };'],
+  ])(
+    'TC-008 SF-1 %s fails: a bare mention of proctorResume is its method definition or nothing',
+    (_what, body) => {
+      expect(state(withMethod(body))).toEqual([RESUME_BARE]);
+    },
+  );
+
+  it('TC-008 SF-1 the proctorResume method definition, with modifiers or a generic, is the one bare mention allowed', () => {
+    expect(state(STATE_TEXT)).toEqual([]);
+    expect(
+      state(STATE_TEXT.replace('async proctorResume(', 'public async proctorResume(')),
+    ).toEqual([]);
+    expect(state(STATE_TEXT.replace('async proctorResume(', 'async proctorResume<T>('))).toEqual(
+      [],
+    );
+  });
 
   it('TC-008 N3 the proctorResume definition and a plain mention of its name are not calls', () => {
     expect(state(STATE_TEXT)).toEqual([]);
