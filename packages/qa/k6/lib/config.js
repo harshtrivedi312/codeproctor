@@ -3,7 +3,7 @@
 // Everything environment-specific comes from environment variables. No default points at a real
 // host, and nothing here is a secret.
 import { SharedArray } from 'k6/data';
-import { checkTarget } from './guard.js';
+import { checkTarget, LOCAL_HOSTS } from './guard.js';
 
 const RAW_API_BASE = (__ENV.API_BASE_URL || 'http://localhost:4000/api/v1').replace(/\/+$/, '');
 export const API_BASE = RAW_API_BASE;
@@ -32,7 +32,11 @@ export const SYSTEM_TAGS = [
 // A host containing prod, production or pilot is refused even when listed; nothing overrides that.
 // The CI job has its own allow-list (QA_STAGING_HOSTS); this is a second guard for local runs.
 export function assertSafeTarget() {
-  checkTarget(RAW_API_BASE, __ENV.ALLOWED_HOSTS);
+  const host = checkTarget(RAW_API_BASE, __ENV.ALLOWED_HOSTS);
+  // Bearer tokens, signed batches and proctor keys go to this URL: https unless the host is local.
+  if (!LOCAL_HOSTS.includes(host) && !RAW_API_BASE.toLowerCase().startsWith('https://')) {
+    throw new Error('API_BASE_URL must use https:// for a host that is not local.');
+  }
 }
 
 // Run the guard in the init stage too, so a run with --no-setup or a script error before setup()
@@ -41,8 +45,7 @@ assertSafeTarget();
 
 // One entry per simulated candidate session, seeded on staging with synthetic data:
 //   { "token": "<candidate bearer token>",
-//     "sessionQuestionId": "<uuid of the session question, for keystroke batches>",
-//     "questionId": "<uuid of the question, for the run route>",
+//     "sessionQuestionId": "<uuid; used in the run, draft and submit routes (BE-11) and in keystroke batches>",
 //     "keyB64": "<optional: the 32-byte batch key, base64, if it was already fetched>",
 //     "counters": { optional: the counters object of the proctor-key response } }
 // Provide the list with SESSIONS_FILE (a path; read in the init stage) or SESSIONS_JSON (the JSON
@@ -63,6 +66,18 @@ export const SESSIONS = new SharedArray('sessions', function () {
   const list = JSON.parse(text);
   if (!Array.isArray(list)) {
     throw new Error('SESSIONS_FILE / SESSIONS_JSON must hold a JSON array.');
+  }
+  // A seeder file made with --stop-at holds sessions that are not in progress and carry no
+  // sessionQuestionId: refuse it here instead of failing later in a gate run.
+  for (const e of list) {
+    if (!e || typeof e.token !== 'string' || typeof e.sessionQuestionId !== 'string') {
+      throw new Error(
+        'Every session needs a token and a sessionQuestionId (a seeder file made with --stop-at has none).',
+      );
+    }
+    if (e.state !== undefined && e.state !== 'IN_PROGRESS') {
+      throw new Error('Every session must be IN_PROGRESS (this file was made with --stop-at).');
+    }
   }
   return list;
 });
