@@ -19,7 +19,7 @@ The routes, limits and 412 handling follow **Proposed** ADR 0013 (not yet accept
 | Event batch (2 events)                        | every 5 s                               | `POST /candidate/session/events`                                                                          | `X-Signature`, HMAC-SHA256 over the exact body |
 | Keystroke batch (10 edits)                    | every 2 s                               | `POST /candidate/session/keystrokes`                                                                      | same                                           |
 | Media chunk, per stream SCREEN, WEBCAM, AUDIO | every 10 s per stream                   | `POST /candidate/session/media/presign`, `PUT` to object storage, `POST /candidate/session/media/confirm` | no                                             |
-| Code run                                      | once a minute (`RUN_EVERY_MS`; 0 = off) | `POST /candidate/answers/:questionId/run`                                                                 | no                                             |
+| Code run                                      | once a minute (`RUN_EVERY_MS`; 0 = off) | `POST /candidate/answers/:sessionQuestionId/run`                                                          | no                                             |
 
 That is about 1.4 API requests per second per candidate: 0.1 heartbeat, 0.2 events, 0.5 keystrokes, 0.6 presign and confirm, plus the storage PUTs (0.3 per second, not API calls). At 200 candidates this is roughly 280 API requests per second, which matches R-02's estimate of 250 to 300. It stays under the per-session limits in ADR 0013 (events 120 per minute, keystrokes 240, heartbeat 12, presign and confirm 60 per stream), so any 429 is a finding, not a script artefact.
 
@@ -58,14 +58,13 @@ A failed threshold makes k6 exit non-zero, so the CI job fails.
 
 ## Seeding the sessions
 
-Each virtual user needs its own IN_PROGRESS candidate session on staging with synthetic data (200 for TC-090, 50 for TC-091; FR-502 allows one run per 5 s per candidate, so runs cannot share a session). Seeding is done with the staging admin tools or API by whoever owns DEP-01 (there is no seeding script yet); the result is a JSON file:
+Each virtual user needs its own IN_PROGRESS candidate session on staging with synthetic data (200 for TC-090, 50 for TC-091; FR-502 allows one run per 5 s per candidate, so runs cannot share a session). Seeding is done with `seed/seed.mjs` (public API only, synthetic data, cleanup by run id; see `seed/README.md`, written against the docs and blocked on BE-07 for a real run) or by hand with the staging admin tools or API; the result is a JSON file:
 
 ```json
 [
   {
     "token": "<candidate bearer token>",
     "sessionQuestionId": "<uuid>",
-    "questionId": "<uuid>",
     "keyB64": "<optional, 32-byte batch key, base64>",
     "counters": {}
   }
@@ -73,7 +72,7 @@ Each virtual user needs its own IN_PROGRESS candidate session on staging with sy
 ```
 
 - `token`: the candidate access token for that session. It lives for the session token lifetime; renewal through the heartbeat is not followed (a long run needs a token that outlives it).
-- `sessionQuestionId`: used in keystroke batches. `questionId`: used in the run route.
+- `sessionQuestionId`: used in keystroke batches and in the run route (BE-11 resolves it under the token's session; main's `test/start` returns no other question id). A file made with `seed.mjs --stop-at ...` has no `sessionQuestionId` and is refused here.
 - `keyB64` and `counters` are optional. Without them the script calls `POST /candidate/session/proctor-key` once per user. That route answers 409 `KEY_ALREADY_ISSUED` for the same epoch the second time, so **seed fresh sessions for every run** (or store the key and counters yourself).
 - The file holds bearer tokens and keys. Keep it outside the repository (the folder's `.gitignore` excludes `sessions*.json`, `.local/` and `results/` as a second guard), never paste it into an issue or chat, and delete it after the run. In CI it comes from a secret, never from a file in git.
 

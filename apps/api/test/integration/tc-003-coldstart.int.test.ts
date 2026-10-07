@@ -9,6 +9,15 @@ import { authenticator } from 'otplib';
 import { UserRole } from '../../src/generated/prisma/client';
 import { API, Body, boot, createUser, Harness, login, TOTP_SECRET } from '../support/harness';
 
+// Polls a condition for up to 10 s; fails with the last status text if it never holds.
+async function until(cond: () => boolean): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for the Redis client state.');
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 describe('TC-003 (FR-102): parallel first Redis uses right after boot', () => {
   let h: Harness;
   let users: { id: string; email: string }[];
@@ -29,12 +38,19 @@ describe('TC-003 (FR-102): parallel first Redis uses right after boot', () => {
   // /2fa/verify answered 503. Now every caller waits for the shared ready promise. This is a plain
   // regression test: any failure of any kind among the five sign-ins fails it.
   it('TC-003 QA-D-04 (FR-102): five parallel first uses of a cold Redis client (password logins, then 2FA verifies) all succeed, never 503', async () => {
-    // Premise guard: the Redis client must still be unconnected, or this stops testing a cold start.
+    // Since FU-BE-194 the app starts the Redis connect at boot, so the client is no longer cold when
+    // the test starts. Make it cold again: let the boot connect finish, then close the connection.
+    // 'end' is a cold client for ensureConnected() (it connects on first use, like 'wait').
     // boot() resets the module registry, so the token must come from the same registry as the app.
     const { REDIS_CLIENT } = jest.requireActual<
       typeof import('../../src/infrastructure/infrastructure.module')
     >('../../src/infrastructure/infrastructure.module');
-    expect(h.app.get<Redis>(REDIS_CLIENT, { strict: false }).status).toBe('wait');
+    const redis = h.app.get<Redis>(REDIS_CLIENT, { strict: false });
+    await until(() => redis.status === 'ready');
+    redis.disconnect();
+    await until(() => redis.status === 'end');
+    // Premise guard: the client is unconnected, or this stops testing a cold start.
+    expect(redis.status).toBe('end');
     // Phase 1: since FU-BE-1 the throttler keeps its counters in Redis, so these five password
     // sign-ins already make the first Redis use of the cold client together (all must be 200).
     const challenges = await Promise.all(

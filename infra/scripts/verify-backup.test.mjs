@@ -177,6 +177,121 @@ describe('DB-07 guards (NFR-03)', () => {
     assert.match((await run(ERASURES, ['complete', 'nope'], env)).stderr, /candidate uuid/);
   });
 
+  it(
+    'FR-704, ADR 0017 5.3: erasure-list entries are written with If-None-Match, and a 412 is success (entry already there)',
+    { skip: drillUnavailable(['aws']) ?? false },
+    async () => {
+      const store = await startFakeS3({ versioned: true });
+      try {
+        const e = {
+          S3_BACKUP_BUCKET: 'b',
+          S3_ENDPOINT: `http://127.0.0.1:${store.port}`,
+          S3_REGION: 'auto',
+          S3_FORCE_PATH_STYLE: 'true',
+          S3_ACCESS_KEY_ID: 'x',
+          S3_SECRET_ACCESS_KEY: SECRET,
+          AWS_MAX_ATTEMPTS: '1',
+        };
+        const stamp = '20261005T020000Z';
+        assert.equal((await run(ERASURES, ['append', ERASED_ID, stamp], e)).status, 0);
+        const entry = `b/db/erasure-list/${stamp}-${ERASED_ID}.json`;
+        assert.ok(store.objects.has(entry));
+        assert.deepEqual(
+          store.puts.filter((p) => p.path === entry).map((p) => p.conditional),
+          [true],
+          'written with If-None-Match: *',
+        );
+        // `complete` is conditional as well.
+        assert.equal((await run(ERASURES, ['complete', ERASED_ID], e)).status, 0);
+        const done = store.puts.filter((p) => p.path.startsWith('b/db/erasure-completed/'));
+        assert.equal(done.length, 1);
+        assert.equal(
+          done[0].conditional,
+          true,
+          'the completion marker is written with If-None-Match',
+        );
+        // A race with another writer: the store answers 412 for our conditional write. That is success.
+        const other = '11111111-2222-4333-8444-555555555555';
+        store.faults.precondition = true;
+        const raced = await run(ERASURES, ['append', other, '20261005T020001Z'], e);
+        assert.equal(raced.status, 0, raced.stderr);
+        assert.match(raced.stderr, /already exists/);
+        assert.ok(!store.objects.has(`b/db/erasure-list/20261005T020001Z-${other}.json`));
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it(
+    'FR-704, ADR 0017 5.3: a 409 ConditionalRequestConflict is retried (never success); persistent conflicts fail after a bounded number of tries',
+    { skip: drillUnavailable(['aws']) ?? false },
+    async () => {
+      const store = await startFakeS3({ versioned: true });
+      try {
+        const e = {
+          S3_BACKUP_BUCKET: 'b',
+          S3_ENDPOINT: `http://127.0.0.1:${store.port}`,
+          S3_REGION: 'auto',
+          S3_FORCE_PATH_STYLE: 'true',
+          S3_ACCESS_KEY_ID: 'x',
+          S3_SECRET_ACCESS_KEY: SECRET,
+          AWS_MAX_ATTEMPTS: '1',
+          BACKUP_PUT_RETRY_DELAY_SECONDS: '0',
+        };
+        store.faults.conflicts = 2;
+        const ok = await run(ERASURES, ['append', ERASED_ID, '20261005T020000Z'], e);
+        assert.equal(ok.status, 0, ok.stderr);
+        assert.ok(
+          store.objects.has(`b/db/erasure-list/20261005T020000Z-${ERASED_ID}.json`),
+          'written after the retries',
+        );
+        assert.equal(store.faults.conflicts, 0, 'both conflicts were consumed by retries');
+        const other = '11111111-2222-4333-8444-555555555555';
+        store.faults.conflicts = 100;
+        const bad = await run(ERASURES, ['append', other, '20261005T020001Z'], e);
+        assert.equal(bad.status, 1, bad.stderr);
+        assert.match(bad.stderr, /attempt 5; error/);
+        assert.equal(store.faults.conflicts, 95, 'exactly 5 tries, then it stops');
+        assert.ok(
+          !store.objects.has(`b/db/erasure-list/20261005T020001Z-${other}.json`),
+          'a 409 is never success',
+        );
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it(
+    'FR-704: a failed erasure-list write (not a 412) stops the caller instead of looking like success',
+    { skip: drillUnavailable(['aws']) ?? false },
+    async () => {
+      const store = await startFakeS3({ versioned: true });
+      try {
+        const e = {
+          S3_BACKUP_BUCKET: 'b',
+          S3_ENDPOINT: `http://127.0.0.1:${store.port}`,
+          S3_REGION: 'auto',
+          S3_FORCE_PATH_STYLE: 'true',
+          S3_ACCESS_KEY_ID: 'x',
+          S3_SECRET_ACCESS_KEY: SECRET,
+          AWS_MAX_ATTEMPTS: '1',
+        };
+        store.faults.failPut = true;
+        const r = await run(ERASURES, ['append', ERASED_ID, '20261005T020000Z'], e);
+        assert.equal(r.status, 1, r.stderr);
+        assert.match(r.stderr, /could not write the erasure list entry/);
+        assert.match(r.stderr, /error (403|unknown|Forbidden)/);
+        assert.doesNotMatch(r.stderr + r.stdout, new RegExp(SECRET));
+        assert.doesNotMatch(r.stderr, /An error occurred|Forbidden \(/);
+        assert.equal(store.objects.size, 0);
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
   it('BACKUP_PREFIX cannot climb out with ..', async () => {
     for (const bad of ['../x', '/abs', 'a//b', 'a#b', 'a b']) {
       const r = await run(ERASURES, ['list'], { S3_BACKUP_BUCKET: 'b', BACKUP_PREFIX: bad });
@@ -833,23 +948,66 @@ describe('DB-07 versioned backups (NFR-03, ADR 0017 5.3, C-55)', { skip }, () =>
     assert.equal(r.status, 1);
     assert.match(r.stderr, /does not exist/);
   });
+
   it('C-55: versioned mode on a store that does not version fails loudly', async () => {
     const plain = await startFakeS3({ versioned: false });
     try {
       const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
       assert.equal(r.status, 1, r.stderr);
       assert.match(r.stderr, /not versioned/);
-      // The previous backup is not replaced when the existing object already shows the bucket is unversioned.
-      const before = plain.objects.get(KEY);
-      const again = await run(BACKUP, [], {
-        ...env,
-        S3_ENDPOINT: `http://127.0.0.1:${plain.port}`,
-      });
-      assert.equal(again.status, 1, again.stderr);
-      assert.match(again.stderr, /not versioned/);
-      assert.equal(plain.objects.get(KEY), before, 'the existing object was not overwritten');
     } finally {
       await plain.close();
+    }
+  });
+
+  it('C-55: an existing object in an unversioned bucket is never overwritten (the refusal comes before the upload)', async () => {
+    const plain = await startFakeS3({ versioned: false });
+    try {
+      const existing = Buffer.from('the only backup');
+      plain.objects.set(KEY, existing);
+      const before = plain.objects.get(KEY);
+      assert.ok(before, 'the fixture really has an existing object');
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /Nothing was uploaded/);
+      assert.equal(plain.objects.get(KEY), existing, 'the existing object was not overwritten');
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it('C-55: an existing object whose version id is "null" (versioning suspended) is not overwritten either', async () => {
+    const suspended = await startFakeS3({ versioned: true });
+    try {
+      const body = Buffer.from('the only backup');
+      suspended.objects.set(KEY, body);
+      suspended.versions.set(KEY, [{ id: 'null', body, meta: {} }]);
+      const r = await run(BACKUP, [], {
+        ...env,
+        S3_ENDPOINT: `http://127.0.0.1:${suspended.port}`,
+      });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /versioning is suspended/);
+      assert.equal(suspended.versions.get(KEY).length, 1, 'no new version was written');
+      assert.equal(suspended.deletes.length, 0, 'nothing was deleted');
+      assert.equal(suspended.objects.get(KEY), body);
+    } finally {
+      await suspended.close();
+    }
+  });
+
+  it('C-55: an error other than "not found" while checking for an earlier backup stops the run (fails closed)', async () => {
+    const broken = await startFakeS3({ versioned: true });
+    try {
+      broken.objects.set(KEY, Buffer.from('the only backup'));
+      // The 403 also breaks the later HEADs: the unchanged body proves the refusal came before the upload.
+      broken.faults.failHead = true;
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${broken.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /cannot check for an earlier backup/);
+      assert.equal(broken.objects.get(KEY).toString(), 'the only backup');
+    } finally {
+      await broken.close();
     }
   });
 

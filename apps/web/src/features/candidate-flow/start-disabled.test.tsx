@@ -31,7 +31,9 @@ describe('start is held back until the token hand-off is decided (FU-FEB-10)', (
       /cannot be started from this page yet/i,
     );
     await user.click(button);
-    expect(screen.queryByText(/enter fullscreen to begin/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('dialog', { name: /share your entire screen/i }),
+    ).not.toBeInTheDocument();
     expect(seen.some((r) => r.url.endsWith('/test/start'))).toBe(false);
   });
 });

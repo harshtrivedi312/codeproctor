@@ -7,7 +7,7 @@
 //   media chunk      every 10 s per stream (SCREEN, WEBCAM, AUDIO):
 //                                 POST /candidate/session/media/presign, PUT to object storage,
 //                                 POST /candidate/session/media/confirm
-//   code run         once a minute (optional)  POST /candidate/answers/:questionId/run
+//   code run         once a minute (optional)  POST /candidate/answers/:sessionQuestionId/run
 // That is about 1.4 requests per second per candidate (280 per second at 200 candidates).
 //
 // Nothing here logs a token, a key, a signature, a presigned URL or a request body. Failures are
@@ -255,7 +255,7 @@ function mediaChunk(stream) {
 function codeRun() {
   const t0 = Date.now();
   const res = api(
-    `/candidate/answers/${state.entry.questionId}/run`,
+    `/candidate/answers/${state.entry.sessionQuestionId}/run`,
     JSON.stringify({ language: 'python', code: RUN_CODE }),
     'run',
   );

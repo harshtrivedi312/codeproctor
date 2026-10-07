@@ -60,7 +60,12 @@ function parseRetryAfter(header: string | null, body: unknown): number | null {
 async function request<T>(
   schema: ZodType<T>,
   path: string,
-  options: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; authed: boolean },
+  options: {
+    method?: 'GET' | 'POST' | 'PUT';
+    body?: unknown;
+    authed: boolean;
+    signal?: AbortSignal;
+  },
 ): Promise<ApiResult<T>> {
   return requestAt(schema, `/session${path}`, options);
 }
@@ -72,7 +77,13 @@ async function request<T>(
 export async function requestAt<T>(
   schema: ZodType<T>,
   path: string,
-  options: { method?: 'GET' | 'POST' | 'PUT'; body?: unknown; authed: boolean },
+  options: {
+    method?: 'GET' | 'POST' | 'PUT';
+    body?: unknown;
+    authed: boolean;
+    /** Aborts the request (a timeout). An aborted call is reported as `network`. */
+    signal?: AbortSignal;
+  },
 ): Promise<ApiResult<T>> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -92,6 +103,7 @@ export async function requestAt<T>(
       credentials: 'omit',
       cache: 'no-store',
       referrerPolicy: 'no-referrer',
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch {
     return { ok: false, kind: 'network' };
