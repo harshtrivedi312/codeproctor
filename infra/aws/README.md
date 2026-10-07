@@ -250,7 +250,7 @@ python3 -m venv .venv && .venv/bin/pip install pyyaml
 ```
 
 `test_isolation.py` runs 154 cases and 16 structural checks on the CI role, the Route 53 guard and the trust
-policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 171 cases and 47 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
+policy (a DENY expectation means an explicit deny, so removing a guard statement fails cases) (owner `example-owner`, repo `example-repo`, account `111111111111`). `test_data_buckets.py` runs 174 cases and 48 structural checks on the buckets, the key, the expiry role, the alarms, a model of the backup
 lifecycle, and the proof (with the real CI policies) that CI can only put the two manifests. A case can expect
 "no explicit deny" or "implicit deny" when the real allow is a policy the test does not model. Each case row
 lists the context keys supplied by hand. TC IDs are for QA to allocate (`docs/test-cases.md` has no DEP
@@ -302,7 +302,7 @@ presigned URLs; whether `ec2messages` is needed.
   `If-None-Match`, so once this stack is live every erasure append and complete would get AccessDenied, and an erasure
   done in the database but not recorded in the list would come back on a restore. `append` is idempotent and re-puts
   the same `<stamp>-<uuid>.json` key, so a retry returns 412. **The data stack must not be applied for pilot use until
-  `erasure-list.sh` writes with `s3api put-object --if-none-match '*'` and treats 412 as success** (FU-QA-18).
+  `erasure-list.sh` writes with `s3api put-object --if-none-match '*'` and treats 412 as success** (a 409 from concurrent conditional writes is retried, never treated as success; FU-QA-18).
 - **Owner:** please confirm that freshness alarms firing while the instance is stopped for more than 2 days is
   intended.
 
