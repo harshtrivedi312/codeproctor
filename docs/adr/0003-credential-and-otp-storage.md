@@ -77,3 +77,12 @@ Self-service "forgot password" was a gap; D-22 put it in scope (section 6).
   - reset links expire after 30 minutes (staff invite links after 72 hours);
   - invite and reset share the two `set_password_*` columns;
   - a reset clears the login lockout.
+
+## Proposed amendment: refresh reuse grace (owner approval required, not in force)
+
+Status: Proposed. A rotated refresh token that comes back is treated as theft and revokes its family (TC-005). Two legitimate cases trip this today: two tabs refreshing at once (the loser signs out both) and a rotation response lost after commit (the retry carries the old cookie). Both are session-handling defects.
+
+Proposal: a token rotated less than 10 seconds ago, whose successor has not been used, answers the fixed 401 without revoking the family and without the theft audit or alert. The browser holds the cookie set by the winning response, so the client retries once and succeeds. After the 10 seconds, or if the successor has been used, reuse revokes the family as now. The grace is a constant (`REFRESH_REUSE_GRACE_MS`, default 10000) and may be set to 0 to switch it off.
+
+Cost: an attacker who steals a token and uses it within 10 seconds of the owner's rotation gets a 401 instead of triggering revocation. They still receive no token, and their next use after the grace revokes the family. Backend builds this only after the owner accepts it.
+
