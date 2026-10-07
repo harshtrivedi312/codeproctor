@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Proposed** 2026-10-07. The owner accepts or amends. "(owner decision C-61)" marks what docs/compliance/decisions.md already decides. "(architect detail)" marks what this ADR adds, which the owner must confirm: in particular the keys `idPhotoUpload` and `microphoneNotRequired`, the reason code `CANNOT_MOVE_CAMERA` and the image source column are architect detail, because C-61 approves the alternatives in principle and not their storage. A change to `packages/shared` and a schema change are the owner's under CLAUDE.md rule 7. |
+| Status | **Accepted** 2026-10-07 (D-66): the owner accepted it in the Delivery Lead's session, including the architect details (setting names, reason codes, the 15-minute upload link, the 10 MB limit, what reviewers see); the Delivery Lead records the decision in docs/status.md. Later edits need their own owner approval. It was Proposed on 2026-10-07. "(owner decision C-61)" marks what docs/compliance/decisions.md already decides. "(architect detail)" marks what this ADR adds, which the owner must confirm: in particular the keys `idPhotoUpload` and `microphoneNotRequired`, the reason code `CANNOT_MOVE_CAMERA` and the image source column are architect detail, because C-61 approves the alternatives in principle and not their storage. A change to `packages/shared` and a schema change are the owner's under CLAUDE.md rule 7. |
 | Author | architecture hub |
 | Decides | The stored accommodation keys, shared types, API, audit, lock, projections, privacy handling and retention that FR-305, FR-402 and FR-403 need after C-61: uncapped extra time, the assistive input label, the microphone path, the ID photo upload and the room-scan alternative |
 | Does not decide | The slot length and ceiling per session (ADR 0017 4.3, FR-306); the UI wording (frontend); the consent text (the Delivery Lead, with the DPIA) |
@@ -85,6 +85,8 @@
 - **QA:** TC-115, TC-116 and TC-117.
 
 ## 9. Owner questions
+
+Answered 2026-10-07 (D-66): all four are accepted as written below.
 
 1. Accept the keys of section 2, including the architect details named in the Status row.
 2. Accept the schema change of section 6 (one column, one enum, one CHECK).
