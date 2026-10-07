@@ -25,6 +25,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Local demo run (pnpm demo:up): logs and process ids
+.demo/
+
 # Local database volumes and data directories
 pgdata/
 infra/data/

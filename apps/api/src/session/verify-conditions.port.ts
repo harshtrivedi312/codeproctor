@@ -19,7 +19,7 @@
 //   SIDE_CAMERA   STRICT tests only. There is no stored evidence of a connected side camera yet
 //                 (BE-10), so a STRICT session is never verified by this default.
 import { Injectable } from '@nestjs/common';
-import type { SessionTx } from './session-lock.port';
+import type { SessionTx } from './session-state.service';
 import { isSystemCheckPassed } from './system-check';
 
 export const VERIFY_CONDITIONS = ['SYSTEM_CHECK', 'IDENTITY', 'ROOM_SCAN', 'SIDE_CAMERA'] as const;

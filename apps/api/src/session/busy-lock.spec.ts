@@ -1,4 +1,4 @@
-import { SessionLockRetryError } from './session-lock.port';
+import { SessionLockRetryError } from '../database/errors';
 import { BUSY_LOCK_RETRY_AFTER_SECONDS, busyLockToProblem, isBusyLockError } from './busy-lock';
 
 const withCode = (code: string, wrap = 0): Error => {

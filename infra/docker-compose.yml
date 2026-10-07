@@ -1,5 +1,6 @@
-# Local infrastructure for CodeProctor: PostgreSQL 16, Redis 8.8 and Adminer.
-# Judge0 is added in BE-05. The app role is created by a DB-03 migration (ADR 0006 section 7); there is no init script.
+# Local infrastructure for CodeProctor: PostgreSQL 16, Redis 8.8, Adminer, and for the local demo
+# (DL-52, D-67) Mailpit (a dev mail sink) and MinIO (an S3-compatible object store). The worker is
+# behind the `worker` profile until it has an entrypoint. Judge0 is added in BE-05. The app role is created by a DB-03 migration (ADR 0006 section 7); there is no init script.
 #
 # Run from the repository root (credentials come from .env, see .env.example):
 #   pnpm dev:infra
@@ -62,6 +63,78 @@ services:
       retries: 6
       start_period: 5s
 
+  # Mailpit catches every email the API sends (candidate one-time codes, invitations) so a local run
+  # needs no real mail server and nothing leaves the machine. Local development only: the API's
+  # smtp-dev mail adapter (Mailpit v1.21) is refused unless APP_ENV is exactly "development". Web UI: http://localhost:8025
+  mailpit:
+    image: axllent/mailpit@sha256:81370195cd4a0eab9604d17c2617a7525b0486f9365555253b6c5376c6350f1a
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:1025:1025'
+      - '127.0.0.1:8025:8025'
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  # MinIO is the local S3-compatible object store (media, ID images, consent PDFs, reports). The two
+  # buckets are created when the container starts and the browser-upload CORS is set for the local web
+  # origin only (MinIO answers the preflight for the method asked, so both uploads (PUT) and recording playback
+  # (GET) work from that origin; checked). The S3_* values in .env point here; the pilot uses real S3 (ADR 0001 section 2.1).
+  # Console: http://localhost:9001 (the MINIO_ROOT_* values from .env).
+  # Image: the official minio/minio images are no longer published to Docker Hub or Quay, so this is the
+  # frozen Bitnami build of MinIO 2025.7.23 (bitnamilegacy, no further updates). Acceptable for a local run
+  # with synthetic data only; it must never be used in a shared environment.
+  minio:
+    image: bitnamilegacy/minio@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
+    restart: unless-stopped
+    entrypoint:
+      - sh
+      - -c
+      - '[ -n "$${MINIO_ROOT_USER:-}" ] && [ -n "$${MINIO_ROOT_PASSWORD:-}" ] || { echo "MINIO_ROOT_USER and MINIO_ROOT_PASSWORD must be set in .env (see .env.example)" >&2; exit 1; }; exec /opt/bitnami/scripts/minio/entrypoint.sh "$$@"'
+      - sh
+    # An entrypoint override drops the image's CMD, so name it again.
+    command: ['/opt/bitnami/scripts/minio/run.sh']
+    environment:
+      # No defaults: the Bitnami image would otherwise start with a publicly known login (minio/miniosecret).
+      # The entrypoint below refuses to start unless both are set (a `${VAR:?}` here would make a plain
+      # `docker compose config` fail without a .env, which CI runs).
+      - MINIO_ROOT_USER
+      - MINIO_ROOT_PASSWORD
+      - MINIO_DEFAULT_BUCKETS=codeproctor-media,codeproctor-backup
+      - MINIO_API_CORS_ALLOW_ORIGIN=http://localhost:3000
+    ports:
+      - '127.0.0.1:9000:9000'
+      - '127.0.0.1:9001:9001'
+    volumes:
+      - minio_data:/bitnami/minio/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1']
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  # The analysis worker (Python 3.12, FastAPI). Off by default: apps/worker has modules and tests but
+  # no entrypoint yet (Integrity B adds it). Start with `docker compose --profile worker up -d` once
+  # it exists; the build context and command below are the plan, not a working service.
+  worker:
+    profiles: ['worker']
+    build:
+      context: ../apps/worker
+    restart: unless-stopped
+    environment:
+      - APP_ENV=development
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - '127.0.0.1:8000:8000'
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:
+  minio_data:

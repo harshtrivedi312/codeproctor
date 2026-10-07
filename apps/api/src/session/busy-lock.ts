@@ -4,7 +4,7 @@
 // retry for a job. One mapper, so every caller answers the same way.
 import { HttpStatus } from '@nestjs/common';
 import { CodedHttpException } from '../common/coded.exception';
-import { SessionLockRetryError } from './session-lock.port';
+import { SessionLockRetryError } from '../database/errors';
 
 /**
  * 55P03 lock_timeout, 40P01 deadlock_detected, P2034 Prisma write conflict or deadlock, and P2028
