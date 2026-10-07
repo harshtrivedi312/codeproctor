@@ -142,6 +142,11 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
   'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
   'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  // Reviewer read API (REVIEWER and SUPER_ADMIN): role matrix, cross-org 404, audit in apps/api/src/review/review.e2e-spec.ts. BE13_DEFAULT stays false.
+  'GET /review/queue': 'apps/api/src/review/review.e2e-spec.ts',
+  'GET /review/sessions/:id': 'apps/api/src/review/review.e2e-spec.ts',
+  'GET /review/sessions/:id/recordings/:recordingId/playback':
+    'apps/api/src/review/review.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
@@ -1473,7 +1478,8 @@ export const BE03_ROUTES: Be03Route[] = [
     method: 'GET',
     template: '/review/queue',
     permission: 'review_queue:read',
-    audit: null, // ASSUMED: the queue lists sessions but opens none
+    audit: { action: 'REVIEW_QUEUE_VIEWED', entityType: 'session' }, // built: apps/api/src/review
+    interceptor: true,
     mutating: false,
     ok: [200],
     prepare: () =>
@@ -1490,7 +1496,8 @@ export const BE03_ROUTES: Be03Route[] = [
     template: '/review/sessions/:id',
     permission: 'review_session:read',
     // TC-006 expected result: a row with actor, entity, IP when a reviewer opens a review. FR-105.
-    audit: { action: 'REVIEW_SESSION_VIEWED', entityType: 'session' }, // ASSUMED action name
+    audit: { action: 'REVIEW_SESSION_VIEWED', entityType: 'session' }, // built: apps/api/src/review
+    interceptor: true,
     mutating: false, // a read, but audited: the audit test treats `audit !== null` as the rule
     ok: [200],
     prepare: async (h, orgId) => {

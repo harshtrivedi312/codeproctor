@@ -95,7 +95,7 @@ Verify: unit tests for both services, including TC-072 and TC-094 (both the imme
 
 ```text
 Create infra/scripts/backup.sh that runs pg_dump in custom format, gzips it, uploads it through the S3-compatible storage interface to a backup bucket named from env (Cloudflare R2 on staging; AWS S3 on pilot and production, so candidate data stays in AWS), and deletes backups older than 14 days. Create infra/scripts/restore.sh that restores a named backup into a fresh database.
-Add a GitHub Actions workflow (scheduled nightly) that runs the backup against staging using repository secrets.
+Backups run from the owner's side, not from GitHub (C-63): no scheduled GitHub workflow and no GitHub secrets. The pilot's backups are the shutdown dump and the WAL and base backups of ADR 0017 section 5.3; staging uses the local backup script.
 Verify: run backup then restore locally into a new database and compare row counts.
 ```
 

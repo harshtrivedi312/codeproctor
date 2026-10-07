@@ -79,7 +79,11 @@ test.describe('FR-103 role-based navigation', () => {
     await mainNav(page).locator('a[href="/admin/questions"]').click();
     await expect(page.getByRole('heading', { name: 'Question bank' })).toBeVisible();
     await expectNoAxeViolations(page);
-    for (const href of ['/admin/review', '/admin/live', '/admin/reports']) {
+    // The review queue is real now (D-67 demo; its own tests run axe on it).
+    await mainNav(page).locator('a[href="/admin/review"]').click();
+    await expect(page.getByRole('heading', { name: 'Review queue' })).toBeVisible();
+    await expectNoAxeViolations(page);
+    for (const href of ['/admin/live', '/admin/reports']) {
       await mainNav(page).locator(`a[href="${href}"]`).click();
       await expect(page.getByTestId('section-placeholder')).toBeVisible();
       await expectNoAxeViolations(page);

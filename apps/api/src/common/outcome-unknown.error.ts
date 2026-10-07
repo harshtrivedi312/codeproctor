@@ -4,7 +4,7 @@
 // that repeats the action; 409 or 401 would say nothing true. ProblemFilter maps exactly this type
 // to the generic fixed 500: no code, no Retry-After, no database detail. The error carries only a
 // fixed route label (a constant such as 'users.invite', 'users.invite.reissue', 'auth.2fa.setup.confirm',
-// 'auth.2fa.enroll.confirm' or 'auth.2fa.disable', never an entity id, actor or organisation
+// 'auth.2fa.enroll.confirm', 'auth.2fa.disable' or 'auth.2fa.verify.recovery', never an entity id, actor or organisation
 // id), no cause and no database message: the filter logs the error name and the route, which is
 // the alert signal. Rollbacks (40001, 40P01, P2034) are NOT this type and stay 503 BUSY, and so is
 // contention before the callback returned; other errors before that point are not this type

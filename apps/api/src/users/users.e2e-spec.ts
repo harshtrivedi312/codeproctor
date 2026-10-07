@@ -1105,6 +1105,39 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
       }
     });
 
+    it('DL-42, FU-BE-197, FR-103: an invite whose transaction cannot get a pool connection is 503 BUSY and gives its slot back', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Invite Pool Refund' } })).id;
+      const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+      const { UsersService } =
+        jest.requireActual<typeof import('./users.service')>('./users.service');
+      const svc = app.get(UsersService);
+      const before = Reflect.get(svc, 'inviteLimit') as number;
+      Reflect.set(svc, 'inviteLimit', 1);
+      const busy = jest
+        .spyOn(svc as unknown as { requireSameAdmin: () => Promise<void> }, 'requireSameAdmin')
+        .mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'));
+      try {
+        const send = (n: number): request.Test =>
+          http()
+            .post(`${API}/admin/users`)
+            .set(admin.auth)
+            .send({
+              currentPassword: PASSWORD,
+              email: `poolrefund${n}@example.com`,
+              name: 'R',
+              role: 'AUTHOR',
+            });
+        const res = await send(1).expect(503);
+        expect(res.headers['retry-after']).toBe('2');
+        expect((res.body as { code?: string }).code).toBe('BUSY');
+        await send(1).expect(201);
+        await send(2).expect(429);
+      } finally {
+        busy.mockRestore();
+        Reflect.set(svc, 'inviteLimit', before);
+      }
+    });
+
     it('DL-37, FR-103: a duplicate-email invite whose conflict audit write hits contention is 503 and gives its slot back', async () => {
       const org = (await owner.organization.create({ data: { name: 'Invite Conflict Refund' } }))
         .id;
