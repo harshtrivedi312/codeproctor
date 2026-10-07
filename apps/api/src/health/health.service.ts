@@ -10,6 +10,12 @@ import { PG_POOL, REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 /** How long a finished Prisma ping answers later /health calls. */
 const PING_CACHE_MS = 1_000;
 
+interface PingEntry {
+  startedAt: number;
+  settledAt?: number;
+  result: Promise<void>;
+}
+
 export type DependencyState = 'up' | 'down';
 export interface HealthReport {
   status: 'ok' | 'error';
@@ -19,8 +25,8 @@ export interface HealthReport {
 @Injectable()
 export class HealthService {
   private readonly timeoutMs: number;
-  private lastPing?: { at: number; result: Promise<void> };
-  private pingInFlight = false;
+  private readonly maxPingAgeMs: number;
+  private ping?: PingEntry;
 
   constructor(
     @Inject(PG_POOL) private readonly pool: Pool,
@@ -29,6 +35,7 @@ export class HealthService {
     private readonly prisma: PrismaService,
   ) {
     this.timeoutMs = config.get('HEALTH_TIMEOUT_MS', { infer: true });
+    this.maxPingAgeMs = this.timeoutMs + config.get('DB_CONNECT_TIMEOUT_MS', { infer: true });
   }
 
   async check(): Promise<HealthReport> {
@@ -36,7 +43,8 @@ export class HealthService {
       this.probe(async () => {
         await this.pool.query('SELECT 1');
         // Also through Prisma's own pool and query path, which serves every request: the app is
-        // only ready when that path works, and the probe warms it after a boot (FU-BE-194).
+        // only ready when that path works (FU-BE-194). It keeps the pool's connection warm only if
+        // the health interval is below DB_IDLE_TIMEOUT_MS; do not rely on it for that.
         await this.pingPrisma();
       }),
       this.probe(async () => {
@@ -52,25 +60,32 @@ export class HealthService {
 
   /**
    * Single-flight with a short cache: /health is public and unthrottled, so a flood must not queue
-   * pings on the request pool. At most one ping is in flight (a timed-out ping stays in pg-pool's
-   * queue until DB_CONNECT_TIMEOUT_MS, so it is shared, not repeated), and its outcome is reused
-   * for PING_CACHE_MS (B1).
+   * pings on the request pool. Callers within a window share one promise: an unsettled ping for up
+   * to `maxPingAgeMs`, a settled one for PING_CACHE_MS. A ping that is still unsettled after
+   * `maxPingAgeMs` (DB_CONNECT_TIMEOUT_MS + HEALTH_TIMEOUT_MS: one full connect or pool-slot wait
+   * plus one full probe window) is abandoned and one new ping starts, because the connect timeout
+   * is not a query timeout: a ping that got a connection and never gets an answer (blackholed
+   * network, paused DB host) would otherwise pin /health at "down" after Postgres recovers. Only
+   * while a ping waits for a pool slot or a connection does it end at DB_CONNECT_TIMEOUT_MS.
    */
   private pingPrisma(): Promise<void> {
     const now = Date.now();
-    if (this.lastPing && (this.pingInFlight || now - this.lastPing.at < PING_CACHE_MS)) {
-      return this.lastPing.result;
+    const current = this.ping;
+    if (current) {
+      const fresh =
+        current.settledAt === undefined
+          ? now - current.startedAt < this.maxPingAgeMs
+          : now - current.settledAt < PING_CACHE_MS;
+      if (fresh) return current.result;
     }
-    const result = this.prisma.ping();
-    const entry = { at: now, result };
-    this.lastPing = entry;
-    this.pingInFlight = true;
-    const done = (): void => {
-      this.pingInFlight = false;
-      entry.at = Date.now();
+    const entry: PingEntry = { startedAt: now, result: this.prisma.ping() };
+    this.ping = entry;
+    // Per entry: an abandoned ping settling late must not touch the entry that replaced it.
+    const settled = (): void => {
+      entry.settledAt = Date.now();
     };
-    result.then(done, done);
-    return result;
+    entry.result.then(settled, settled);
+    return entry.result;
   }
 
   private async probe(fn: () => Promise<void>): Promise<DependencyState> {

@@ -50,12 +50,75 @@ describe('HealthService Redis probe (NFR-03, QA-D-04)', () => {
   };
 
   it('FU-BE-194 B1: N concurrent /health checks run exactly one Prisma ping, and a check right after reuses it', async () => {
-    const ping = jest.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
-    const svc = make(ping);
-    const reports = await Promise.all(Array.from({ length: 25 }, () => svc.check()));
-    expect(reports.every((x) => x.status === 'ok')).toBe(true);
-    await svc.check();
-    expect(ping).toHaveBeenCalledTimes(1);
+    jest.useFakeTimers();
+    try {
+      const ping = jest.fn(() => Promise.resolve());
+      const svc = make(ping);
+      const reports = await Promise.all(Array.from({ length: 25 }, () => svc.check()));
+      expect(reports.every((x) => x.status === 'ok')).toBe(true);
+      await jest.advanceTimersByTimeAsync(500); // inside the 1 s cache window
+      await svc.check();
+      expect(ping).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('FU-BE-194 B1: concurrent checks after the cache expires produce exactly one new ping', async () => {
+    jest.useFakeTimers();
+    try {
+      const ping = jest.fn(() => Promise.resolve());
+      const svc = make(ping);
+      await svc.check();
+      await jest.advanceTimersByTimeAsync(1_100);
+      await Promise.all(Array.from({ length: 10 }, () => svc.check()));
+      expect(ping).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('FU-BE-194 S1: a rejecting ping reports down, and after the cache window a new ping reports up (no stale down)', async () => {
+    jest.useFakeTimers();
+    try {
+      const ping = jest
+        .fn<Promise<void>, []>()
+        .mockRejectedValueOnce(new Error('boom'))
+        .mockResolvedValue(undefined);
+      const svc = make(ping);
+      expect((await svc.check()).checks.postgres).toBe('down');
+      expect((await svc.check()).checks.postgres).toBe('down'); // still inside the cache window
+      expect(ping).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(1_100);
+      expect((await svc.check()).checks.postgres).toBe('up');
+      expect(ping).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('FU-BE-194 B1: a ping hung past the cap is abandoned; the next check starts one new ping and reports up once Postgres is back', async () => {
+    jest.useFakeTimers();
+    try {
+      // Cap is DB_CONNECT_TIMEOUT_MS + HEALTH_TIMEOUT_MS = 300 + 300 in this config.
+      const ping = jest
+        .fn<Promise<void>, []>()
+        .mockImplementationOnce(() => new Promise<void>(() => undefined))
+        .mockResolvedValue(undefined);
+      const svc = make(ping);
+      const first = svc.check();
+      await jest.advanceTimersByTimeAsync(300); // probe window: down
+      expect((await first).checks.postgres).toBe('down');
+      const second = svc.check(); // within the cap: shares the hung ping
+      await jest.advanceTimersByTimeAsync(300);
+      expect((await second).checks.postgres).toBe('down');
+      expect(ping).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(100); // now past the cap
+      expect((await svc.check()).checks.postgres).toBe('up');
+      expect(ping).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('FU-BE-194 B1: a hanging ping is shared, not repeated, by later checks while it is in flight', async () => {

@@ -27,6 +27,7 @@ export class PrismaService implements OnModuleInit, OnApplicationShutdown {
     this.base = createPrismaClient(config.get('DATABASE_URL', { infer: true }), {
       max: config.get('DB_POOL_MAX', { infer: true }),
       connectionTimeoutMillis: config.get('DB_CONNECT_TIMEOUT_MS', { infer: true }),
+      idleTimeoutMillis: config.get('DB_IDLE_TIMEOUT_MS', { infer: true }),
     });
     this.warmupTimeoutMs = config.get('DB_WARMUP_TIMEOUT_MS', { infer: true });
     this.client = createOrgScopedClient(this.base, orgContext);

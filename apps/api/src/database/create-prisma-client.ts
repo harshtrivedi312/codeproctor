@@ -11,6 +11,8 @@ import { PrismaClient } from '../generated/prisma/client.js';
 /** pg's own defaults are max 10 and connectionTimeoutMillis 0 (wait forever): FU-BE-194. */
 export const DEFAULT_POOL_MAX = 10;
 export const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
+/** pg-pool's own default is 10 s, which closes a warmed-up connection soon after boot. */
+export const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 
 export interface PoolOptions {
   /** Most connections the pool opens. */
@@ -20,6 +22,8 @@ export interface PoolOptions {
    * semantics). Not a query timeout. Never 0: pg reads 0 as "wait forever".
    */
   connectionTimeoutMillis?: number;
+  /** How long an idle connection stays open, in ms. Used only if above 0, else the default. */
+  idleTimeoutMillis?: number;
 }
 
 export function createPrismaClient(connectionString: string, pool: PoolOptions = {}): PrismaClient {
@@ -31,6 +35,10 @@ export function createPrismaClient(connectionString: string, pool: PoolOptions =
         pool.connectionTimeoutMillis && pool.connectionTimeoutMillis > 0
           ? pool.connectionTimeoutMillis
           : DEFAULT_CONNECT_TIMEOUT_MS,
+      idleTimeoutMillis:
+        pool.idleTimeoutMillis && pool.idleTimeoutMillis > 0
+          ? pool.idleTimeoutMillis
+          : DEFAULT_IDLE_TIMEOUT_MS,
     }),
     // No code frame in error messages (FU-DB-70). Never add `log: ['query']` or a query event
     // listener here: they print every query with its parameters. 'minimal' still leaves values in

@@ -415,12 +415,14 @@ describe('FU-BE-194 database pool settings', () => {
     expect(env.DB_POOL_MAX).toBe(10);
     expect(env.DB_CONNECT_TIMEOUT_MS).toBe(5_000);
     expect(env.DB_WARMUP_TIMEOUT_MS).toBe(5_000);
+    expect(env.DB_IDLE_TIMEOUT_MS).toBe(60_000);
   });
 
   it.each([
     ['DB_POOL_MAX', ['0', '-1', '1.5', '51', '']],
     ['DB_CONNECT_TIMEOUT_MS', ['0', '-1', '1.5', '60001', '']],
     ['DB_WARMUP_TIMEOUT_MS', ['0', '-1', '1.5', '60001', '']],
+    ['DB_IDLE_TIMEOUT_MS', ['0', '-1', '1.5', '3600001', '']],
   ])('FU-BE-194: %s refuses 0, negatives, fractions, above-max and an empty value', (name, bad) => {
     for (const value of bad) {
       expect(() => validateEnv({ ...valid, [name]: value })).toThrow(new RegExp(name));

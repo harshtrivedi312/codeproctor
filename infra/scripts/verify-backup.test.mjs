@@ -833,23 +833,64 @@ describe('DB-07 versioned backups (NFR-03, ADR 0017 5.3, C-55)', { skip }, () =>
     assert.equal(r.status, 1);
     assert.match(r.stderr, /does not exist/);
   });
+
   it('C-55: versioned mode on a store that does not version fails loudly', async () => {
     const plain = await startFakeS3({ versioned: false });
     try {
       const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
       assert.equal(r.status, 1, r.stderr);
       assert.match(r.stderr, /not versioned/);
-      // The previous backup is not replaced when the existing object already shows the bucket is unversioned.
-      const before = plain.objects.get(KEY);
-      const again = await run(BACKUP, [], {
-        ...env,
-        S3_ENDPOINT: `http://127.0.0.1:${plain.port}`,
-      });
-      assert.equal(again.status, 1, again.stderr);
-      assert.match(again.stderr, /not versioned/);
-      assert.equal(plain.objects.get(KEY), before, 'the existing object was not overwritten');
     } finally {
       await plain.close();
+    }
+  });
+
+  it('C-55: an existing object in an unversioned bucket is never overwritten (the refusal comes before the upload)', async () => {
+    const plain = await startFakeS3({ versioned: false });
+    try {
+      const existing = Buffer.from('the only backup');
+      plain.objects.set(KEY, existing);
+      const before = plain.objects.get(KEY);
+      assert.ok(before, 'the fixture really has an existing object');
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${plain.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /Nothing was uploaded/);
+      assert.equal(plain.objects.get(KEY), existing, 'the existing object was not overwritten');
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it('C-55: an existing object whose version id is "null" (versioning suspended) is not overwritten either', async () => {
+    const suspended = await startFakeS3({ versioned: true });
+    try {
+      const body = Buffer.from('the only backup');
+      suspended.objects.set(KEY, body);
+      suspended.versions.set(KEY, [{ id: 'null', body, meta: {} }]);
+      const r = await run(BACKUP, [], {
+        ...env,
+        S3_ENDPOINT: `http://127.0.0.1:${suspended.port}`,
+      });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /Nothing was uploaded/);
+      assert.equal(suspended.objects.get(KEY), body);
+    } finally {
+      await suspended.close();
+    }
+  });
+
+  it('C-55: an error other than "not found" while checking for an earlier backup stops the run (fails closed)', async () => {
+    const broken = await startFakeS3({ versioned: true });
+    try {
+      broken.objects.set(KEY, Buffer.from('the only backup'));
+      // The 403 also breaks the later HEADs: the unchanged body proves the refusal came before the upload.
+      broken.faults.failHead = true;
+      const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${broken.port}` });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /cannot check for an earlier backup/);
+      assert.equal(broken.objects.get(KEY).toString(), 'the only backup');
+    } finally {
+      await broken.close();
     }
   });
 

@@ -27,6 +27,14 @@ describe('Prisma pool bounds (FU-BE-194, NFR-09)', () => {
     url = `postgresql://app_user:x@127.0.0.1:${port}/db`;
   });
 
+  // The first Prisma client in a process also loads the query compiler, which can be slow on a
+  // loaded machine; do that once here so the timed tests below measure only the connect bound.
+  beforeAll(async () => {
+    const warm = createPrismaClient(url, { connectionTimeoutMillis: 300, max: 1 });
+    await warm.$queryRaw`SELECT 1`.catch(() => undefined);
+    await warm.$disconnect().catch(() => undefined);
+  });
+
   afterAll(async () => {
     sockets.forEach((s) => s.destroy());
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -47,7 +55,6 @@ describe('Prisma pool bounds (FU-BE-194, NFR-09)', () => {
     try {
       const started = Date.now();
       const outcome = await bounded(client.$queryRaw`SELECT 1`);
-      expect(outcome).not.toBe('hung');
       expect(outcome).toBeInstanceOf(Error);
       expect(Date.now() - started).toBeLessThan(GUARD_MS);
     } finally {
