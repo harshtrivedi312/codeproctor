@@ -119,7 +119,7 @@ Room-scan note: BE-12 ingest may try to probe or transcode the placeholder chunk
 ## Tests
 
 ```sh
-node --test packages/qa/k6/seed/test/seed.test.mjs   # 33 tests, local mock only, no network beyond 127.0.0.1
+node --test packages/qa/k6/seed/test/seed.test.mjs   # 35 tests, local mock only, no network beyond 127.0.0.1
 ```
 
 `mock/mock-api.mjs` is the stand-in (staff login with optional TOTP, invitations, a Mailpit-style sink, OTP, consent, system check, room scan with a presigned PUT, start-test with a delay before VERIFIED, proctor-key once-only, erasure, fault injection for 429/503/500). It is not the product.

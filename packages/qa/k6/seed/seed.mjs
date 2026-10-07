@@ -216,16 +216,27 @@ async function cleanup({ cfg, staff, runId, say, log }) {
   } catch {
     throw new Error('Cannot read the manifest file for this run.');
   }
-  if (manifest.runId !== runId) throw new Error('The manifest belongs to a different run id.');
-  if (manifest.orgName !== cfg.orgName)
-    throw new Error('The manifest belongs to a different organisation.');
+  const itemOk = (i) =>
+    i !== null &&
+    typeof i === 'object' &&
+    typeof i.candidateId === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(i.candidateId) &&
+    Number.isInteger(i.index) &&
+    i.index >= 0;
   if (
+    manifest === null ||
+    typeof manifest !== 'object' ||
+    Array.isArray(manifest) ||
     typeof manifest.runId !== 'string' ||
     !Array.isArray(manifest.items) ||
+    !manifest.items.every(itemOk) ||
     (manifest.sessionsFile !== undefined && typeof manifest.sessionsFile !== 'string')
   ) {
     throw new Error('The manifest file is malformed.');
   }
+  if (manifest.runId !== runId) throw new Error('The manifest belongs to a different run id.');
+  if (manifest.orgName !== cfg.orgName)
+    throw new Error('The manifest belongs to a different organisation.');
   // Refuse an unsafe sessions-file path now, before any erasure, not after the manifest says
   // cleaned. The file to remove must be the one this run was started with (SEED_OUT / --out), or,
   // without it, the manifest's own base name: a hand-edited manifest cannot name another file.
@@ -237,7 +248,10 @@ async function cleanup({ cfg, staff, runId, say, log }) {
       : cfg.manifest.endsWith('.manifest.json')
         ? cfg.manifest.slice(0, -'.manifest.json'.length)
         : null;
-    if (expected === null || path.resolve(expected) !== sessionsFile) {
+    if (expected === null) {
+      throw new Error('Set SEED_OUT to the sessions file this run was started with.');
+    }
+    if (expected !== sessionsFile) {
       throw new Error(
         'The manifest names a different sessions file than SEED_OUT or its own name.',
       );
