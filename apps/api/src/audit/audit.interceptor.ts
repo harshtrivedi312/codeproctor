@@ -63,12 +63,12 @@ export class AuditInterceptor implements NestInterceptor {
           // that already happened. A fixed error with no cause is never remapped (the filter
           // answers a bare 500, as before; an HttpException would add a detail the QA contract
           // for this route does not expect), so no Retry-After is sent. The response data stays
-          // dropped (fail closed). Class name only is logged.
+          // dropped (fail closed). Class name and the audit action only are logged.
           this.logger.error(
-            { errorName: e instanceof Error ? e.name : 'NonError' },
+            { errorName: e instanceof Error ? e.name : 'NonError', auditAction: options.action },
             'Audit write failed after the handler committed',
           );
-          throw new AuditWriteAfterCommitError();
+          throw new AuditWriteAfterCommitError(options.action);
         }
         return data;
       }),
