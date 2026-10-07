@@ -493,7 +493,7 @@ export class RetentionRepository {
   }
 
   /** The per-candidate lock R-10 and erasure both take: one candidate per transaction, before any row lock (ADR 0004 9.4). */
-  private async candidateLock(tx: Tx, candidateId: string): Promise<void> {
+  async candidateLock(tx: Tx, candidateId: string): Promise<void> {
     await this.orgContext.runRawSql(
       'per-candidate erasure advisory lock (ADR 0004 9.4)',
       () =>
@@ -699,7 +699,7 @@ export class RetentionRepository {
   }
 }
 
-type Tx = Parameters<Parameters<PrismaService['client']['$transaction']>[0]>[0];
+export type Tx = Parameters<Parameters<PrismaService['client']['$transaction']>[0]>[0];
 
 function marker(tier: RetentionTier, orgId: string, sessionId: string, runId: string) {
   return {

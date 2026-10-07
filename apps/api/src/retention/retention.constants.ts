@@ -19,6 +19,21 @@ export const ERASURE_RESERVED_ACTIONS = {
   EMAIL_SENT: 'ERASURE_EMAIL_SENT',
   EMAIL_FAILED: 'ERASURE_EMAIL_FAILED',
   COMPLETED: 'ERASURE_COMPLETED',
+  /** A super admin recorded that the candidate was told by hand: gates anonymisation. */
+  NOTICE_RECORDED: 'ERASURE_NOTICE_RECORDED',
+  /** The fence time of a session: completion waits for it plus the settle window. */
+  FENCED: 'ERASURE_SESSION_FENCED',
+  /** A verified purge pass of a session (metadata `at` = when the pass began): gates the post-completion skip. */
+  SESSION_PURGED: 'ERASURE_SESSION_PURGED',
+  /** The erasure list entry was completed: gates the sweep's exit. */
+  LIST_COMPLETED: 'ERASURE_LIST_COMPLETED',
+} as const;
+
+/** Non-reserved audit actions of the erasure run (ids and the request id only). */
+export const ERASURE_AUDIT_ACTIONS = {
+  DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
+  ALERT_RAISED: 'ERASURE_ALERT_RAISED',
+  REQUESTED: 'ERASURE_REQUESTED',
 } as const;
 
 export type RetentionTier = keyof typeof RETENTION_MARKER_ACTIONS;
@@ -57,3 +72,7 @@ export const consentPrefix = (orgId: string, sessionId: string): string =>
 export const FACE_SUBPREFIXES = ['identity/', 'evidence/sealed/'] as const;
 /** The report objects: kept by the media tier, deleted by the results tier (C-26). */
 export const REPORTS_SUBPREFIX = 'reports/';
+
+/** The re-run waits for the fence time + this + the storage sweep margin, so in-flight uploads have landed (ADR 0004 9.5 step 7). */
+export const ERASURE_RERUN_BASE_SECONDS = 60;
+export const STORAGE_SWEEP_MARGIN_SECONDS = 30;
