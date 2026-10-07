@@ -937,7 +937,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
         throw new UnauthorizedException('Authentication required.');
       }
-      // Failure rule (FR-104, TC-005, DL-37, FU-BE-197). This transaction inserts the new refresh
+      // Failure rule (FR-104, TC-005, DL-37, hub ruling FU-BE-207; pool exhaustion is FU-BE-197). This transaction inserts the new refresh
       // token and flips the old one to revoked. If the commit landed on the server but the client
       // saw P2028 or a lost connection, a 503 would invite a retry with the OLD token, which is now
       // revoked, and reuse detection would kill the whole family (a forced logout that looks like
@@ -953,8 +953,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (!callbackStarted) throw e;
       const code = lockContentionCode(e);
       if (!callbackFinished && code !== undefined && code !== 'P2028') throw e;
+      // Name and fixed code token only, never the message (it can hold SQL and values).
       this.logger.error(
-        `Refresh rotation outcome unknown (${errorName(e)}) REFRESH_ROTATE_UNKNOWN`,
+        `Refresh rotation outcome unknown (${errorName(e)}, ${code ?? 'no-code'}) REFRESH_ROTATE_UNKNOWN`,
       );
       throw new UnauthorizedException('Authentication required.');
     }

@@ -8,6 +8,7 @@ import {
   Post,
   Req,
   Res,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   ApiAcceptedResponse,
@@ -292,9 +293,25 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthSessionDto | undefined> {
-    const outcome = await this.auth.refresh(readRefreshCookie(req), ctxOf(req));
-    setRefreshCookie(res, outcome);
-    return outcome.body.session;
+    try {
+      const outcome = await this.auth.refresh(readRefreshCookie(req), ctxOf(req));
+      setRefreshCookie(res, outcome);
+      return outcome.body.session;
+    } catch (e) {
+      // A refused refresh cookie can never succeed later (unknown, expired, revoked, or the fixed
+      // outcome-unknown 401 whose commit may have landed). Clear it so a later page load or tab
+      // does not send a revoked token and trip reuse detection (FR-104, TC-005, FU-BE-207).
+      // A 503 BUSY keeps the cookie: that retry is safe by construction.
+      if (e instanceof UnauthorizedException) {
+        res.clearCookie(REFRESH_COOKIE, {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'strict',
+          path: cookieOptions.path,
+        });
+      }
+      throw e;
+    }
   }
 
   @Public()

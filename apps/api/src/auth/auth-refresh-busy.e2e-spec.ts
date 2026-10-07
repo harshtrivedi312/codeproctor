@@ -1,13 +1,15 @@
-// FR-104, TC-005, DL-37, FU-BE-197: the refresh rotation transaction inserts the new token and
+// FR-104, TC-005, DL-37, FU-BE-207: the refresh rotation transaction inserts the new token and
 // revokes the old one. Only a clean pre-commit failure may answer 503 BUSY (a retry with the same
 // token is safe); an outcome-unknown failure answers the fixed 401, so the client signs in again
 // instead of retrying with a token that may already be revoked (which reuse detection would read
-// as theft and kill the family). No TC id covers the failure split; names cite FR-104/TC-005.
+// as theft and kill the family). Hub ruling FU-BE-207 (pool exhaustion is FU-BE-197). No TC id covers the failure split; names cite FR-104/TC-005.
 import { INestApplication } from '@nestjs/common';
 import { hash } from '@node-rs/argon2';
+import { Client } from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { createPrismaClient } from '../database/create-prisma-client';
+import type { OrgContextService } from '../database/org-context';
 import type { PrismaService } from '../database/prisma.service';
 import type { Prisma } from '../generated/prisma/client';
 import { PrismaClient, UserRole } from '../generated/prisma/client';
@@ -27,22 +29,25 @@ function pgError(code: string): Error {
   return Object.assign(new Error('synthetic database failure'), { code });
 }
 
-function p2028(): Error {
+function prismaError(code: string): Error {
   // The app loads its own module copy after jest.resetModules; instanceof needs that same class.
   const { Prisma: AppPrisma } = jest.requireActual<typeof import('../generated/prisma/client')>(
     '../generated/prisma/client',
   );
   return new AppPrisma.PrismaClientKnownRequestError('synthetic', {
-    code: 'P2028',
+    code,
     clientVersion: 'test',
   });
 }
 
-describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', () => {
+const p2028 = (): Error => prismaError('P2028');
+
+describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', () => {
   let infra: TestInfra;
   let app: INestApplication<App>;
   let prisma: PrismaClient;
   let svc: PrismaService;
+  let orgContext: OrgContextService;
   let orgId: string;
   let seq = 0;
   let logged: string[] = [];
@@ -70,6 +75,9 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', ()
     configureApp(app);
     await app.init();
     svc = app.get(Svc);
+    const { OrgContextService: Ctx } =
+      jest.requireActual<typeof import('../database/org-context')>('../database/org-context');
+    orgContext = app.get(Ctx);
   });
 
   afterAll(async () => {
@@ -179,7 +187,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', ()
   const liveCount = (userId: string): Promise<number> =>
     prisma.refreshToken.count({ where: { userId, revokedAt: null } });
 
-  it('FR-104, TC-005, DL-37, FU-BE-197: P2028 at commit (the commit really landed) is the fixed 401, the family is not revoked, and a later retry with the old token is reuse', async () => {
+  it('FR-104, TC-005, DL-37, FU-BE-207: P2028 at commit (the commit really landed) is the fixed 401, the family is not revoked, and a later retry with the old token is reuse', async () => {
     const { userId, cookie } = await signedIn();
     failAfterCallback(p2028, true);
     expectFixed401(await refresh(cookie));
@@ -191,7 +199,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', ()
     expect(await liveCount(userId)).toBe(0);
   });
 
-  it('FR-104, TC-005, DL-37, FU-BE-197: P2028 after the callback finished with nothing committed is the fixed 401, no state change, and the old token still works', async () => {
+  it('FR-104, TC-005, DL-37, FU-BE-207: P2028 after the callback finished with nothing committed is the fixed 401, no state change, and the old token still works', async () => {
     const { userId, cookie } = await signedIn();
     failAfterCallback(p2028, false);
     expectFixed401(await refresh(cookie));
@@ -200,19 +208,116 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', ()
     await refresh(cookie).expect(200);
   });
 
-  it('FR-104, DL-37, FU-BE-197: a lost connection at commit is the fixed 401 and the error log carries a name and a fixed token, never the message', async () => {
+  it.each([true, false])(
+    'FR-104, DL-37, FU-BE-207: a lost connection after the callback finished (commit landed: %s) is the fixed 401, and the error log carries a name and fixed tokens, never the message',
+    async (commit) => {
+      const { userId, cookie } = await signedIn();
+      logged = [];
+      failAfterCallback(
+        () => new Error('Connection terminated unexpectedly secret-marker'),
+        commit,
+      );
+      expectFixed401(await refresh(cookie));
+      restoreTransaction();
+      expect(await liveCount(userId)).toBe(1);
+      const lines = logged.join('');
+      expect(lines).toContain('REFRESH_ROTATE_UNKNOWN');
+      expect(lines).not.toContain('secret-marker');
+    },
+  );
+
+  it.each([
+    ['40001', () => pgError('40001')],
+    ['P2034', () => prismaError('P2034')],
+  ])(
+    'FR-104, DL-37, FU-BE-207: a clean-rollback code (%s) after the callback finished is outcome-unknown: the fixed 401, not 503',
+    async (_name, make) => {
+      const { userId, cookie } = await signedIn();
+      failAfterCallback(make, false);
+      expectFixed401(await refresh(cookie));
+      restoreTransaction();
+      expect(await liveCount(userId)).toBe(1);
+    },
+  );
+
+  it('FR-104, DL-37, FU-BE-207: P2034 inside the callback is a clean rollback: 503 BUSY', async () => {
+    const { cookie } = await signedIn();
+    failInsideCallback(prismaError('P2034'));
+    expectBusy(await refresh(cookie));
+    restoreTransaction();
+    await refresh(cookie).expect(200);
+  });
+
+  it('FR-104, DL-37, FU-BE-207: a non-database error inside the callback is the fixed 401', async () => {
     const { userId, cookie } = await signedIn();
-    logged = [];
-    failAfterCallback(() => new Error('Connection terminated unexpectedly secret-marker'), false);
+    failInsideCallback(new TypeError('synthetic'));
     expectFixed401(await refresh(cookie));
     restoreTransaction();
     expect(await liveCount(userId)).toBe(1);
-    const lines = logged.join('');
-    expect(lines).toContain('REFRESH_ROTATE_UNKNOWN');
-    expect(lines).not.toContain('secret-marker');
   });
 
-  it('FR-104, DL-37, FU-BE-197: P2028 thrown from inside the callback body is the fixed 401, not 503', async () => {
+  it('FR-104, TC-005, DL-37, FU-BE-207: the fixed 401 clears cp_refresh, writes no audit row, and a later request without the cookie raises no reuse alert', async () => {
+    const { userId, cookie } = await signedIn();
+    failAfterCallback(p2028, true);
+    const res = await refresh(cookie);
+    restoreTransaction();
+    expectFixed401(res);
+    const set = ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? []).filter((c) =>
+      c.startsWith('cp_refresh='),
+    );
+    expect(set).toHaveLength(1);
+    expect(set[0]).toMatch(/^cp_refresh=;/);
+    expect(set[0]).toMatch(/Expires=Thu, 01 Jan 1970/);
+    const reuse = (): Promise<number> =>
+      prisma.auditLog.count({ where: { actorId: userId, action: 'AUTH_REFRESH_REUSE_DETECTED' } });
+    expect(await reuse()).toBe(0);
+    // The browser dropped the cookie: the next load sends none, so nothing trips reuse detection.
+    await request(app.getHttpServer()).post(`${API}/refresh`).expect(401);
+    expect(await reuse()).toBe(0);
+    expect(await liveCount(userId)).toBe(1);
+  });
+
+  it('FR-104, DL-37, FU-BE-207: a real 55P03 on the FOR SHARE of the user row (lock held elsewhere, short lock_timeout) is 503 BUSY, and the old token works after the lock is released', async () => {
+    const { userId, cookie } = await signedIn();
+    const holder = new Client({ connectionString: process.env.DATABASE_URL });
+    await holder.connect();
+    stubTransaction(
+      (real) =>
+        (cb, ...rest) =>
+          real(
+            async (tx) => {
+              return cb(
+                new Proxy(tx, {
+                  get: (target, key, receiver): unknown => {
+                    const value = Reflect.get(target, key, receiver) as unknown;
+                    if (key !== '$queryRaw' || typeof value !== 'function') return value;
+                    // The first raw statement of the rotation runs after a short lock_timeout.
+                    return async (...args: unknown[]) => {
+                      await orgContext.runRawSql('test: short lock_timeout for a real 55P03', () =>
+                        target.$executeRawUnsafe(`SET LOCAL lock_timeout = '200ms'`),
+                      );
+                      return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+                    };
+                  },
+                }),
+              );
+            },
+            ...rest,
+          ),
+    );
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+      expectBusy(await refresh(cookie));
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined);
+      await holder.end();
+      restoreTransaction();
+    }
+    await refresh(cookie).expect(200);
+  });
+
+  it('FR-104, DL-37, FU-BE-207: P2028 thrown from inside the callback body is the fixed 401, not 503', async () => {
     const { userId, cookie } = await signedIn();
     failInsideCallback(p2028());
     expectFixed401(await refresh(cookie));
@@ -221,7 +326,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', ()
   });
 
   it.each(['55P03', '40001', '40P01'])(
-    'FR-104, DL-37, FU-BE-197: SQLSTATE %s on a statement inside the callback is a clean rollback: 503 BUSY with Retry-After, and the old token still works',
+    'FR-104, DL-37, FU-BE-207: SQLSTATE %s on a statement inside the callback is a clean rollback: 503 BUSY with Retry-After, and the old token still works',
     async (code) => {
       const { cookie } = await signedIn();
       failInsideCallback(pgError(code));
@@ -231,7 +336,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-197)', ()
     },
   );
 
-  it('FR-104, DL-37, FU-BE-197: contention or a start timeout before the transaction begins is 503 BUSY with Retry-After, and the old token still works', async () => {
+  it('FR-104, DL-37, FU-BE-207: contention or a start timeout before the transaction begins is 503 BUSY with Retry-After, and the old token still works', async () => {
     const { cookie } = await signedIn();
     for (const err of [pgError('55P03'), p2028()]) {
       stubTransaction(() => () => Promise.reject(err));
