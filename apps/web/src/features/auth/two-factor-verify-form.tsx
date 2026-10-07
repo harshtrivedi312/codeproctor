@@ -21,7 +21,7 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
   const router = useRouter();
   const next = safeNextPath(useSearchParams().get('next'));
   const { pending, signIn, setPending } = useAuth();
-  const [serverError, setServerError] = React.useState<'wrong' | 'network' | null>(null);
+  const [serverError, setServerError] = React.useState<'wrong' | 'network' | 'busy' | null>(null);
   const [useRecovery, setUseRecovery] = React.useState(false);
   // Set once this form has finished the step itself (signed in, or sent back to login with a
   // reason). signIn clears `pending`, and without this the "no challenge" effect below would
@@ -60,6 +60,12 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
         finishedRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=expired');
+      } else if (response.status === 503) {
+        // Never retried here: a code works once inside its 30 s step, so sending the same one
+        // again would be refused as a replay and counted as a failed attempt.
+        setServerError('busy');
+        setValue('code', '');
+        setFocus('code');
       } else {
         setServerError('wrong');
         setValue('code', '');
@@ -77,6 +83,13 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
           {useRecovery
             ? 'Check the recovery code, including every character, and try again. Each recovery code works only once.'
             : 'Codes change every 30 seconds. Wait for a new code in your authenticator app and try again, or use a recovery code.'}
+        </Alert>
+      ) : null}
+      {serverError === 'busy' ? (
+        <Alert tone="info" role="status" title="The service is busy">
+          {useRecovery
+            ? 'Wait a moment, then enter the recovery code again.'
+            : 'Wait for the next code in your authenticator app (they change every 30 seconds), then enter it. The same code cannot be used twice.'}
         </Alert>
       ) : null}
       {serverError === 'network' ? (

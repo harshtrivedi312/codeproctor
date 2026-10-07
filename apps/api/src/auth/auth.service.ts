@@ -46,7 +46,7 @@ import { CodedForbiddenException, disableRefused, reauthFailed } from '../common
 import { hitWindowCounter } from '../common/redis-counter';
 import { PasswordService } from './password.service';
 import { RefreshOutcomeUnknownException } from './refresh-outcome-unknown.exception';
-import { TotpService } from './totp.service';
+import { TotpService, type TotpMarkHandle } from './totp.service';
 
 export const MAX_FAILED_LOGINS = 5;
 export const LOCKOUT_MINUTES = 15;
@@ -100,6 +100,33 @@ function isRetryable(e: unknown): boolean {
     e instanceof ServiceUnavailableException ||
     lockContentionCode(e) !== undefined
   );
+}
+
+/** Where a transaction got to; set by the callback itself (FU-BE-208, same idea as rotate()). */
+interface TxPhase {
+  started: boolean;
+  finished: boolean;
+}
+
+/**
+ * True only when a failed transaction certainly rolled back (FU-BE-208, DL-37, api-contract
+ * section 8): it never started (pool wait, contention on BEGIN), or a lock-contention error hit
+ * before the callback finished (55P03, 40P01, 40001, P2034, and P2028 inside the callback, which
+ * is a rollback), or the commit itself failed with 40001 or 40P01 (a serialization failure or
+ * deadlock at COMMIT is a rollback). Anything else after the callback finished (P2028, P1017, a
+ * connection error at COMMIT) is an unknown outcome. `extra` adds callback-body failures the
+ * caller knows are rollbacks too (a refusal thrown by our own code before the callback finished).
+ */
+function isCleanRollback(phase: TxPhase, e: unknown, extra?: (e: unknown) => boolean): boolean {
+  if (!phase.started) return true;
+  const code = lockContentionCode(e);
+  if (phase.finished) return code === '40001' || code === '40P01';
+  return code !== undefined || (extra?.(e) ?? false);
+}
+
+/** Gives a used-step TOTP key back after a clean rollback; never throws (FU-BE-208). */
+async function releaseMark(mark: TotpMarkHandle): Promise<void> {
+  await mark.release?.().catch(() => undefined);
 }
 
 /** Attempts and pause for the refresh paths' revokeFamily (api-contract section 8, Refresh). */
@@ -509,14 +536,19 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
     const checkedSecret = user.totpSecretEnc;
-    const valid = checkedSecret ? await this.verifyTotp(user, checkedSecret, code) : false;
+    // The used-step key this code leaves behind: given back only after a clean rollback below.
+    const mark: TotpMarkHandle = {};
+    const valid = checkedSecret ? await this.verifyTotp(user, checkedSecret, code, mark) : false;
     if (!valid) {
       await this.registerFailure(user, ctx);
       throw this.invalidCode();
     }
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
+    const phase: TxPhase = { started: false, finished: false };
     try {
       const session = await this.prisma.client.$transaction(async (tx) => {
+        phase.started = true;
+        phase.finished = false; // a re-run of the callback must not keep a stale flag
         const enabled = await tx.user.updateMany({
           // The secret must still be the one the code was checked against.
           where: {
@@ -535,15 +567,20 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
           throw new AlreadyEnrolledSignal();
         }
         await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, {}, tx);
+        let opened: SessionOutcome | undefined;
         if (!openSession) {
           await this.clearFailures(user, tx);
-          return undefined;
+        } else {
+          // The row was loaded before the update above, so report the state just written.
+          opened = await this.startSession({ ...user, totpEnabled: true }, tx);
         }
-        // The row was loaded before the update above, so report the state just written.
-        return this.startSession({ ...user, totpEnabled: true }, tx);
+        phase.finished = true;
+        return opened;
       });
       return { session, recoveryCodes: codes };
     } catch (e) {
+      // FU-BE-208: after a clean rollback the same code must work again (the 503 invites a retry).
+      if (isCleanRollback(phase, e)) await releaseMark(mark);
       // The code was right, so the reservation is not a failed guess.
       await this.refundAttempt(user).catch(() => undefined);
       if (e instanceof AlreadyEnrolledSignal) {
@@ -560,9 +597,14 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * TOTP check for a reserved attempt. A Redis outage throws a 503 and gives the reservation
    * back, so an outage can neither count as a failed guess nor lock anyone out.
    */
-  private async verifyTotp(user: User, encryptedSecret: string, code: string): Promise<boolean> {
+  private async verifyTotp(
+    user: User,
+    encryptedSecret: string,
+    code: string,
+    mark?: TotpMarkHandle,
+  ): Promise<boolean> {
     try {
-      return await this.totp.verify(user.id, encryptedSecret, code);
+      return await this.totp.verify(user.id, encryptedSecret, code, mark);
     } catch (e) {
       await this.refundAttempt(user).catch(() => undefined);
       // The caller must not refund this same failure a second time (DL-37).
@@ -607,13 +649,17 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // Same status and message as a wrong code, so a locked account is indistinguishable.
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
     let wrongCode = false;
+    const mark: TotpMarkHandle = {};
+    // The TOTP path has no transaction: the family INSERT is one statement, so a lock error before
+    // it returned is a clean failure; once it returned, a later failure is not (FU-BE-208).
+    const insert = { done: false };
     try {
       if (/^\d{6}$/.test(code)) {
-        if (!(await this.verifyTotp(user, secret, code))) {
+        if (!(await this.verifyTotp(user, secret, code, mark))) {
           wrongCode = true; // a failed guess is never refunded (DL-37)
           return await this.failCode(user, ctx);
         }
-        return await this.startSession(user, this.prisma.client, secret);
+        return await this.startSession(user, this.prisma.client, secret, insert);
       }
       const hash = sha256Hex(normalizeRecoveryCode(code));
       // Removing the code and opening the session are one transaction, so a password change that
@@ -633,6 +679,17 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         return this.startSession(user, tx, secret);
       });
     } catch (e) {
+      // FU-BE-208: only a statement-level lock error before the INSERT returned is certainly clean.
+      if (
+        !wrongCode &&
+        !insert.done &&
+        isCleanRollback({ started: true, finished: false }, e) &&
+        // Defensive: the signal is only thrown after the INSERT returned (insert.done), so this
+        // never matters today; it keeps a refused session from ever releasing the mark.
+        !(e instanceof PasswordChangedSignal)
+      ) {
+        await releaseMark(mark);
+      }
       // A wrong recovery code is a failed guess: counted by failCode, returned before any refund
       // below, so it is never refunded (DL-37).
       if (e instanceof WrongRecoveryCodeSignal) return this.failCode(user, ctx);
@@ -698,33 +755,47 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     if (!user.totpEnabled) throw new ConflictException('Two-factor authentication is not on.');
     const secret = user.totpSecretEnc;
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw disableRefused();
-    if (!secret || !(await this.verifyTotp(user, secret, totpCode))) {
+    const mark: TotpMarkHandle = {};
+    if (!secret || !(await this.verifyTotp(user, secret, totpCode, mark))) {
       await this.registerFailure(user, ctx);
       throw disableRefused();
     }
     // Both factors passed: the reservation is not a failed guess.
     await this.refundAttempt(user).catch(() => undefined);
     if (TOTP_REQUIRED_ROLES.includes(user.role)) throw this.twoFactorRequiredForRole();
-    await this.prisma.client.$transaction(async (tx) => {
-      const updated = await tx.user.updateMany({
-        where: {
-          id: user.id,
-          passwordHash: user.passwordHash ?? '',
-          totpEnabled: true,
-          totpSecretEnc: secret,
-          role: { notIn: [...TOTP_REQUIRED_ROLES] },
-        },
-        data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+    const phase: TxPhase = { started: false, finished: false };
+    try {
+      await this.prisma.client.$transaction(async (tx) => {
+        phase.started = true;
+        phase.finished = false; // a re-run of the callback must not keep a stale flag
+        const updated = await tx.user.updateMany({
+          where: {
+            id: user.id,
+            passwordHash: user.passwordHash ?? '',
+            totpEnabled: true,
+            totpSecretEnc: secret,
+            role: { notIn: [...TOTP_REQUIRED_ROLES] },
+          },
+          data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+        });
+        if (updated.count !== 1) await this.explainRefusedChange(tx, user, true, disableRefused);
+        const revoked = await tx.refreshToken.updateMany({
+          where: { userId: user.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+        await this.validity.invalidateIssuedTokens(user.id);
+        await this.audit(user, 'AUTH_2FA_DISABLED', ctx, { sessionsRevoked: revoked.count }, tx);
+        phase.finished = true;
       });
-      if (updated.count !== 1) await this.explainRefusedChange(tx, user, true, disableRefused);
-      const revoked = await tx.refreshToken.updateMany({
-        where: { userId: user.id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
-      await this.validity.invalidateIssuedTokens(user.id);
-      await this.audit(user, 'AUTH_2FA_DISABLED', ctx, { sessionsRevoked: revoked.count }, tx);
-    });
+    } catch (e) {
+      // FU-BE-208: after a clean rollback the same code must work again. A Redis outage while
+      // writing the token marker (our own 503, thrown before the callback finished) is one too.
+      if (isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException)) {
+        await releaseMark(mark);
+      }
+      throw e;
+    }
   }
 
   /** Replaces all recovery codes with 10 new ones; the old ones stop working at once. */
@@ -1453,6 +1524,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     user: UserWithOrg,
     db: Db = this.prisma.client,
     boundTotpSecret?: string,
+    insert?: { done: boolean },
   ): Promise<SessionOutcome> {
     const refreshToken = newOpaqueToken();
     // The access token is signed BEFORE the refresh family commits, so its iat can never be later
@@ -1490,6 +1562,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
           FOR SHARE OF u
           RETURNING id`),
     );
+    if (insert) insert.done = true;
     if (inserted.length !== 1) throw new PasswordChangedSignal();
     await this.clearFailures(user, db);
     return { body, refreshToken };

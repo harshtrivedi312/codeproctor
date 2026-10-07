@@ -1,6 +1,7 @@
 'use client';
 import { Menu, X } from 'lucide-react';
 import * as React from 'react';
+import { BusyNotice } from '@/components/busy-notice';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/features/auth/auth-provider';
@@ -60,6 +61,7 @@ function ShellFrame({ children }: { children: React.ReactNode }): React.JSX.Elem
             <ThemeToggle />
           </div>
         </header>
+        <BusyNotice />
         <main id="main" className="p-4">
           <Breadcrumbs />
           {children}
