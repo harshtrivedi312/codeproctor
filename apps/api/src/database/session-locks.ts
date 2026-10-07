@@ -204,11 +204,16 @@ async function lockSession(
   let status = await readStatus(tx, sessionId);
   for (let attempt = 1; attempt <= MAX_LOCK_ATTEMPTS; attempt += 1) {
     if (stopOnErased && readsAsErased(status)) return { outcome: 'erased' };
-    const where: SessionLockWhere =
+    // The two calls are written out as object literals so FR-106's status-writer scan (BE-07's
+    // status-writers.spec.ts, PR #293) can read them: `data` is exactly `{ status }`, and `where` names the
+    // same `status` (the compare-and-set), the id and, for guardLive, the ERASED exclusion.
+    const { count } =
       stopOnErased && ERASED !== undefined
-        ? { id: sessionId, status, NOT: { status: ERASED } }
-        : { id: sessionId, status };
-    const { count } = await tx.session.updateMany({ where, data: { status } });
+        ? await tx.session.updateMany({
+            where: { id: sessionId, status, NOT: { status: ERASED } },
+            data: { status },
+          })
+        : await tx.session.updateMany({ where: { id: sessionId, status }, data: { status } });
     if (count > 0) return { outcome: 'locked', status };
     // 0 rows: the status changed between the read and the write. Look again.
     status = await readStatus(tx, sessionId);
