@@ -24,6 +24,11 @@ export class DirectMailSender {
       html: rendered.html,
       text: rendered.text,
     };
+    // A template that says 'attached' must never go out without the file (the queue's processor
+    // guards the same case).
+    if (rendered.attachmentFilename !== undefined && !attachment) {
+      throw new MailError('attachment missing', 'none', true);
+    }
     if (attachment) {
       if (attachment.content.length === 0) throw new MailError('attachment empty', 'none', true);
       if (attachment.content.length > MAX_ATTACHMENT_BYTES) {

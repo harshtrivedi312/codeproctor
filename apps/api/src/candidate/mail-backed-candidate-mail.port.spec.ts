@@ -45,12 +45,12 @@ function capture(): { sent: OutgoingMail[]; transport: MailTransport } {
 describe('MailBackedCandidateMailPort (FR-106, FR-401)', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('FR-106: the OTP mail carries the code and test name, escaped, and the code never reaches logs', async () => {
+  it('FR-106: the OTP mail carries the code but no recruiter-written test name, and the code never reaches logs', async () => {
     const { sent, transport } = capture();
     const r = rig(transport);
     await r.port.sendOtp(TO, {
       code: CODE,
-      testName: 'Algo <b>1</b> & "co"',
+      testName: 'Algo <b>1</b> & "co" https://evil.example/x',
       expiresInMinutes: 10,
     });
     r.restore();
@@ -59,8 +59,12 @@ describe('MailBackedCandidateMailPort (FR-106, FR-401)', () => {
     expect(first(sent).subject).toBe('Your verification code');
     expect(first(sent).text).toContain(CODE);
     expect(first(sent).html).toContain(CODE);
-    expect(first(sent).html).toContain('Algo &lt;b&gt;1&lt;/b&gt; &amp; &quot;co&quot;');
-    expect(first(sent).html).not.toContain('<b>1</b>');
+    // The header rule: no recruiter free text in a candidate mail (the test name is not included).
+    expect(first(sent).text).toContain('your assessment');
+    for (const body of [first(sent).html, first(sent).text]) {
+      expect(body).not.toContain('Algo');
+      expect(body).not.toContain('evil.example');
+    }
     expect(first(sent).attachment).toBeUndefined();
     for (const l of r.lines) expect(l).not.toContain(CODE);
   });
@@ -143,6 +147,19 @@ describe('MailBackedCandidateMailPort (FR-106, FR-401)', () => {
     ).rejects.toBeInstanceOf(MailError);
   });
 
+  it('FR-401: a consent copy sent without its attachment is refused rather than mailed as "attached"', async () => {
+    const { transport, sent } = capture();
+    const sender = new DirectMailSender(transport);
+    await expect(
+      sender.send({
+        template: 'consent-copy',
+        to: TO,
+        params: { documentVersion: 'v1', signedAt: new Date().toISOString() },
+      }),
+    ).rejects.toBeInstanceOf(MailError);
+    expect(sent).toHaveLength(0);
+  });
+
   it('FR-401: an empty PDF is refused rather than mailed as "attached"', async () => {
     const { transport, sent } = capture();
     const { port } = rig(transport);
@@ -173,14 +190,20 @@ describe('MailBackedCandidateMailPort reaches both transports (FR-106, DL-54, C-
     process.env.AWS_SECRET_ACCESS_KEY = 'fake-secret-for-tests-only';
     smtp = createTcp((socket) => {
       let inData = false;
+      let tail = '';
       socket.write('220 sink ESMTP\r\n');
       socket.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf8');
         smtpData.push(text);
         if (inData) {
-          if (text.includes('\r\n.\r\n')) {
+          // The end-of-data marker can be split across TCP chunks: look at the joined tail.
+          const seen = tail + text;
+          if (seen.includes('\r\n.\r\n')) {
             inData = false;
+            tail = '';
             socket.write('250 queued\r\n');
+          } else {
+            tail = seen.slice(-8);
           }
           return;
         }

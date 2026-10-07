@@ -12,7 +12,7 @@ export interface TemplateParams {
   invitation: { inviteUrl: string; windowStartsAt: string; windowEndsAt: string };
   reminder: { inviteUrl: string; windowEndsAt: string };
   results: Record<string, never>;
-  otp: { otp: string; minutes: number; testName?: string };
+  otp: { otp: string; minutes: number };
   'otp-lockout': {
     candidateEmail: string;
     minutes: number;
@@ -159,10 +159,9 @@ export function renderMail(job: EmailJob, opts: RenderOptions = {}): RenderedMai
         'Thank you for taking the assessment. The hiring team will contact you about next steps.',
       ]);
     case 'otp':
+      // No recruiter-written text in a candidate mail (header rule): the test name is not included.
       return make('Your verification code', 'Your verification code', [
-        ...(job.params.testName
-          ? [`This code is for the assessment "${stripHeader(job.params.testName)}".`]
-          : []),
+        'This code is for your assessment.',
         `Your code is ${job.params.otp}. It expires in ${job.params.minutes} minutes.`,
         'Never share this code with anyone.',
       ]);

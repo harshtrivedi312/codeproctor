@@ -207,7 +207,7 @@ describe('C-31 planted secrets stay out of logs, errors and records', () => {
     const real = new SmtpDevMailTransport({ host: '127.0.0.1', port: 1, fromAddress: 'a@b.c' });
     const sender = new DirectMailSender(real);
     const jobs: EmailJob[] = [
-      { template: 'otp', to: TO, params: { otp: OTP, minutes: 10, testName: 'PLANTEDTEST' } },
+      { template: 'otp', to: TO, params: { otp: OTP, minutes: 10 } },
       {
         template: 'otp-lockout',
         to: TO,
