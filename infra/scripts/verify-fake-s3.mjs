@@ -9,11 +9,17 @@ import { createServer } from 'node:http';
 const xml = (body) => `<?xml version="1.0" encoding="UTF-8"?>${body}`;
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** failList: every listing answers 500; failHead: every HEAD answers a bare 403; failPut: every PUT does; precondition: every conditional PUT answers 412.
- * @returns {Promise<{ port: number, faults: { failList: boolean, failHead: boolean, failPut: boolean, precondition: boolean }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], puts: Array<{ path: string, conditional: boolean }>, close: () => Promise<void> }>} */
+/** failList: every listing answers 500; failHead: every HEAD answers a bare 403; failPut: every PUT does; precondition: every conditional PUT answers 412; conflicts: the next N conditional PUTs answer 409.
+ * @returns {Promise<{ port: number, faults: { failList: boolean, failHead: boolean, failPut: boolean, precondition: boolean, conflicts: number }, objects: Map<string, Buffer>, versions: Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>, metas: Map<string, Record<string, string>>, deletes: string[], puts: Array<{ path: string, conditional: boolean }>, close: () => Promise<void> }>} */
 export async function startFakeS3({ versioned = false } = {}) {
   /** Set to true to make every listing fail with a 500. */
-  const faults = { failList: false, failHead: false, failPut: false, precondition: false };
+  const faults = {
+    failList: false,
+    failHead: false,
+    failPut: false,
+    precondition: false,
+    conflicts: 0,
+  };
   /** @type {Map<string, Buffer>} key = "bucket/key" */
   const objects = new Map();
   /** @type {Map<string, Array<{ id: string, body: Buffer, meta: Record<string, string> }>>} */
@@ -37,6 +43,13 @@ export async function startFakeS3({ versioned = false } = {}) {
       };
       if (req.method === 'PUT') {
         if (faults.failPut) return send(403);
+        // The next `conflicts` conditional PUTs answer 409 (a concurrent conditional write in flight).
+        if (faults.conflicts > 0 && req.headers['if-none-match'] === '*') {
+          faults.conflicts -= 1;
+          return send(409, xml('<Error><Code>ConditionalRequestConflict</Code></Error>'), {
+            'content-type': 'application/xml',
+          });
+        }
         // A writer that created the key between our listing and our PUT: the condition fails.
         if (faults.precondition && req.headers['if-none-match'] === '*')
           return send(412, xml('<Error><Code>PreconditionFailed</Code></Error>'), {

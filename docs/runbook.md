@@ -42,6 +42,8 @@ settings that a 16 server rejects at restore time; `backup.sh` and `restore.sh` 
 
 ### The erasure list (ADR 0004 R-7)
 
+Entries are written with `aws s3api put-object --if-none-match '*'` (the pilot backup role can create objects but not overwrite or delete them, ADR 0017 5.3). That needs an **AWS CLI that supports conditional writes (a late-2024 release or newer)**; an older CLI fails with "Unknown options" and no erasure is recorded, so check `aws s3api put-object help | grep if-none-match` when you install it. A 412 means the entry already exists (success); a 409 is retried up to 5 times; anything else stops the caller. Erasure entries are written without `BACKUP_SSE`: if the pilot bucket policy ever requires the SSE header on uploads, these writes will be denied. On staging (R2) run `erasure-list.sh append <uuid> 20261005T020000Z` twice once after the first deploy: the second run must exit 0 with "already exists" (R2's support for `If-None-Match` is unconfirmed).
+
 A restore brings back rows that were erased after the backup was taken. To undo that, the ids of
 erased candidates are kept in the backup bucket under `<prefix>erasure-list/`, outside the
 database and its dumps. One object per erasure request, named `<UTC stamp>-<candidate uuid>.json`,
