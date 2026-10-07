@@ -705,6 +705,13 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         return opened;
       });
     } catch (e) {
+      // FU-BE-219 / FU-BE-220: the recovery transaction failed after its callback returned with
+      // anything that is not a rollback code (P2028 or P1017 at COMMIT, a connection error): the
+      // code may be spent and the refresh family created, the token never delivered. Fixed 500,
+      // no release of the challenge (not retryable), no refund, nothing about the code revealed.
+      if (phase.finished && !isCleanRollback(phase, e)) {
+        throw new OutcomeUnknownError('auth.2fa.verify.recovery');
+      }
       // FU-BE-208: only a statement-level lock error before the INSERT returned is certainly clean.
       if (
         !wrongCode &&
