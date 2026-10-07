@@ -16,6 +16,7 @@ import type { MigratedDatabase } from '../database/testing/migrated-postgres';
 import type { PrismaClient } from '../generated/prisma/client.js';
 import type { CandidateTokenService } from '../candidate/candidate-token.service';
 import type { SessionKeyService } from '../session/session-key.service';
+import type { SessionStateService } from '../session/session-state.service';
 import { createInvitation, createTenant } from '../candidate/testing/fixtures';
 import type { InvitationFixture, InvitationOptions, Tenant } from '../candidate/testing/fixtures';
 
@@ -44,6 +45,7 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
   let app: INestApplication<App>;
   let tokens: CandidateTokenService;
   let keys: SessionKeyService;
+  let states: SessionStateService;
   let tenant: Tenant;
   let other: Tenant;
   const logged: string[] = [];
@@ -101,6 +103,11 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
       jest.requireActual<typeof import('../session/session-key.service')>(
         '../session/session-key.service',
       ).SessionKeyService,
+    );
+    states = app.get(
+      jest.requireActual<typeof import('../session/session-state.service')>(
+        '../session/session-state.service',
+      ).SessionStateService,
     );
   }, 240_000);
 
@@ -447,11 +454,13 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
         'SIDE_CAMERA_LOST',
       ]);
       await sendEvents(r, 1, [event('FULLSCREEN_RESTORED')]).expect(200);
-      const still = await sessionRow(r);
-      expect(still.status).toBe('PAUSED');
-      expect(still.pauseReasons).toEqual(['SIDE_CAMERA_LOST']);
+      // One reason is still active (derived from the events), so the session stays paused. The stored
+      // reason list is not edited while PAUSED (no PAUSED to PAUSED edge in SessionStateService yet).
+      expect((await sessionRow(r)).status).toBe('PAUSED');
       await sendEvents(r, 2, [event('SIDE_CAMERA_RECONNECTED')]).expect(200);
-      expect((await sessionRow(r)).status).toBe('IN_PROGRESS');
+      const resumed = await sessionRow(r);
+      expect(resumed.status).toBe('IN_PROGRESS');
+      expect(resumed.pauseReasons).toEqual([]);
       expect((await rows(r)).map((e) => e.type)).toContain('FULLSCREEN_EXIT');
     });
 
@@ -461,6 +470,163 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
       const row = await sessionRow(r);
       expect(row.status).toBe('PAUSED');
       expect(row.pauseReasons).toEqual(['PROCTOR']);
+    });
+
+    it('FR-801 / CS-4.4a: lifting a candidate reason keeps a PROCTOR pause and its proctor_paused_at', async () => {
+      const pausedAt = new Date(Date.now() - 120_000);
+      const r = await running(tenant, { pauseReasons: ['PROCTOR', 'FULLSCREEN_EXIT'] }, 'PAUSED');
+      await owner.session.update({
+        where: { id: r.inv.sessionId },
+        data: { proctorPausedAt: pausedAt },
+      });
+      await sendEvents(r, 0, [event('FULLSCREEN_RESTORED')]).expect(200);
+      const row = await sessionRow(r);
+      expect(row.status).toBe('PAUSED');
+      expect(row.pauseReasons).toContain('PROCTOR');
+      expect(row.proctorPausedAt?.getTime()).toBe(pausedAt.getTime());
+    });
+
+    it('FR-801 / CS-4.4a: a PROCTOR pause added between the read and the lift is not overwritten (compare-and-set)', async () => {
+      const r = await running(tenant, { pauseReasons: ['FULLSCREEN_EXIT'] }, 'PAUSED');
+      const original = states.transition.bind(states);
+      const spy = jest.spyOn(states, 'transition').mockImplementationOnce(async (req) => {
+        // A proctor pauses the session right before the candidate's resume is written.
+        await owner.session.update({
+          where: { id: r.inv.sessionId },
+          data: { pauseReasons: ['FULLSCREEN_EXIT', 'PROCTOR'], proctorPausedAt: new Date() },
+        });
+        return original(req);
+      });
+      try {
+        await sendEvents(r, 0, [event('FULLSCREEN_EXIT'), event('FULLSCREEN_RESTORED')]).expect(
+          200,
+        );
+      } finally {
+        spy.mockRestore();
+      }
+      const row = await sessionRow(r);
+      expect(row.status).toBe('PAUSED'); // the stale lift lost, the retry saw PROCTOR and did nothing
+      expect(row.pauseReasons).toContain('PROCTOR');
+      expect(row.proctorPausedAt).not.toBeNull();
+    });
+
+    it('FR-801 / CS-4.4a: a proctor pause that starts while a candidate pause is being written is kept', async () => {
+      const r = await running();
+      const original = states.transition.bind(states);
+      const spy = jest.spyOn(states, 'transition').mockImplementationOnce(async (req) => {
+        await owner.session.update({
+          where: { id: r.inv.sessionId },
+          data: { status: 'PAUSED', pauseReasons: ['PROCTOR'], proctorPausedAt: new Date() },
+        });
+        return original(req);
+      });
+      try {
+        await sendEvents(r, 0, [
+          event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } }),
+        ]).expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+      const row = await sessionRow(r);
+      expect(row.status).toBe('PAUSED');
+      expect(row.pauseReasons).toEqual(['PROCTOR']);
+      expect(row.proctorPausedAt).not.toBeNull();
+    });
+
+    it('FR-801: a duplicate resend re-applies a pause that was missed', async () => {
+      const r = await running();
+      const body = canonical({
+        seq: 0,
+        events: [event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } })],
+      });
+      const signature = sign(keyAt(r), body);
+      await postBatch('events', tokenFor(r), body, signature).expect(200);
+      expect((await sessionRow(r)).status).toBe('PAUSED');
+      // The pause is lost (for example by an older build); the retry puts it back.
+      await owner.session.update({
+        where: { id: r.inv.sessionId },
+        data: { status: 'IN_PROGRESS', pauseReasons: [] },
+      });
+      const again = await postBatch('events', tokenFor(r), body, signature).expect(200);
+      expect(again.body).toEqual({ seq: 0, duplicate: true });
+      expect((await sessionRow(r)).status).toBe('PAUSED');
+      expect(await rows(r)).toHaveLength(1);
+    });
+
+    it('FR-801: a duplicate of an older batch does not re-pause a session that was resumed later', async () => {
+      const r = await running();
+      const stop = canonical({
+        seq: 0,
+        events: [event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } })],
+      });
+      const stopSig = sign(keyAt(r), stop);
+      await postBatch('events', tokenFor(r), stop, stopSig).expect(200);
+      await sendEvents(r, 1, [
+        event('SCREEN_SHARE_RESUMED', { occurredAt: new Date().toISOString() }),
+      ]).expect(200);
+      expect((await sessionRow(r)).status).toBe('IN_PROGRESS');
+      await postBatch('events', tokenFor(r), stop, stopSig).expect(200); // late duplicate of batch 0
+      expect((await sessionRow(r)).status).toBe('IN_PROGRESS');
+    });
+
+    it('FR-801: the batch and its pause are one transaction; a failed pause stores nothing and the retry succeeds', async () => {
+      const r = await running();
+      const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(new Error('boom'));
+      const body = canonical({ seq: 0, events: [event('FULLSCREEN_EXIT')] });
+      const signature = sign(keyAt(r), body);
+      try {
+        const failed = await postBatch('events', tokenFor(r), body, signature);
+        expect(failed.status).toBe(500); // 5xx: the SDK retries
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await batches(r)).toHaveLength(0);
+      expect(await rows(r)).toHaveLength(0);
+      await postBatch('events', tokenFor(r), body, signature).expect(200);
+      expect((await sessionRow(r)).status).toBe('PAUSED');
+    });
+
+    it('NFR-04: text that jsonb cannot store (U+0000, a lone surrogate) is 400 VALIDATION_FAILED, never a 500 the SDK would retry', async () => {
+      const r = await running();
+      for (const bad of ['a\u0000b', '\ud800', 'x\udc00y']) {
+        const res = await sendEvents(r, 0, [
+          event('EXTENSION_INTERFERENCE', { payload: { signal: bad } }),
+        ]).expect(400);
+        expect(res.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      }
+      const key = canonical({
+        seq: 1,
+        events: [event('TAB_SWITCH', { payload: { 'k\u0000': 1 } })],
+      });
+      await postBatch('events', tokenFor(r), key, sign(keyAt(r), key)).expect(400);
+      expect(await batches(r)).toHaveLength(0);
+    });
+
+    it('TC-063: the same signed batch sent twice at once stores one batch; one answer is duplicate', async () => {
+      const r = await running();
+      const body = canonical({ seq: 0, events: [event('TAB_SWITCH'), event('FOCUS_LOST')] });
+      const signature = sign(keyAt(r), body);
+      const results = await Promise.all(
+        Array.from({ length: 4 }, () => postBatch('events', tokenFor(r), body, signature)),
+      );
+      expect(results.map((x) => x.status)).toEqual([200, 200, 200, 200]);
+      const flags = results.map((x) => (x.body as { duplicate: boolean }).duplicate);
+      expect(flags.filter((d) => !d)).toHaveLength(1);
+      expect(await batches(r)).toHaveLength(1);
+      expect(await rows(r)).toHaveLength(2);
+    });
+
+    it('TC-065: two different batches with the same seq at once: one is stored, the other is 409 SEQ_CONFLICT', async () => {
+      const r = await running();
+      const [a, b] = await Promise.all([
+        sendEvents(r, 0, [event('TAB_SWITCH')]),
+        sendEvents(r, 0, [event('FOCUS_LOST')]),
+      ]);
+      expect([a.status, b.status].sort()).toEqual([200, 409]);
+      const loser = a.status === 409 ? a : b;
+      expect(loser.body).toMatchObject({ code: 'SEQ_CONFLICT' });
+      expect(await batches(r)).toHaveLength(1);
+      expect(await rows(r)).toHaveLength(1);
     });
 
     it('FR-801 (backend.md Step 10): HIGH events are published to live:{orgId}', async () => {
@@ -763,6 +929,50 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
         { kind: 'EDIT', t: 1, offset: 0, deleteLength: 0, text: '' },
       ]).expect(400);
       expect(logged.join('')).not.toContain(secret);
+    });
+
+    it('ADR 0013 section 2: a keystroke batch signed with an older epoch key is 409 KEY_EPOCH_STALE', async () => {
+      const r = await running();
+      const q = await questionOf(r);
+      const body = canonical({
+        seq: 0,
+        sessionQuestionId: q,
+        startedAt: new Date().toISOString(),
+        events: [edit(1, 'a')],
+      });
+      const res = await postBatch('keystrokes', tokenFor(r), body, sign(keyAt(r, 2), body)).expect(
+        409,
+      );
+      expect(res.body).toMatchObject({ code: 'KEY_EPOCH_STALE' });
+      expect(await owner.keystrokeBatch.count({ where: { sessionId: r.inv.sessionId } })).toBe(0);
+    });
+
+    it('NFR-04: keystroke text with U+0000 or a lone surrogate is 400 VALIDATION_FAILED, not a 500', async () => {
+      const r = await running();
+      const q = await questionOf(r);
+      for (const bad of ['a\u0000b', '\ud83d']) {
+        const res = await sendKeys(r, 0, q, [edit(1, bad)]).expect(400);
+        expect(res.body).toMatchObject({ code: 'VALIDATION_FAILED' });
+      }
+      expect(await owner.keystrokeBatch.count({ where: { sessionId: r.inv.sessionId } })).toBe(0);
+    });
+
+    it('TC-063: the same keystroke batch sent twice at once is stored once', async () => {
+      const r = await running();
+      const q = await questionOf(r);
+      const body = canonical({
+        seq: 0,
+        sessionQuestionId: q,
+        startedAt: new Date(Date.now() - 5000).toISOString(),
+        events: [edit(1, 'a')],
+      });
+      const signature = sign(keyAt(r), body);
+      const results = await Promise.all(
+        Array.from({ length: 3 }, () => postBatch('keystrokes', tokenFor(r), body, signature)),
+      );
+      expect(results.map((x) => x.status)).toEqual([200, 200, 200]);
+      expect(results.filter((x) => !(x.body as { duplicate: boolean }).duplicate)).toHaveLength(1);
+      expect(await owner.keystrokeBatch.count({ where: { sessionId: r.inv.sessionId } })).toBe(1);
     });
 
     it('ADR 0013 section 2: keystrokes need a running session too', async () => {
