@@ -44,7 +44,9 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
   const [result, setResult] = React.useState<{ session: AuthSession; codes: string[] } | null>(
     null,
   );
-  const [serverError, setServerError] = React.useState<'wrong' | 'network' | null>(null);
+  const [serverError, setServerError] = React.useState<
+    'wrong' | 'network' | 'busy' | 'other' | null
+  >(null);
 
   const challengeToken = pending?.kind === 'enroll' ? pending.challengeToken : null;
   // Set once this page has sent the user back to sign-in with a reason: clearing `pending` would
@@ -124,10 +126,17 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
         leavingRef.current = true;
         setPending(null);
         router.replace('/admin/login?reason=enroll-unconfirmed');
-      } else {
+      } else if (response.status === 503) {
+        // Never retried: the same code cannot be used twice inside its 30 s step.
+        setServerError('busy');
+        setValue('code', '');
+        setFocus('code');
+      } else if (response.status === 400) {
         setServerError('wrong');
         setValue('code', '');
         setFocus('code');
+      } else {
+        setServerError('other');
       }
     } catch {
       setServerError('network');
@@ -189,6 +198,18 @@ export function TwoFactorEnroll(): React.JSX.Element | null {
           <Alert tone="error" role="alert" title="That code did not match">
             Wait for a fresh code in your app and enter it again. If it keeps failing, check that
             your phone&apos;s clock is set automatically.
+          </Alert>
+        ) : null}
+        {serverError === 'busy' ? (
+          <Alert tone="info" role="status" title="The service is busy">
+            Nothing was changed. Wait for the next code in your authenticator app (they change every
+            30 seconds), then enter it. The same code cannot be used twice.
+          </Alert>
+        ) : null}
+        {serverError === 'other' ? (
+          <Alert tone="error" role="alert" title="Something went wrong">
+            We could not check the code. Try again in a moment. If it keeps happening, contact your
+            administrator.
           </Alert>
         ) : null}
         {serverError === 'network' ? (

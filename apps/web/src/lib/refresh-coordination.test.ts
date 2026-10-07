@@ -285,6 +285,95 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(rb?.accessToken).toBe('tok-A');
   });
 
+  it('TC-005: a queued tab sends nothing when the holder signed out while it waited', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const calls = refreshServer(async () => {
+      await gate;
+      return HttpResponse.json(sessionFor('tok-A'));
+    });
+    const a = await openTab();
+    const b = await openTab();
+    const pa = a.auth.refreshSession();
+    await flush();
+    const pb = b.auth.refreshSession(); // queued behind A
+    await flush();
+    void a.auth.beginSignOut(); // marker set, A's refresh abandoned (nothing is broadcast)
+    release();
+    expect(await pa).toBeNull();
+    expect(await pb).toBeNull();
+    expect(calls.n).toBe(1); // B did not send its own while A's logout is on its way
+    expect(b.token.getAccessToken()).toBeNull();
+  });
+
+  it('TC-005: a waiter that gets the lock after a silent holder, with the sign-out marker set, sends nothing', async () => {
+    const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
+    const b = await openTab();
+    let letGo: () => void = () => undefined;
+    void navigator.locks.request('cp.refresh', () => new Promise<void>((r) => (letGo = r)));
+    const pb = b.auth.refreshSession();
+    await flush();
+    window.localStorage.setItem(b.auth.SIGN_OUT_MARKER_KEY, '1');
+    letGo();
+    expect(await pb).toBeNull();
+    expect(calls.n).toBe(0);
+  });
+
+  it('a holder whose request times out shares the error: both tabs sign out, one request', async () => {
+    const calls = refreshServer(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return HttpResponse.error();
+    });
+    const a = await openTab();
+    const b = await openTab();
+    a.auth.publishSession(sessionFor('old-A'));
+    b.auth.publishSession(sessionFor('old-B'));
+    const [ra, rb] = await Promise.all([a.auth.refreshSession(), b.auth.refreshSession()]);
+    expect(ra).toBeNull();
+    expect(rb).toBeNull();
+    expect(calls.n).toBe(1);
+    expect(a.token.getAccessToken()).toBeNull();
+    expect(b.token.getAccessToken()).toBeNull();
+  });
+
+  it('a stale election entry does not stall a tab: the other tab ending frees it at once', async () => {
+    installFakes(false);
+    const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
+    const b = await openTab();
+    const foreign = new FakeChannel('cp.refresh.channel');
+    foreign.postMessage({ t: 'start', id: 'foreign-tab' });
+    await flush();
+    const pb = b.auth.refreshSession();
+    await flush();
+    foreign.postMessage({ t: 'end', id: 'foreign-tab' }); // it abandoned, no outcome
+    expect((await pb)?.accessToken).toBe('tok-own');
+    expect(calls.n).toBe(1);
+  });
+
+  it('a logout waits for a refresh in another tab (same lock)', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    refreshServer(async () => {
+      await gate;
+      return HttpResponse.json(sessionFor('tok-A'));
+    });
+    const a = await openTab();
+    const { withRefreshLock } = await import('@/lib/refresh-coordination');
+    const pa = a.auth.refreshSession();
+    await flush();
+    let ran = false;
+    const logout = withRefreshLock(() => {
+      ran = true;
+      return Promise.resolve();
+    });
+    await flush();
+    expect(ran).toBe(false);
+    release();
+    await pa;
+    await logout;
+    expect(ran).toBe(true);
+  });
+
   it('an idle tab drops the broadcast outcome: it never holds another tab token', async () => {
     refreshServer(() => HttpResponse.json(sessionFor('tok-A')));
     const a = await openTab();

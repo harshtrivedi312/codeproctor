@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { api, type Schemas } from '@/lib/api/client';
 import { busyStore } from '@/lib/api/busy';
+import { withRefreshLock } from '@/lib/refresh-coordination';
 import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
 import {
   beginSession,
@@ -113,16 +114,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const confirmLogout = React.useCallback(async () => {
     const startedIn = getGeneration();
     logoutOutstanding.current += 1;
-    const call = (async (): Promise<boolean> => {
+    // Inside the cross-tab refresh lock, so a logout never overlaps a refresh in another tab (a
+    // refresh on a family the logout is revoking looks like token reuse, TC-005). The marker is
+    // cleared inside the lock too, so a queued tab still sees "sign-out pending" when it wakes.
+    const call = withRefreshLock(async (): Promise<boolean> => {
       try {
         const { response } = await api.POST('/v1/auth/logout', {
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        return response.ok || response.status === 401;
+        const confirmed = response.ok || response.status === 401;
+        if (confirmed && startedIn === getGeneration()) confirmSignedOut();
+        return confirmed;
       } catch {
         return false;
       }
-    })();
+    }).catch(() => false);
     trackLogout(call);
     const ok = await call;
     logoutOutstanding.current -= 1;

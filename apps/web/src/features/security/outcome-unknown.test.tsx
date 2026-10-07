@@ -108,7 +108,7 @@ describe('2FA setup/confirm answers the fixed 500 (FR-102, FU-BE-208)', () => {
     await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
     expect(
-      await within(dialog()).findByText('Set-up did not go through, so we started it again'),
+      await within(dialog()).findByText('Set-up is not on, so we started it again'),
     ).toBeInTheDocument();
     expect(within(dialog()).getByLabelText('6-digit code')).toHaveValue('');
     expect(calls['POST /v1/auth/2fa/setup/start']).toBe(2);

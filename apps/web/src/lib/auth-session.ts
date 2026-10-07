@@ -246,7 +246,10 @@ async function doRefresh(): Promise<AuthSession | null> {
   const startedIn = generation;
   try {
     await mockingReady;
-    const outcome = await coordinateRefresh(() => sendRefresh(startedIn));
+    const outcome = await coordinateRefresh(
+      () => sendRefresh(startedIn),
+      () => startedIn === generation && !isSignOutPending(),
+    );
     if (!outcome || startedIn !== generation) return null;
     return applyOutcome(startedIn, outcome);
   } catch {

@@ -21,7 +21,9 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
   const router = useRouter();
   const next = safeNextPath(useSearchParams().get('next'));
   const { pending, signIn, setPending } = useAuth();
-  const [serverError, setServerError] = React.useState<'wrong' | 'network' | 'busy' | null>(null);
+  const [serverError, setServerError] = React.useState<
+    'wrong' | 'network' | 'busy' | 'other' | null
+  >(null);
   const [useRecovery, setUseRecovery] = React.useState(false);
   // Set once this form has finished the step itself (signed in, or sent back to login with a
   // reason). signIn clears `pending`, and without this the "no challenge" effect below would
@@ -73,10 +75,13 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
         setServerError('busy');
         setValue('code', '');
         setFocus('code');
-      } else {
+      } else if (response.status === 400) {
         setServerError('wrong');
         setValue('code', '');
         setFocus('code');
+      } else {
+        // A 500 with an authenticator code or any other status: not "the code is wrong".
+        setServerError('other');
       }
     } catch {
       setServerError('network');
@@ -97,6 +102,12 @@ export function TwoFactorVerifyForm(): React.JSX.Element | null {
           {useRecovery
             ? 'Wait a moment, then enter the recovery code again.'
             : 'Wait for the next code in your authenticator app (they change every 30 seconds), then enter it. The same code cannot be used twice.'}
+        </Alert>
+      ) : null}
+      {serverError === 'other' ? (
+        <Alert tone="error" role="alert" title="Something went wrong">
+          We could not check the code. Wait for the next code in your authenticator app and try
+          again. If it keeps happening, go back to sign in and start again.
         </Alert>
       ) : null}
       {serverError === 'network' ? (

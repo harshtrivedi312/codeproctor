@@ -77,16 +77,22 @@ export async function checkInviteOutcome(
   qc: QueryClient,
   email: string,
 ): Promise<'found' | 'missing' | 'unknown'> {
+  const startedIn = getGeneration();
   try {
     const { data } = await api.GET('/v1/admin/users');
-    if (!data) return 'unknown';
+    // The session changed meanwhile: this answer is about someone else's organisation.
+    if (!data || startedIn !== getGeneration()) return 'unknown';
     qc.setQueryData(adminKeys.users, data.items);
     const wanted = email.trim().toLowerCase();
-    return data.items.some((u) => u.email.toLowerCase() === wanted) ? 'found' : 'missing';
+    if (data.items.some((u) => u.email.toLowerCase() === wanted)) return 'found';
+    // The list is paged (the API's default page is 50) and this call reads the first page only:
+    // a full page may hide the person, so "missing" is only claimed for a short list.
+    return data.items.length >= LIST_PAGE_SIZE ? 'unknown' : 'missing';
   } catch {
     return 'unknown';
   }
 }
+const LIST_PAGE_SIZE = 50;
 
 /** What to tell the user after the unknown-outcome 500 on an invite, given what the list says. */
 export const INVITE_UNKNOWN_TEXT = {

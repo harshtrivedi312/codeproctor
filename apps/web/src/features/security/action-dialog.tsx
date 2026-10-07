@@ -496,8 +496,8 @@ function UnconfirmedStep({
       ) : null}
       {state === 'on' ? (
         <Alert tone="warning" role="status" title="Two-factor sign-in is on">
-          Set-up went through, but your recovery codes were lost on the way. Get a new set now. Your
-          authenticator app already works, and nothing needs to be scanned again.
+          Set-up appears to have gone through, but your recovery codes did not reach you. Get a new
+          set now. Your authenticator app already works, and nothing needs to be scanned again.
         </Alert>
       ) : null}
       {state === 'retry' ? (
@@ -592,7 +592,7 @@ function ConfirmStep({
         </p>
       </div>
       {restarted ? (
-        <Alert tone="info" role="status" title="Set-up did not go through, so we started it again">
+        <Alert tone="info" role="status" title="Set-up is not on, so we started it again">
           Scan this new QR code (remove the old entry from your app) and enter a fresh code. The old
           code cannot be used.
         </Alert>

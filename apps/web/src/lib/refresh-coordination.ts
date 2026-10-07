@@ -36,7 +36,11 @@ export type RefreshOutcome =
   /** The request failed (network, timeout). */
   | { kind: 'error' };
 
-type Message = { t: 'start'; id: string } | { t: 'outcome'; id: string; outcome: RefreshOutcome };
+type Message =
+  | { t: 'start'; id: string }
+  /** The election participant is done, whatever the result (frees waiters at once). */
+  | { t: 'end'; id: string }
+  | { t: 'outcome'; id: string; outcome: RefreshOutcome };
 
 const LOCK_NAME = 'cp.refresh';
 const CHANNEL_NAME = 'cp.refresh.channel';
@@ -45,7 +49,7 @@ export const OUTCOME_GRACE_MS = 250;
 /** Fallback election: how long a start announcement waits for a competing lower id. */
 const ELECTION_MS = 150;
 /** Fallback: the longest a tab waits for another tab's refresh before sending its own. */
-const FOREIGN_WAIT_MS = 30_000;
+const FOREIGN_WAIT_MS = 60_000; // longer than the holder's worst case: 4 attempts x 10 s + ~10 s BUSY waits
 
 const myId = makeId();
 let channel: BroadcastChannel | null | undefined;
@@ -69,8 +73,12 @@ function isOutcome(value: unknown): value is RefreshOutcome {
   const v = value as { kind?: unknown; session?: unknown };
   if (v.kind === 'signed-out' || v.kind === 'busy' || v.kind === 'error') return true;
   if (v.kind !== 'session' || typeof v.session !== 'object' || v.session === null) return false;
-  const s = v.session as { accessToken?: unknown; user?: { id?: unknown } };
-  return typeof s.accessToken === 'string' && typeof s.user?.id === 'string';
+  const s = v.session as { accessToken?: unknown; user?: { id?: unknown; role?: unknown } };
+  return (
+    typeof s.accessToken === 'string' &&
+    typeof s.user?.id === 'string' &&
+    typeof s.user.role === 'string'
+  );
 }
 
 function getChannel(): BroadcastChannel | null {
@@ -92,6 +100,12 @@ function onMessage(data: unknown): void {
   if (typeof m.id !== 'string' || m.id === myId) return;
   if (m.t === 'start') {
     foreignActive.set(m.id, Date.now() + FOREIGN_WAIT_MS);
+    return;
+  }
+  if (m.t === 'end') {
+    foreignActive.delete(m.id);
+    // Wake waiters so they re-check; an election waiter with no outcome and nobody left sends.
+    for (const wake of outcomeWaiters) wake();
     return;
   }
   if (m.t !== 'outcome') return;
@@ -139,14 +153,20 @@ function hasLocks(): boolean {
  */
 export async function coordinateRefresh(
   send: () => Promise<RefreshOutcome | null>,
+  /**
+   * Checked right before this tab would send, after any wait for the lock or the election: false
+   * (sign-out pending, session generation changed) means send nothing and return null. A queued
+   * tab must never send for a session that ended while it waited (FR-104, TC-005).
+   */
+  canSend: () => boolean = () => true,
 ): Promise<RefreshOutcome | null> {
   getChannel();
   waiting += 1;
   adopted = null;
   try {
-    if (hasLocks()) return await withLock(send);
-    if (getChannel()) return await withElection(send);
-    return await send();
+    if (hasLocks()) return await withLock(send, canSend);
+    if (getChannel()) return await withElection(send, canSend);
+    return canSend() ? await send() : null;
   } finally {
     waiting -= 1;
     if (waiting === 0) adopted = null;
@@ -155,7 +175,9 @@ export async function coordinateRefresh(
 
 async function sendAndShare(
   send: () => Promise<RefreshOutcome | null>,
+  canSend: () => boolean,
 ): Promise<RefreshOutcome | null> {
+  if (!canSend()) return null;
   const outcome = await send();
   // Not broadcast when this tab abandoned the request (sign-out here): waiters send their own.
   if (outcome) post({ t: 'outcome', id: myId, outcome });
@@ -164,13 +186,14 @@ async function sendAndShare(
 
 async function withLock(
   send: () => Promise<RefreshOutcome | null>,
+  canSend: () => boolean,
 ): Promise<RefreshOutcome | null> {
   // Lock free: nobody else is refreshing, send at once.
   const first = await navigator.locks.request(
     LOCK_NAME,
     { ifAvailable: true },
     async (lock): Promise<{ outcome: RefreshOutcome | null } | null> =>
-      lock ? { outcome: await sendAndShare(send) } : null,
+      lock ? { outcome: await sendAndShare(send, canSend) } : null,
   );
   if (first) return first.outcome;
   // Another tab holds it. Queue; when the lock comes, an outcome the holder broadcast is reused
@@ -178,26 +201,43 @@ async function withLock(
   // release a little, hence the short grace. No outcome (holder closed or abandoned): send ours.
   return navigator.locks.request(LOCK_NAME, async () => {
     if (await waitForAdopted(OUTCOME_GRACE_MS)) return adopted;
-    return sendAndShare(send);
+    return sendAndShare(send, canSend);
   });
 }
 
 async function withElection(
   send: () => Promise<RefreshOutcome | null>,
+  canSend: () => boolean,
 ): Promise<RefreshOutcome | null> {
   const now = Date.now();
   for (const [id, expires] of foreignActive) if (expires < now) foreignActive.delete(id);
-  const others = (): boolean => foreignActive.size > 0;
-  if (!others()) {
-    post({ t: 'start', id: myId });
-    // Give a tab that started at the same moment time to announce; the lower id sends.
-    await new Promise((r) => setTimeout(r, ELECTION_MS));
-    const lower = [...foreignActive.keys()].some((id) => id < myId);
-    if (!lower && !adopted) return sendAndShare(send);
+  let announced = false;
+  try {
+    if (foreignActive.size === 0) {
+      announced = true;
+      post({ t: 'start', id: myId });
+      // Give a tab that started at the same moment time to announce; the lower id sends.
+      await new Promise((r) => setTimeout(r, ELECTION_MS));
+      const lower = [...foreignActive.keys()].some((id) => id < myId);
+      if (!lower && !adopted) return await sendAndShare(send, canSend);
+    }
+    // Wait for the other tab's outcome. Its `end` message wakes us if it finished without one
+    // (abandoned); only then, or after the long wait, do we send our own.
+    const until = Date.now() + FOREIGN_WAIT_MS;
+    while (!adopted && foreignActive.size > 0 && Date.now() < until) {
+      await waitForAdopted(until - Date.now());
+    }
+    if (adopted) return adopted;
+    return await sendAndShare(send, canSend);
+  } finally {
+    if (announced) post({ t: 'end', id: myId });
   }
-  if (await waitForAdopted(FOREIGN_WAIT_MS)) return adopted;
-  // The other tab never reported (closed or crashed): send our own.
-  return sendAndShare(send);
+}
+
+/** Runs `fn` while holding the cross-tab refresh lock (a logout must not overlap a refresh). */
+export function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (!hasLocks()) return fn();
+  return navigator.locks.request(LOCK_NAME, fn);
 }
 
 /** Test-only: forget all coordination state (a fresh tab). */
