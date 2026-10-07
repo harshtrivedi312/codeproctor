@@ -2,8 +2,8 @@ import type { Schemas } from '@/lib/api/client';
 import { humanizeEventType } from '@/features/admin/format';
 
 /*
- * The ONE place that knows the PROVISIONAL review API shapes (openapi: ReviewQueue, ReviewSession,
- * ReviewPlayback). Screens use these types and helpers only, so a change in the real API is a
+ * The ONE place that knows the review API shapes (openapi: ReviewQueue, ReviewSession,
+ * ReviewPlayback; the read routes are REAL, apps/api/src/review). Screens use these types and helpers only, so a change in the real API is a
  * change here. Candidate-written text (answers, notes) is only ever rendered as text.
  */
 
@@ -49,12 +49,12 @@ export const DASH = '-';
 export const eventLabel = (type: string): string => humanizeEventType(type);
 
 export type SeverityTone = 'neutral' | 'warning' | 'error';
-export function severityTone(severity: ReviewEvent['severity']): SeverityTone {
+export function severityTone(severity: string | null): SeverityTone {
   if (severity === 'HIGH') return 'error';
   if (severity === 'MEDIUM') return 'warning';
   return 'neutral';
 }
-export const severityLabel = (severity: ReviewEvent['severity']): string =>
+export const severityLabel = (severity: string | null): string =>
   severity === null ? DASH : severity.charAt(0) + severity.slice(1).toLowerCase();
 
 export function riskLabel(score: number | null): string {
@@ -97,8 +97,21 @@ export function answerBody(answer: ReviewAnswer): AnswerBody {
   const a = answer.answer;
   if (a === null || a === undefined) return { kind: 'text', text: '' };
   if (typeof a === 'string') return { kind: 'text', text: a };
-  if ('selectedOptionIds' in a) return { kind: 'options', ids: a.selectedOptionIds };
-  return { kind: 'code', language: a.language, code: a.code };
+  if (Array.isArray(a)) return { kind: 'options', ids: a.map((x) => String(x)) };
+  if (typeof a === 'object') {
+    const o = a as Record<string, unknown>;
+    if (Array.isArray(o['selectedOptionIds'])) {
+      return { kind: 'options', ids: o['selectedOptionIds'].map((x) => String(x)) };
+    }
+    if (typeof o['code'] === 'string') {
+      return {
+        kind: 'code',
+        language: typeof o['language'] === 'string' ? o['language'] : '',
+        code: o['code'],
+      };
+    }
+  }
+  return { kind: 'text', text: JSON.stringify(a) };
 }
 
 export type ScoringState = 'auto' | 'pending' | 'manual';
@@ -107,6 +120,13 @@ export function scoringState(a: ReviewAnswer): ScoringState {
 }
 export const canScoreManually = (a: ReviewAnswer): boolean =>
   a.type === 'SHORT_ANSWER' && a.scoring !== 'AUTO';
+
+/**
+ * Scoring and the verdict apply only to a session UNDER_REVIEW with no verdict yet
+ * (docs/api-contract.md section 7: GRADED, COMPLETED and APPEALED sessions are 409).
+ */
+export const isDecidable = (s: ReviewSession): boolean =>
+  s.session.status === 'UNDER_REVIEW' && verdictOf(s) === null;
 
 export const pendingCount = (s: ReviewSession): number =>
   s.answers.filter((a) => a.scoring === 'MANUAL_PENDING').length;

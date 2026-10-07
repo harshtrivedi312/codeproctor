@@ -16,15 +16,25 @@ import {
   type Verdict,
   pendingCount,
   verdictOf,
+  isDecidable,
 } from './model';
 import { useSetVerdict } from './queries';
 
+/** Pending answers are 409 in the contract; the code name is ASSUMED until the route exists. */
+export const PENDING_CODE = 'MANUAL_PENDING';
+
 function verdictError(e: unknown): string {
   if (e instanceof ApiFailure && e.status === 409) {
-    return e.code === 'VERDICT_ALREADY_SET'
-      ? 'A verdict is already set for this session.'
-      : 'Some short answers still need scoring. Score them above, then set the verdict.';
+    if (e.code === 'VERDICT_ALREADY_SET') return 'A verdict is already set for this session.';
+    if (e.code === 'SESSION_NOT_UNDER_REVIEW') {
+      return 'This session is not under review right now. The page has been reloaded with its current status.';
+    }
+    if (e.code === PENDING_CODE) {
+      return 'Some short answers still need scoring. Score them above, then set the verdict.';
+    }
+    return 'The session changed since you opened it. The page has been reloaded; check it and try again.';
   }
+  if (e instanceof ApiFailure && e.status === 403) return 'Your role cannot set a verdict.';
   return 'The verdict was not saved. Check your connection and try again.';
 }
 
@@ -49,6 +59,11 @@ export function VerdictPanel({ data }: { data: ReviewSession }): React.JSX.Eleme
         </p>
       ) : !can(role, 'review_verdict:set') ? (
         <p className="text-sm text-muted-foreground">Your role cannot set a verdict.</p>
+      ) : !isDecidable(data) ? (
+        <p className="text-sm text-muted-foreground">
+          A verdict can be set only while the session is under review. This session is{' '}
+          {data.session.status.replace(/_/g, ' ').toLowerCase()}.
+        </p>
       ) : (
         <form
           className="max-w-xl space-y-3"

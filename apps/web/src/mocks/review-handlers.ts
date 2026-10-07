@@ -5,8 +5,8 @@ import { apiBaseUrl } from '@/lib/env';
 import { mockRoleFromToken } from './auth-handlers';
 
 /*
- * Mock review workspace (FR-901, FR-902). PROVISIONAL queue, bundle and playback shapes (see the
- * openapi ReviewQueue / ReviewSession / ReviewPlayback). The scoring route follows
+ * Mock review workspace (FR-901, FR-902). the read routes mirror apps/api/src/review (PR 297: queue, bundle, playback; playback is 503 until
+ * object storage is bound, see mockPlaybackUnavailable). The scoring PATCH follows the contract. The scoring route follows
  * docs/api-contract.md section 7 (binary score, 409 ANSWER_NOT_MANUAL / SESSION_NOT_UNDER_REVIEW /
  * VERDICT_ALREADY_SET). Fake people only; in memory; a page reload resets the demo. The playback
  * url is a tiny generated WAV data url: video elements play its sound with a black picture.
@@ -78,11 +78,6 @@ function answers(pendingShort: boolean): Answer[] {
       scoring: 'AUTO',
       scoringNote: null,
       answer: { selectedOptionIds: ['o-2'] },
-      options: [
-        { id: 'o-1', text: 'O(n)' },
-        { id: 'o-2', text: 'O(log n)' },
-        { id: 'o-3', text: 'O(n log n)' },
-      ],
     },
     {
       sessionQuestionId: 'sq-3',
@@ -102,19 +97,19 @@ function ev(
   id: string,
   min: number,
   type: string,
-  severity: Event['severity'],
+  severity: 'LOW' | 'MEDIUM' | 'HIGH',
   detail: string | null,
 ): Event {
   return { id, at: at(min), type, severity, detail, flagId: null };
 }
 
 const EVENTS_RICH: Event[] = [
-  ev('e1', 6, 'FULLSCREEN_EXIT', 'MEDIUM', 'Left fullscreen for 8 seconds'),
-  ev('e2', 14, 'TAB_SWITCH', 'MEDIUM', 'Another tab was focused for 12 seconds'),
-  ev('e3', 21, 'PASTE_BLOCKED', 'HIGH', 'Paste of 420 characters was blocked'),
-  ev('e4', 27, 'NO_FACE', 'MEDIUM', 'No face in view for 15 seconds'),
-  ev('e5', 33, 'MULTIPLE_FACES', 'HIGH', 'A second face appeared for 6 seconds'),
-  ev('e6', 40, 'RECONNECTED', null, null),
+  ev('1001', 6, 'FULLSCREEN_EXIT', 'MEDIUM', 'Left fullscreen for 8 seconds'),
+  ev('1002', 14, 'TAB_SWITCH', 'MEDIUM', 'Another tab was focused for 12 seconds'),
+  ev('1003', 21, 'PASTE_BLOCKED', 'HIGH', 'Paste of 420 characters was blocked'),
+  ev('1004', 27, 'NO_FACE', 'MEDIUM', 'No face in view for 15 seconds'),
+  ev('1005', 33, 'MULTIPLE_FACES', 'HIGH', 'A second face appeared for 6 seconds'),
+  ev('1006', 40, 'RECONNECTED', 'LOW', null),
 ];
 
 function bundle(
@@ -190,8 +185,14 @@ function recompute(b: Bundle): void {
 }
 
 let state = seed();
+let playbackUnavailable = false;
+/** Demo and tests: playback answers 503 like the real API before object storage is bound. */
+export function mockPlaybackUnavailable(on: boolean): void {
+  playbackUnavailable = on;
+}
 export function resetMockReviewState(): void {
   state = seed();
+  playbackUnavailable = false;
 }
 
 const TITLES: Record<number, string> = {
@@ -297,6 +298,7 @@ export function createReviewHandlers(options: { latencyMs: number }) {
       ({ request, params }) => {
         const denied = allowed(request, 'review_session:read');
         if (denied) return denied;
+        if (playbackUnavailable) return problem(503, 'Object storage is not configured.');
         const b = find(params.sessionId);
         if (!b || !b.recordings.some((r) => r.id === params.recordingId)) {
           return problem(404, 'Not found.');
@@ -362,6 +364,9 @@ export function createReviewHandlers(options: { latencyMs: number }) {
       }
       if (b.verdict?.verdict)
         return problem(409, 'A verdict is already set.', 'VERDICT_ALREADY_SET');
+      if (b.session.status !== 'UNDER_REVIEW') {
+        return problem(409, 'The session is not under review.', 'SESSION_NOT_UNDER_REVIEW');
+      }
       if (b.answers.some((a) => a.scoring === 'MANUAL_PENDING')) {
         return problem(409, 'Short answers are still waiting for a decision.', 'MANUAL_PENDING');
       }

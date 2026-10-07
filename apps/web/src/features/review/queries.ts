@@ -7,7 +7,7 @@ import { BUSY_CODE } from '@/lib/api/busy';
 import type { QueueItem, ReviewPlayback, ReviewSession } from './model';
 
 /*
- * Review workspace hooks (FR-901, FR-902) on the PROVISIONAL queue/bundle/playback routes and the
+ * Review workspace hooks (FR-901, FR-902) on the review read routes and the
  * contract scoring and verdict routes. Playback urls are NEVER put in the query cache: the player
  * calls fetchPlayback and keeps the answer in component state only.
  */
@@ -98,7 +98,8 @@ export function useScoreAnswer(sessionId: string) {
       return data;
     },
     onMutate: () => getGeneration(),
-    onSuccess: (_d, _v, startedIn) => {
+    // Success or a 409 (the session changed under us): reload so the screen shows the truth.
+    onSettled: (_d, _e, _v, startedIn) => {
       if (startedIn !== getGeneration()) return;
       void qc.invalidateQueries({ queryKey: reviewKeys.session(sessionId) });
       void qc.invalidateQueries({ queryKey: reviewKeys.queue });
@@ -118,7 +119,8 @@ export function useSetVerdict(sessionId: string) {
       return data;
     },
     onMutate: () => getGeneration(),
-    onSuccess: (_d, _v, startedIn) => {
+    // Success or a 409 (the session changed under us): reload so the screen shows the truth.
+    onSettled: (_d, _e, _v, startedIn) => {
       if (startedIn !== getGeneration()) return;
       void qc.invalidateQueries({ queryKey: reviewKeys.session(sessionId) });
       void qc.invalidateQueries({ queryKey: reviewKeys.queue });

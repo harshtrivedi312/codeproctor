@@ -2008,18 +2008,19 @@ paths:
           $ref: '#/components/responses/Busy'
 
   # ---------------------------------------------------------------------------------------------
-  # Review workspace (FR-901, FR-902). PROVISIONAL: the queue, session bundle and playback shapes
-  # are the web's proposal, confirmed by Backend A but not yet in the API. Only the answer scoring
-  # route (docs/api-contract.md section 7) and the verdict route are contract. Roles: REVIEWER and
-  # SUPER_ADMIN (review_queue:read, review_verdict:set). Cross-organisation ids are 404.
+  # Review workspace (FR-901, FR-902, FR-703). REAL for the three read routes (apps/api/src/review,
+  # PR 297). The answer scoring PATCH (docs/api-contract.md section 7) and the verdict POST are
+  # contract only: the API does not implement them yet, so their shapes are the contract's and the
+  # verdict body and 409 codes are ASSUMED. Roles: REVIEWER and SUPER_ADMIN. Cross-organisation
+  # ids are 404.
   # ---------------------------------------------------------------------------------------------
   /v1/review/queue:
     get:
       operationId: listReviewQueue
-      summary: PROVISIONAL. Sessions awaiting review (review_queue:read), cursor paging. Default filter GRADED + UNDER_REVIEW, oldest submission first.
+      summary: REAL. Sessions awaiting or under review, oldest first (review_queue:read). Default filter GRADED + UNDER_REVIEW.
       parameters:
         - { name: status, in: query, schema: { $ref: '#/components/schemas/SessionStatus' } }
-        - { name: cursor, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 300 } }
         - {
             name: pageSize,
             in: query,
@@ -2031,21 +2032,31 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ReviewQueue' }
+        '400':
+          description: Invalid status, cursor or page size
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '503':
           $ref: '#/components/responses/Busy'
   /v1/review/sessions/{sessionId}:
     get:
       operationId: getReviewSession
-      summary: PROVISIONAL. Everything a reviewer needs for one session (review_queue:read).
+      summary: REAL. The review bundle of one session (review_session:read).
       parameters:
-        - { name: sessionId, in: path, required: true, schema: { type: string } }
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200':
           description: The review bundle
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ReviewSession' }
+        '400':
+          description: Not a UUID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such session in your organisation
@@ -2057,7 +2068,7 @@ paths:
   /v1/review/sessions/{sessionId}/recordings/{recordingId}/playback:
     get:
       operationId: getReviewPlayback
-      summary: PROVISIONAL. A short-lived (900 s) signed URL for one recording (review_queue:read).
+      summary: REAL. A presigned GET for one recording, valid 900 s (review_session:read).
       parameters:
         - { name: sessionId, in: path, required: true, schema: { type: string } }
         - { name: recordingId, in: path, required: true, schema: { type: string } }
@@ -2067,14 +2078,19 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ReviewPlayback' }
+        '400':
+          description: Not a UUID, or a recording id that is not KIND-SEGMENT (SCREEN-0)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
-          description: No such recording
+          description: No such session or recording in your organisation
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
         '503':
-          description: Storage adapter not available yet (calm message, no retry loop), or BUSY
+          description: Object storage is not configured yet (no code; calm message, no retry loop), or BUSY
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
@@ -2112,7 +2128,7 @@ paths:
   /v1/review/sessions/{sessionId}/verdict:
     post:
       operationId: setReviewVerdict
-      summary: Final verdict (review_verdict:set). 409 while a manual answer is pending (TC-099).
+      summary: Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED.
       parameters:
         - { name: sessionId, in: path, required: true, schema: { type: string } }
       requestBody:
@@ -3283,7 +3299,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        status: { type: string, enum: [passed, failed] }
+        status: { type: string }
         input: { type: string }
         expectedOutput: { type: string }
         actualOutput: { type: string }
@@ -3450,7 +3466,6 @@ components:
             waitingFor: { type: string, enum: [review, appeal], nullable: true }
     ReviewQueue:
       type: object
-      description: PROVISIONAL
       required: [items, nextCursor]
       properties:
         items:
@@ -3507,28 +3522,11 @@ components:
         scoring: { type: string, enum: [AUTO, MANUAL, MANUAL_PENDING] }
         scoringNote: { type: string, nullable: true }
         answer:
-          description: Short answer text, MCQ option ids, or coding language and code; null when nothing was answered
+          description: >-
+            CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored
+            jsonb value (MCQ option ids, or the short-answer text) or null. The
+            web copes with any JSON value.
           nullable: true
-          oneOf:
-            - { type: string }
-            - type: object
-              required: [selectedOptionIds]
-              properties:
-                selectedOptionIds: { type: array, items: { type: string } }
-            - type: object
-              required: [language, code]
-              properties:
-                language: { type: string }
-                code: { type: string }
-        options:
-          type: array
-          description: MCQ only, so the selected ids can be shown as text
-          items:
-            type: object
-            required: [id, text]
-            properties:
-              id: { type: string }
-              text: { type: string }
         runResults: { type: array, items: { $ref: '#/components/schemas/ReviewRunResult' } }
     ReviewEvent:
       type: object
@@ -3537,20 +3535,25 @@ components:
         id: { type: string }
         at: { type: string, format: date-time }
         type: { type: string, description: The stored type string; may be unknown to the web }
-        severity: { type: string, enum: [LOW, MEDIUM, HIGH], nullable: true }
+        severity: { type: string, enum: [LOW, MEDIUM, HIGH] }
         detail: { type: string, nullable: true }
         flagId: { type: string, nullable: true }
     ReviewRecording:
       type: object
       required: [id, kind, startedAt, durationMs]
       properties:
-        id: { type: string }
+        id:
+          {
+            type: string,
+            pattern: '^(SCREEN|WEBCAM|AUDIO)-\\d{1,9}$',
+            description: 'KIND-SEGMENT, e.g. SCREEN-0',
+          }
         kind: { type: string, enum: [SCREEN, WEBCAM, AUDIO] }
         startedAt: { type: string, format: date-time }
         durationMs: { type: integer }
     ReviewVerdict:
       type: object
-      description: PROVISIONAL (Backend A PR 297). All three are null until a verdict is set.
+      description: The session review row; all three are null until a verdict is set.
       required: [verdict, notes, completedAt]
       properties:
         verdict: { type: string, enum: [CLEAN, SUSPICIOUS, VIOLATION], nullable: true }
@@ -3558,7 +3561,6 @@ components:
         completedAt: { type: string, format: date-time, nullable: true }
     ReviewSession:
       type: object
-      description: PROVISIONAL
       required: [session, candidate, test, answers, events, recordings, verdict]
       properties:
         session:
@@ -3588,15 +3590,15 @@ components:
         verdict: { allOf: [{ $ref: '#/components/schemas/ReviewVerdict' }], nullable: true }
     ReviewPlayback:
       type: object
-      description: PROVISIONAL. Either a single url or ordered parts (played in sequence).
-      required: [expiresAt, contentType]
+      description: url is the first part; play parts in seq order. Never cache or store.
+      required: [url, expiresAt, contentType, parts]
       properties:
         url: { type: string }
         parts:
           type: array
           items:
             type: object
-            required: [url, durationMs]
+            required: [url, seq, durationMs]
             properties:
               url: { type: string }
               seq: { type: integer }

@@ -59,9 +59,12 @@ function RecordingRow({
   const [loaded, setLoaded] = React.useState<Loaded | null>(null);
   const [index, setIndex] = React.useState(0);
   const [state, setState] = React.useState<'idle' | 'loading' | 'unavailable' | 'error'>('idle');
+  // One automatic refresh of an expired url per Play click, so a bad link cannot loop.
+  const [autoRefreshed, setAutoRefreshed] = React.useState(false);
   const label = `${KIND_LABEL[recording.kind]} recording`;
 
-  const play = async (): Promise<void> => {
+  const play = async (automatic = false): Promise<void> => {
+    if (!automatic) setAutoRefreshed(false);
     setState('loading');
     try {
       const p = await fetchPlayback(sessionId, recording.id);
@@ -90,8 +93,10 @@ function RecordingRow({
         onEnded: () => setIndex((i) => (loaded && i + 1 < loaded.parts.length ? i + 1 : i)),
         // An expired link stops the media with an error: ask for a fresh one.
         onError: () => {
-          if (loaded && Date.now() >= loaded.expiresAt) void play();
-          else setState('error');
+          if (loaded && Date.now() >= loaded.expiresAt && !autoRefreshed) {
+            setAutoRefreshed(true);
+            void play(true);
+          } else setState('error');
         },
       }
     : null;

@@ -26,9 +26,7 @@ export function TimelinePanel({
   );
   const types = React.useMemo(() => [...new Set(events.map((e) => e.type))].sort(), [events]);
   const shown = sorted.filter(
-    (e) =>
-      (severity === '' || (severity === 'NONE' ? e.severity === null : e.severity === severity)) &&
-      (type === '' || e.type === type),
+    (e) => (severity === '' || e.severity === severity) && (type === '' || e.type === type),
   );
   return (
     <section aria-labelledby="timeline-h" className="space-y-3">
@@ -43,7 +41,6 @@ export function TimelinePanel({
             <option value="HIGH">High</option>
             <option value="MEDIUM">Medium</option>
             <option value="LOW">Low</option>
-            <option value="NONE">Not rated</option>
           </Select>
         </div>
         <div className="flex items-center gap-2">

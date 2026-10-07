@@ -7,6 +7,7 @@ import { RequireRole } from '@/features/auth/require-role';
 import { rolesWith } from '@/features/staff/permissions';
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { mockPlaybackUnavailable } from '@/mocks/review-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
@@ -96,7 +97,7 @@ describe('FR-902 review session', () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it('FR-902: the timeline filters by severity and type, and a null severity is a dash', async () => {
+  it('FR-902: the timeline filters by severity and type, ', async () => {
     const u = userEvent.setup();
     renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
     await screen.findByRole('heading', { name: 'Priya Nair' });
@@ -104,7 +105,7 @@ describe('FR-902 review session', () => {
     expect(
       within(screen.getByRole('list', { name: 'Proctoring events' })).getAllByRole('listitem'),
     ).toHaveLength(2);
-    await u.selectOptions(screen.getByLabelText('Severity'), 'NONE');
+    await u.selectOptions(screen.getByLabelText('Severity'), 'LOW');
     const list = screen.getByRole('list', { name: 'Proctoring events' });
     expect(within(list).getByText('Reconnected')).toBeInTheDocument();
     await u.selectOptions(screen.getByLabelText('Type'), 'TAB_SWITCH');
@@ -202,6 +203,93 @@ describe('FR-902 review session', () => {
     expect(calls).toBe(1);
   });
 
+  it('FR-902 D-23: a 409 on scoring reloads the session so the screen shows the truth', async () => {
+    const u = userEvent.setup();
+    let gets = 0;
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'GET' && request.url.endsWith('/v1/review/sessions/rs-1')) gets += 1;
+    });
+    server.use(
+      http.patch(`${apiBaseUrl}/v1/review/sessions/:s/answers/:q`, () =>
+        HttpResponse.json(
+          { status: 409, title: 'Conflict', detail: 'x', code: 'VERDICT_ALREADY_SET' },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    expect(gets).toBe(1);
+    await u.click(screen.getByRole('button', { name: /^Correct/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/verdict is already set/);
+    await waitFor(() => expect(gets).toBe(2));
+    server.events.removeAllListeners();
+  });
+
+  it('FR-902: a verdict 409 with an unknown code gets a generic message, not the pending one', async () => {
+    const u = userEvent.setup();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/rs-2`, () => HttpResponse.json(bundleNoPending())),
+      http.post(`${apiBaseUrl}/v1/review/sessions/:s/verdict`, () =>
+        HttpResponse.json(
+          { status: 409, title: 'Conflict', detail: 'x', code: 'SOMETHING_ELSE' },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-2" />, U);
+    await screen.findByRole('heading', { name: 'Marco Silva' });
+    await u.click(screen.getByRole('button', { name: 'Set verdict' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/session changed/);
+    expect(alert).not.toHaveTextContent(/short answers still need scoring/);
+  });
+
+  it('FR-902 C-28: scoring controls and the verdict form are hidden unless the session is under review with no verdict', async () => {
+    renderAsStaff(<ReviewSessionPage sessionId="rs-5" />, U);
+    await screen.findByRole('heading', { name: 'Aisha Khan' });
+    expect(screen.queryByRole('button', { name: 'Set verdict' })).not.toBeInTheDocument();
+    expect(screen.getByText(/only while the session is under review/)).toBeInTheDocument();
+  });
+
+  it('FR-701: an expired link is refreshed once per Play click, never in a loop', async () => {
+    const u = userEvent.setup();
+    let calls = 0;
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/:s/recordings/:r/playback`, () => {
+        calls += 1;
+        return HttpResponse.json({
+          url: 'blob:gone',
+          parts: [{ url: 'blob:gone', seq: 0, durationMs: 1000 }],
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+          contentType: 'audio/webm',
+        });
+      }),
+    );
+    const { container } = renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Audio recording/ }));
+    const audio = await waitFor(() => {
+      const el = container.querySelector('audio');
+      expect(el).not.toBeNull();
+      return el as HTMLAudioElement;
+    });
+    audio.dispatchEvent(new Event('error'));
+    await waitFor(() => expect(calls).toBe(2));
+    container.querySelector('audio')?.dispatchEvent(new Event('error'));
+    expect(await screen.findByText(/We could not load this recording/)).toBeInTheDocument();
+    expect(calls).toBe(2);
+  });
+
+  it('FR-703: the mock playback 503 shows the calm message', async () => {
+    const u = userEvent.setup();
+    mockPlaybackUnavailable(true);
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /Play Screen recording/ }));
+    expect(await screen.findByText(/Playback is not available yet/)).toBeInTheDocument();
+  });
+
   it('C-28: a recruiter does not get the session page', async () => {
     renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, MOCK_USERS.recruiter);
     await waitFor(() =>
@@ -216,3 +304,22 @@ describe('FR-902 review session', () => {
     expect(screen.getByRole('link', { name: 'Back to the review queue' })).toBeInTheDocument();
   });
 });
+
+function bundleNoPending() {
+  return {
+    session: {
+      id: 'rs-2',
+      status: 'UNDER_REVIEW',
+      startedAt: null,
+      submittedAt: null,
+      totalScore: 70,
+      riskScore: 41,
+    },
+    candidate: { name: 'Marco Silva', email: 'marco.silva@example.test' },
+    test: { title: 'Backend engineer screening' },
+    answers: [],
+    events: [],
+    recordings: [],
+    verdict: null,
+  };
+}

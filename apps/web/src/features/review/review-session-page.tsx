@@ -8,7 +8,14 @@ import { ApiFailure } from '@/features/admin/queries';
 import { RequireRole } from '@/features/auth/require-role';
 import { rolesWith } from '@/features/staff/permissions';
 import { AnswersPanel } from './answers-panel';
-import { formatDateTime, formatScore, riskLabel, riskTone, pendingCount } from './model';
+import {
+  isDecidable,
+  formatDateTime,
+  formatScore,
+  riskLabel,
+  riskTone,
+  pendingCount,
+} from './model';
 import { useReviewSession } from './queries';
 import { RecordingsPanel } from './recordings-panel';
 import { TimelinePanel } from './timeline-panel';
@@ -96,7 +103,7 @@ function SessionContent({ sessionId }: { sessionId: string }): React.JSX.Element
           </div>
         </dl>
       </header>
-      <AnswersPanel sessionId={d.session.id} answers={d.answers} />
+      <AnswersPanel sessionId={d.session.id} answers={d.answers} decidable={isDecidable(d)} />
       <TimelinePanel events={d.events} startedAt={d.session.startedAt} />
       <RecordingsPanel sessionId={d.session.id} recordings={d.recordings} />
       <VerdictPanel data={d} />

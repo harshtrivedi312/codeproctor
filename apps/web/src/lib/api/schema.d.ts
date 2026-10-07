@@ -874,7 +874,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** PROVISIONAL. Sessions awaiting review (review_queue:read), cursor paging. Default filter GRADED + UNDER_REVIEW, oldest submission first. */
+    /** REAL. Sessions awaiting or under review, oldest first (review_queue:read). Default filter GRADED + UNDER_REVIEW. */
     get: operations['listReviewQueue'];
     put?: never;
     post?: never;
@@ -891,7 +891,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** PROVISIONAL. Everything a reviewer needs for one session (review_queue:read). */
+    /** REAL. The review bundle of one session (review_session:read). */
     get: operations['getReviewSession'];
     put?: never;
     post?: never;
@@ -908,7 +908,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** PROVISIONAL. A short-lived (900 s) signed URL for one recording (review_queue:read). */
+    /** REAL. A presigned GET for one recording, valid 900 s (review_session:read). */
     get: operations['getReviewPlayback'];
     put?: never;
     post?: never;
@@ -944,7 +944,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Final verdict (review_verdict:set). 409 while a manual answer is pending (TC-099). */
+    /** Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED. */
     post: operations['setReviewVerdict'];
     delete?: never;
     options?: never;
@@ -1631,8 +1631,7 @@ export interface components {
     SampleTestResult: {
       id: string;
       name: string;
-      /** @enum {string} */
-      status: 'passed' | 'failed';
+      status: string;
       input?: string;
       expectedOutput?: string;
       actualOutput?: string;
@@ -1761,7 +1760,6 @@ export interface components {
         waitingFor?: 'review' | 'appeal' | null;
       };
     };
-    /** @description PROVISIONAL */
     ReviewQueue: {
       items: {
         sessionId: string;
@@ -1800,24 +1798,8 @@ export interface components {
       /** @enum {string} */
       scoring: 'AUTO' | 'MANUAL' | 'MANUAL_PENDING';
       scoringNote: string | null;
-      /** @description Short answer text, MCQ option ids, or coding language and code; null when nothing was answered */
-      answer:
-        | (
-            | string
-            | {
-                selectedOptionIds: string[];
-              }
-            | {
-                language: string;
-                code: string;
-              }
-          )
-        | null;
-      /** @description MCQ only, so the selected ids can be shown as text */
-      options?: {
-        id: string;
-        text: string;
-      }[];
+      /** @description CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored jsonb value (MCQ option ids, or the short-answer text) or null. The web copes with any JSON value. */
+      answer: unknown;
       runResults?: components['schemas']['ReviewRunResult'][];
     };
     ReviewEvent: {
@@ -1826,12 +1808,13 @@ export interface components {
       at: string;
       /** @description The stored type string; may be unknown to the web */
       type: string;
-      /** @enum {string|null} */
-      severity: 'LOW' | 'MEDIUM' | 'HIGH' | null;
+      /** @enum {string} */
+      severity: 'LOW' | 'MEDIUM' | 'HIGH';
       detail: string | null;
       flagId: string | null;
     };
     ReviewRecording: {
+      /** @description KIND-SEGMENT, e.g. SCREEN-0 */
       id: string;
       /** @enum {string} */
       kind: 'SCREEN' | 'WEBCAM' | 'AUDIO';
@@ -1839,7 +1822,7 @@ export interface components {
       startedAt: string;
       durationMs: number;
     };
-    /** @description PROVISIONAL (Backend A PR 297). All three are null until a verdict is set. */
+    /** @description The session review row; all three are null until a verdict is set. */
     ReviewVerdict: {
       /** @enum {string|null} */
       verdict: 'CLEAN' | 'SUSPICIOUS' | 'VIOLATION' | null;
@@ -1847,7 +1830,6 @@ export interface components {
       /** Format: date-time */
       completedAt: string | null;
     };
-    /** @description PROVISIONAL */
     ReviewSession: {
       session: {
         id: string;
@@ -1871,12 +1853,12 @@ export interface components {
       recordings: components['schemas']['ReviewRecording'][];
       verdict: components['schemas']['ReviewVerdict'] | null;
     };
-    /** @description PROVISIONAL. Either a single url or ordered parts (played in sequence). */
+    /** @description url is the first part; play parts in seq order. Never cache or store. */
     ReviewPlayback: {
-      url?: string;
-      parts?: {
+      url: string;
+      parts: {
         url: string;
-        seq?: number;
+        seq: number;
         durationMs: number;
       }[];
       /** Format: date-time */
@@ -4538,6 +4520,15 @@ export interface operations {
           'application/json': components['schemas']['ReviewQueue'];
         };
       };
+      /** @description Invalid status, cursor or page size */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
       403: components['responses']['Forbidden'];
       503: components['responses']['Busy'];
     };
@@ -4560,6 +4551,15 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ReviewSession'];
+        };
+      };
+      /** @description Not a UUID */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
         };
       };
       403: components['responses']['Forbidden'];
@@ -4596,8 +4596,17 @@ export interface operations {
           'application/json': components['schemas']['ReviewPlayback'];
         };
       };
+      /** @description Not a UUID, or a recording id that is not KIND-SEGMENT (SCREEN-0) */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProblemDetails'];
+        };
+      };
       403: components['responses']['Forbidden'];
-      /** @description No such recording */
+      /** @description No such session or recording in your organisation */
       404: {
         headers: {
           [name: string]: unknown;
@@ -4606,7 +4615,7 @@ export interface operations {
           'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description Storage adapter not available yet (calm message, no retry loop), or BUSY */
+      /** @description Object storage is not configured yet (no code; calm message, no retry loop), or BUSY */
       503: {
         headers: {
           [name: string]: unknown;

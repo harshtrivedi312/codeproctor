@@ -43,9 +43,11 @@ export function scoringErrorMessage(e: unknown): string {
 export function AnswersPanel({
   sessionId,
   answers,
+  decidable,
 }: {
   sessionId: string;
   answers: readonly ReviewAnswer[];
+  decidable: boolean;
 }): React.JSX.Element {
   return (
     <section aria-labelledby="answers-h" className="space-y-3">
@@ -57,7 +59,13 @@ export function AnswersPanel({
       ) : (
         <ol className="space-y-4">
           {answers.map((a, i) => (
-            <AnswerCard key={a.sessionQuestionId} sessionId={sessionId} answer={a} index={i + 1} />
+            <AnswerCard
+              key={a.sessionQuestionId}
+              sessionId={sessionId}
+              answer={a}
+              index={i + 1}
+              decidable={decidable}
+            />
           ))}
         </ol>
       )}
@@ -69,10 +77,12 @@ function AnswerCard({
   sessionId,
   answer,
   index,
+  decidable,
 }: {
   sessionId: string;
   answer: ReviewAnswer;
   index: number;
+  decidable: boolean;
 }): React.JSX.Element {
   const state = scoringState(answer);
   const headId = `ans-${answer.sessionQuestionId}`;
@@ -101,7 +111,9 @@ function AnswerCard({
       {answer.runResults && answer.runResults.length > 0 ? (
         <RunResults results={answer.runResults} />
       ) : null}
-      {canScoreManually(answer) ? <ManualScore sessionId={sessionId} answer={answer} /> : null}
+      {decidable && canScoreManually(answer) ? (
+        <ManualScore sessionId={sessionId} answer={answer} />
+      ) : null}
     </li>
   );
 }
@@ -126,7 +138,7 @@ function AnswerBody({ answer }: { answer: ReviewAnswer }): React.JSX.Element {
     );
   }
   if (body.kind === 'options') {
-    const text = (id: string): string => answer.options?.find((o) => o.id === id)?.text ?? id;
+    const text = (id: string): string => id;
     return (
       <div className="mt-3">
         <p className="text-xs text-muted-foreground">Selected options</p>
