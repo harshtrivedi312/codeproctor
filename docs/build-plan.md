@@ -370,6 +370,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: unit tests for both services including TC-072 and TC-094 (immediate erasure and the open-appeal hold).
 
 #### DB-07: Backups and restore
+- **Changed 2026-10-07 by C-63:** the nightly staging backup workflow (`.github/workflows/backup-nightly.yml`), its `staging` GitHub environment and its secrets are removed. Staging holds synthetic data only and is rebuilt from seed. `backup.sh` and `restore.sh` stay for the pilot (versioned mode, C-55), run on the pilot host and its daily wake, not from GitHub. Removing the workflow and the runbook's staging-backup section: Database B, with the hub as gate reviewer (rule 12).
 - Owner: db-engineer. Branch: `db/step-7`. Depends on: DB-03. Parallel with: DB-04, DB-05.
 - Covers: NFR-03 (recoverability), BO-6. TCs: none.
 - Deliverables: `infra/scripts/backup.sh` (pg_dump custom format, gzip, upload through the S3-compatible interface to the backup bucket from env (R2 on staging, AWS S3 on pilot and production), prune backups older than 14 days), `infra/scripts/restore.sh`, scheduled nightly GitHub Actions workflow using repository secrets. A local `restore.sh` run starts with the localhost guard (`node infra/scripts/assert-local-db.mjs`). Staging and pilot backups and restores run only in GitHub Actions or on the server, where their credentials live (D-38).
@@ -562,6 +563,7 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: TC-092 passes; no mocks remain for merged endpoints.
 
 #### DEP-01: Staging (local and free tier)
+- **Changed 2026-10-07 by C-63:** no GitHub environments and no added cost. Staging gets no GitHub-run deploy, backup or k6 job that needs secrets; it's local plus free tiers, rebuilt from seed. The `staging` environment used by `qa.yml`'s k6 dispatch is removed. TC-105 runs from a k6 runner in the pilot setup instead (QA). Cloudflare Pages deploys through Cloudflare's own GitHub integration, with no secret in GitHub.
 - **Changed 2026-10-06 by C-43:** there's no staging on AWS, and the AWS host deliverables below are struck out of this task. Staging stays local with Docker Compose and on free tiers (Cloudflare R2, Supabase or Neon), with synthetic data only (D-10, D-11, CLAUDE.md). The AWS-specific deliverables below move to DEP-03's single-instance pilot, and this task keeps only the local and free-tier staging setup, its smoke tests and its runbook.
 - Owner: backend-engineer, architect review (D-26). Branch: `deploy/staging`. Depends on: ARC-05, BE-12, FE-10. Gate: architect at PR.
 - Covers: NFR-03, NFR-04, NFR-09, FR-703 (storage encryption settings), BO-5. TCs: none directly (supports TC-090, TC-093).
@@ -603,6 +605,14 @@ Format per task: owner, branch, depends on, can run in parallel with, FR/NFR cov
 - Done when: checklist delivered to the human.
 
 #### DEP-03: Pilot stack
+- **Changed 2026-10-07 by C-56, C-57, C-62 and C-63 (docs/compliance/decisions.md):**
+  - **Infrastructure:** CloudFormation only for the one-time GitHub OIDC template the owner uploads. Everything else is Terraform in `infra/terraform/pilot/` (DL-47), applied by the owner in AWS CloudShell from reviewed code on main, with state in an encrypted S3 bucket with locking. No Terraform role is usable from GitHub (C-63 replaces C-62's workflow).
+  - **OIDC:** the trust policy accepts only `repo:harshtrivedi312/codeproctor:ref:refs/heads/main`, with no environment conditions, so branches never get AWS access. The deploy role builds and uploads releases only.
+  - **Release approval:** the instance installs only the release the owner has approved in an SSM Parameter Store standard parameter, set in the AWS console with MFA. The deploy role and every instance role can read it but never write it. The Delivery Lead's recommendation to the architect: the parameter names an immutable release (the git SHA plus the image digest).
+  - **Network:** same AWS account (C-56). 443 only on the app host. Judge0 has no public inbound and is reachable only from the app host. No SSH; Session Manager only. TLS by DNS validation in the assess zone, so no port 80. The instance role may write only its `_acme-challenge` TXT and API A records, and every other hosted zone is denied.
+  - **Load-test mailbox (C-57):** one dedicated test-only address, delivered into its own locked-down S3 bucket that's emptied after each run and readable only by the seeder.
+  - **No GitHub Actions secrets** are needed (C-63 item 5).
+  - **Delivery (Backend A):** #239 is narrowed to the OIDC template. A Terraform PR carries the data stack, the roles, the security groups and the mailbox. Then come the release workflow and the instance's release-install step, and the owner's runbook for CloudShell and release approval.
 - **Redefined 2026-10-06 by C-43 to C-48 (docs/compliance/decisions.md); the layout goes into ADR 0017 (hub, owner approves). Budget about $12 a month.**
   - **Hosts:** one m7i.large x86 app host (API, worker, Postgres and Redis in Docker Compose; EBS on the default key) and a separate small Judge0 instance with no app secrets and no network path to Postgres, Redis or S3 (C-45). No RDS, NAT gateway, load balancer or Elastic IP.
   - **Schedule:** EventBridge Scheduler starts both hosts 45 minutes before each recruiter-chosen slot (C-46), with a health check and an owner alarm. A daily wake of about 15 minutes handles retention, erasure, backups and reminders, alarmed if missed (C-47). Hosts self-stop only when no session is active, no upload is unconfirmed and the queues are empty, under a hard ceiling. Heavy analysis (audio, similarity) runs after sessions; the identity face match stays live (C-44).
