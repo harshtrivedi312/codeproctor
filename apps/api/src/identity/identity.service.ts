@@ -12,10 +12,10 @@
 // Nothing here logs a key, a URL, a name or a score: session id, route and outcome only.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { CodedHttpException } from '../common/coded.exception';
+import { CandidateScope } from '../candidate/candidate-scope';
 import { SessionRateLimiter } from '../candidate/session-rate-limiter';
 import { newUlid } from '../candidate/ulid';
 import type { CandidateContext } from '../candidate/candidate.types';
-import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import type { SessionScope } from '../media/storage-keys';
 import { sessionNotActive } from '../session/session-write-gate';
@@ -25,6 +25,7 @@ import type {
   IdentityStatusView,
 } from './dto/identity.dto';
 import { IdentityFacts } from './identity-facts';
+import type { IdentityPolicy } from './identity-facts';
 import { IdentityMedia, KIND_OF } from './identity-media';
 import type { ImageKind } from './identity-media';
 import { IdentityNamesStore } from './identity-names.store';
@@ -89,7 +90,7 @@ export class IdentityService {
     private readonly queue: FaceMatchQueue,
     private readonly limiter: SessionRateLimiter,
     private readonly purge: IdentityPurgeService,
-    private readonly orgContext: OrgContextService,
+    private readonly scope: CandidateScope,
   ) {}
 
   // ---- presign: issue single-use names ----
@@ -100,9 +101,9 @@ export class IdentityService {
     input: { purpose: IdentityPurpose; bytes: number },
     now: Date = new Date(),
   ): Promise<IdentityPresignedDto> {
-    // The candidate routes carry no scope of their own (BE-07 CS-4 adoption): each service step picks one.
-    // INTERIM until the SessionJobProcessor / candidate reads for identity_checks land.
-    return this.orgContext.runInOrg(ctx.orgId, () => this.presignInScope(ctx, input, now));
+    // The candidate routes carry no scope of their own (ADR 0013 CS-4): each step picks asCandidate
+    // (identity_checks) or asOrg (accommodations), one after the other, never nested.
+    return this.presignInScope(ctx, input, now);
   }
 
   private async presignInScope(
@@ -112,10 +113,10 @@ export class IdentityService {
   ): Promise<IdentityPresignedDto> {
     await this.limiter.hit('identity-presign', ctx.sessionId, 20, 60);
     if (input.bytes < 1 || input.bytes > IDENTITY_IMAGE_MAX_BYTES) throw nameInvalid();
-    if ((await this.facts.policy(ctx.sessionId)).waived) throw waived();
+    if ((await this.policy(ctx)).waived) throw waived();
     if (ctx.status !== 'CONSENTED') throw sessionNotActive(ctx.status);
 
-    const attempt = this.expectedAttempt(await this.latest(ctx.sessionId));
+    const attempt = this.expectedAttempt(await this.latest(ctx));
     const kind = KIND_OF[input.purpose];
     const ulid = newUlid(now);
     const scope: SessionScope = { orgId: ctx.orgId, sessionId: ctx.sessionId };
@@ -144,7 +145,7 @@ export class IdentityService {
     ctx: CandidateContext,
     input: { idImageName: string; selfieName: string; livenessConfirmed: boolean },
   ): Promise<IdentityStatusDto> {
-    return this.orgContext.runInOrg(ctx.orgId, () => this.submitInScope(ctx, input));
+    return this.submitInScope(ctx, input);
   }
 
   private async submitInScope(
@@ -161,7 +162,7 @@ export class IdentityService {
     ];
 
     // 2. Waiver first, before any state check and even on a repeat POST (ADR 0015, N3).
-    if ((await this.facts.policy(ctx.sessionId)).waived) {
+    if ((await this.policy(ctx)).waived) {
       await this.refuse(ctx, scope, refs);
       this.log('submit', ctx, 'waived');
       throw waived();
@@ -178,7 +179,7 @@ export class IdentityService {
 
     // 5. Which attempt is next. New names while attempt 1 is pending, or after it ended, are refused
     //    and their uploads are removed.
-    const latest = await this.latest(ctx.sessionId);
+    const latest = await this.latest(ctx);
     const next = this.nextAttempt(latest);
     if (next === null) {
       await this.refuse(ctx, scope, refs);
@@ -246,17 +247,19 @@ export class IdentityService {
         }
         claimed.push(r);
       }
-      await this.prisma.client.identityCheck.create({
-        data: {
-          sessionId: ctx.sessionId,
-          attempt: id.attempt,
-          idImageKey: sealedId,
-          selfieKey: sealedSelfie,
-          livenessPassed: liveness,
-          status: 'PENDING',
-        },
-        select: { id: true },
-      });
+      // Candidate scope: the column allowlist and the sealed-key rule apply; status is the schema's PENDING default.
+      await this.scope.asCandidate(ctx, () =>
+        this.prisma.client.identityCheck.create({
+          data: {
+            sessionId: ctx.sessionId,
+            attempt: id.attempt,
+            idImageKey: sealedId,
+            selfieKey: sealedSelfie,
+            livenessPassed: liveness,
+          },
+          select: { id: true },
+        }),
+      );
     } catch (e) {
       await this.release(ctx, claimed);
       if (!(e instanceof ClaimLost) && !isUniqueViolation(e)) {
@@ -277,14 +280,14 @@ export class IdentityService {
 
   /** GET /candidate/session/identity: status only (NFR-05). */
   status(ctx: CandidateContext): Promise<IdentityStatusDto> {
-    return this.orgContext.runInOrg(ctx.orgId, () => this.statusInScope(ctx));
+    return this.statusInScope(ctx);
   }
 
   private async statusInScope(ctx: CandidateContext): Promise<IdentityStatusDto> {
-    if ((await this.facts.policy(ctx.sessionId)).waived) {
+    if ((await this.policy(ctx)).waived) {
       return { attempt: 0, status: 'WAIVED', canRetry: false };
     }
-    const latest = await this.latest(ctx.sessionId);
+    const latest = await this.latest(ctx);
     if (latest === null) return { attempt: 0, status: 'NOT_STARTED', canRetry: false };
     return viewOf(latest);
   }
@@ -328,7 +331,7 @@ export class IdentityService {
     sealedId: string,
     sealedSelfie: string,
   ): Promise<IdentityStatusDto> {
-    if ((await this.facts.policy(ctx.sessionId)).waived) {
+    if ((await this.policy(ctx)).waived) {
       await this.dropSealedUnlessClaimed(ctx, refs, sealedId, sealedSelfie);
       await this.refuse(ctx, scope, refs);
       throw waived();
@@ -337,7 +340,7 @@ export class IdentityService {
     const same = await this.waitForRow(ctx, attempt, refs);
     if (same !== null) return this.repeat(ctx, scope, refs, same);
     await this.dropSealedUnlessClaimed(ctx, refs, sealedId, sealedSelfie);
-    const latest = await this.latest(ctx.sessionId);
+    const latest = await this.latest(ctx);
     if (latest !== null) {
       await this.refuse(ctx, scope, refs);
       throw this.cannotAttempt(latest);
@@ -419,12 +422,19 @@ export class IdentityService {
   }
 
   /** Candidate scope reads only attempt and status of an identity row (ADR 0013 CS-4.4). */
-  private latest(sessionId: string): Promise<LatestRow | null> {
-    return this.prisma.client.identityCheck.findFirst({
-      where: { sessionId },
-      orderBy: { attempt: 'desc' },
-      select: { attempt: true, status: true },
-    });
+  private latest(ctx: CandidateContext): Promise<LatestRow | null> {
+    return this.scope.asCandidate(ctx, () =>
+      this.prisma.client.identityCheck.findFirst({
+        where: { sessionId: ctx.sessionId },
+        orderBy: { attempt: 'desc' },
+        select: { attempt: true, status: true },
+      }),
+    );
+  }
+
+  /** Accommodations are not readable in candidate scope: the waiver and detector flags come from a plain org scope. */
+  private policy(ctx: CandidateContext): Promise<IdentityPolicy> {
+    return this.scope.asOrg(ctx, () => this.facts.policy(ctx.sessionId));
   }
 
   /**
@@ -440,10 +450,12 @@ export class IdentityService {
     for (const r of refs) {
       if ((await this.names.state(ctx.sessionId, r.name, r.purpose)) !== 'USED') return null;
     }
-    return this.prisma.client.identityCheck.findFirst({
-      where: { sessionId: ctx.sessionId, attempt },
-      select: { attempt: true, status: true },
-    });
+    return this.scope.asCandidate(ctx, () =>
+      this.prisma.client.identityCheck.findFirst({
+        where: { sessionId: ctx.sessionId, attempt },
+        select: { attempt: true, status: true },
+      }),
+    );
   }
 
   /** The attempt a new upload would be, or null when none is open. */

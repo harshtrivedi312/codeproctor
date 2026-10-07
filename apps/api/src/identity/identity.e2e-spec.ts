@@ -885,6 +885,26 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(await rows(o.sessionId)).toHaveLength(0);
   });
 
+  it('FR-403/ADR 0013 5.10: same-organisation scope: candidate B sees nothing of candidate A and cannot use A names or attempt', async () => {
+    const a = await session();
+    const aNames = await upload(a);
+    await submit(a, aNames);
+    await settled(a.sessionId);
+    const b = await session();
+    // B reads its own (empty) state, not A's PASSED row.
+    expect((await get(b)).body).toEqual({ attempt: 0, status: 'NOT_STARTED', canRetry: false });
+    // A's unused names, sent with B's token, are refused and stay A's.
+    const fresh = await session();
+    const mine = await upload(fresh);
+    expect((await submit(b, mine)).status).toBe(400);
+    expect(await nameState(fresh, mine.idImageName)).toBe('ISSUED');
+    // A's used names (and so A's attempt number) give B no row and no idempotent replay.
+    const replay = await submit(b, aNames);
+    expect(replay.status).toBe(400);
+    expect(await rows(b.sessionId)).toHaveLength(0);
+    expect(await rows(a.sessionId)).toHaveLength(1);
+  });
+
   it('FR-403: no token and a bad token are refused', async () => {
     const res = await reply(request(app.getHttpServer()).get(API));
     expect(res.status).toBe(401);
