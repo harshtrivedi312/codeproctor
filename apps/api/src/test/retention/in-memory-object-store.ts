@@ -15,12 +15,14 @@ export class InMemoryObjectStore extends ObjectStorePort {
   resurrect = new Set<string>();
   versioningState: VersioningState = { kind: 'never-enabled' };
   deleteCalls = 0;
+  listCalls = 0;
 
   put(...keys: string[]): void {
     for (const key of keys) this.keys.add(key);
   }
 
   listPage(prefix: string, token?: string): Promise<ListPage> {
+    this.listCalls++;
     if (this.failList) return Promise.reject(new Error('list failed'));
     const all = [...this.keys].filter((k) => k.startsWith(prefix)).sort();
     const start = token === undefined ? 0 : Number(token);

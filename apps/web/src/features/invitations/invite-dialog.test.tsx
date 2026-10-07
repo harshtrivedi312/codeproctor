@@ -376,6 +376,15 @@ describe('FR-304: upload robustness', () => {
     expect(text).not.toMatch(/nothing was sent/i);
   });
 
+  it('DL-37: a 500 on a chunk is not retried and says those rows may have been sent', async () => {
+    failSecondChunk(500);
+    const { dialog } = await uploadMany(250);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/The upload stopped after 200 invitations/);
+    expect(text).toMatch(/50 rows of those may have been sent/);
+    expect(text).toMatch(/Check the candidates list before trying again/);
+  });
+
   it('a lost connection says the request in flight may have been sent', async () => {
     failSecondChunk('network');
     const { dialog } = await uploadMany(250);

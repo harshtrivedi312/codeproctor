@@ -6,6 +6,8 @@ export const PROBLEM_CODES = [
   'TWO_FACTOR_REQUIRED_FOR_ROLE',
   'SETTINGS_CONFLICT',
   'VARIANT_HAS_AI_REFERENCES',
+  // The 503 for database lock contention (DL-37); only ProblemFilter's lock path sets it.
+  'BUSY',
 ] as const;
 
 /**
@@ -26,6 +28,8 @@ export const CANDIDATE_PROBLEM_CODES = [
   'WINDOW_NOT_OPEN',
   'SESSION_NOT_ACTIVE',
   'SESSION_PAUSED',
+  'SECTION_NOT_OPEN',
+  'SUBMIT_LIMIT_REACHED',
   'ILLEGAL_TRANSITION',
   'SESSION_STATE_CONFLICT',
   'CONSENT_NOT_CONFIGURED',
@@ -58,12 +62,14 @@ export const CANDIDATE_PROBLEM_CODES = [
 ] as const;
 export type CandidateProblemCode = (typeof CANDIDATE_PROBLEM_CODES)[number];
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
+/** The codes a coded exception may carry: BUSY belongs to the lock path of ProblemFilter alone. */
+export type ExceptionProblemCode = Exclude<ProblemCode, 'BUSY'>;
 
 /** A 403 that carries a stable machine code, so clients never have to match on `detail`. */
 export class CodedForbiddenException extends ForbiddenException {
   constructor(
     message: string,
-    readonly code: ProblemCode,
+    readonly code: ExceptionProblemCode,
   ) {
     super({ message, code });
   }
@@ -73,7 +79,7 @@ export class CodedForbiddenException extends ForbiddenException {
 export class CodedConflictException extends ConflictException {
   constructor(
     message: string,
-    readonly code: ProblemCode,
+    readonly code: ExceptionProblemCode,
   ) {
     super({ message, code });
   }

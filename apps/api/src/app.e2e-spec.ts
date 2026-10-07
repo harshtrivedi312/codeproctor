@@ -118,6 +118,8 @@ describe('API foundation (NFR-04, NFR-09)', () => {
       .set('Origin', 'http://localhost:3000');
     expect(ok.headers['x-content-type-options']).toBe('nosniff');
     expect(ok.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+    // DL-37: the web client must be able to read Retry-After on a 503.
+    expect(ok.headers['access-control-expose-headers']).toContain('Retry-After');
     const other = await request(app.getHttpServer())
       .get('/api/v1/health')
       .set('Origin', 'https://evil.example');
