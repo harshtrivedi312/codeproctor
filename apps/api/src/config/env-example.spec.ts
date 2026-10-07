@@ -54,7 +54,7 @@ describe('.env.example (DL-52, NFR-04)', () => {
   describe.each(['staging', 'pilot', 'production', 'prod', 'Production'])(
     'NFR-04 template refused with APP_ENV=%s',
     (appEnv) => {
-      it(`DL-52 NFR-04 names all six placeholder variables and echoes no value (${appEnv})`, () => {
+      it(`DL-52 NFR-04 names all eight placeholder variables and echoes no value (${appEnv})`, () => {
         let message = '';
         try {
           validateEnv({ ...active, APP_ENV: appEnv });
@@ -70,6 +70,8 @@ describe('.env.example (DL-52, NFR-04)', () => {
           'OTP_PEPPER',
           'ENCRYPTION_KEY',
           `SESSION_KEY_ENC_KEY_${kid}`,
+          'JUDGE0_AUTH_TOKEN',
+          'JUDGE0_AUTHZ_TOKEN',
         ];
         expect(message).not.toBe('');
         if (['staging', 'pilot', 'production'].includes(appEnv)) {

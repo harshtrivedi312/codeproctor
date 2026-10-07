@@ -13,7 +13,8 @@ const aesKey = z
   });
 // HMAC/JWT secrets: at least 32 characters. Length alone does not refuse placeholders (the local
 // template in .env.example uses long change-me-local-... values); shared environments also refuse
-// the change-me prefix (see isSharedEnv and the superRefine below).
+// a value that matches change-me anywhere, ignoring case; this applies to the secrets, the keys and
+// the Judge0 tokens (see isSharedEnv and the superRefine below).
 const secret = z.string().min(32, 'must be at least 32 characters');
 
 /** True for http(s) URLs with no credentials, path (other than "/"), query or fragment. */
@@ -364,7 +365,10 @@ export function isSharedEnv(env: { APP_ENV?: string; NODE_ENV?: string }): boole
   );
 }
 
-/** Matches change-me anywhere, ignoring case, surrounding spaces and leading quotes. */
+/**
+ * Matches change-me anywhere, ignoring case. The trim and quote strip are defensive only: includes()
+ * already ignores surrounding spaces and quotes.
+ */
 function isPlaceholderText(value: string): boolean {
   return value
     .trim()
