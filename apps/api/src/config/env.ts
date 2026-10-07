@@ -117,6 +117,9 @@ export const envSchema = z
     // Issuer label shown in authenticator apps.
     TOTP_ISSUER: z.string().min(1).default('CodeProctor'),
     // Code runner (BE-05, FR-503). Unset means runs fail as "unavailable". Token is a secret.
+    // JUDGE0_MODE=stub (DL-56) swaps in an in-process fake that runs nothing. Local development only
+    // (localAdapterProblem); it needs no JUDGE0_URL or tokens.
+    JUDGE0_MODE: z.enum(['real', 'stub']).default('real'),
     JUDGE0_URL: z.url().optional(),
     JUDGE0_AUTH_TOKEN: z.string().min(1).optional(),
     // Judge0 AUTHZ token (X-Auth-User): needed to DELETE submissions after use. Never log.
@@ -149,7 +152,11 @@ export const envSchema = z
     // Email (C-31): Amazon SES, or noop (drops mail) for local and test. Pilot and production
     // require ses. No secrets here: credentials come from the AWS SDK default chain (instance
     // role). SES_ENDPOINT is for tests only and is refused outside development and test.
-    EMAIL_PROVIDER: z.enum(['ses', 'noop']).default('noop'),
+    EMAIL_PROVIDER: z.enum(['ses', 'noop', 'smtp-dev']).default('noop'),
+    // smtp-dev (DL-54): plain SMTP, no auth, no TLS, to a local Mailpit. Local development only: the
+    // guard in localAdapterProblem refuses it unless APP_ENV is exactly development.
+    SMTP_DEV_HOST: z.string().min(1).default('127.0.0.1'),
+    SMTP_DEV_PORT: port.default(1025),
     AWS_REGION: z
       .string()
       .regex(/^[a-z]{2}(-[a-z]+)+-\d+$/, 'must look like us-east-1')
@@ -185,7 +192,7 @@ export const envSchema = z
         message: 'must be less than HTTP_REQUEST_TIMEOUT_MS',
       });
     }
-    if (live) {
+    if (live && env.JUDGE0_MODE === 'real') {
       // The code runner holds candidate source and test data: it must be configured, authenticated
       // with a strong token, and not reached over plain HTTP unless it is on this host.
       if (!env.JUDGE0_URL) {
@@ -249,6 +256,14 @@ export const envSchema = z
           message: 'is a local placeholder and is refused in staging, pilot and production',
         });
       }
+    }
+    const emailProblem = localAdapterProblem(env.EMAIL_PROVIDER === 'smtp-dev', env, 'smtp-dev');
+    if (emailProblem !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['EMAIL_PROVIDER'], message: emailProblem });
+    }
+    const judgeProblem = localAdapterProblem(env.JUDGE0_MODE === 'stub', env, 'stub');
+    if (judgeProblem !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['JUDGE0_MODE'], message: judgeProblem });
     }
     if (live && env.EMAIL_PROVIDER !== 'ses') {
       ctx.addIssue({
@@ -372,6 +387,21 @@ export function isSharedEnv(env: { APP_ENV?: string; NODE_ENV?: string }): boole
   );
 }
 
+/**
+ * Local-only adapters (smtp-dev mail, Judge0 stub; DL-54, DL-56, NFR-04) are an allowlist: only
+ * APP_ENV exactly 'development' may use them, and NODE_ENV=production always refuses. Unset,
+ * misspelled, test, staging, pilot and production all refuse. Fixed message, no values.
+ */
+export function localAdapterProblem(
+  active: boolean,
+  env: { APP_ENV?: string; NODE_ENV?: string },
+  value: string,
+): string | undefined {
+  if (!active) return undefined;
+  if (env.APP_ENV === 'development' && env.NODE_ENV !== 'production') return undefined;
+  return `${value} is allowed only when APP_ENV is exactly development (local use only)`;
+}
+
 /** Matches change-me anywhere, ignoring case, surrounding spaces and leading quotes. */
 function isPlaceholderText(value: string): boolean {
   return value
@@ -465,6 +495,22 @@ export function validateEnv(raw: Record<string, unknown>): Env {
         typeof url === 'string' && url !== '' ? databaseUrlProblem(url) : undefined;
       if (urlProblem !== undefined) problems.push(`DATABASE_URL: ${urlProblem}`);
     }
+    // The schema may have stopped before its own refinements ran, so repeat the local-adapter guard
+    // here: an unset or misspelled APP_ENV must still name the variables (DL-54, DL-56).
+    const emailProblem = localAdapterProblem(
+      raw['EMAIL_PROVIDER'] === 'smtp-dev',
+      { APP_ENV: appEnv, NODE_ENV: nodeEnv },
+      'smtp-dev',
+    );
+    const judgeProblem = localAdapterProblem(
+      raw['JUDGE0_MODE'] === 'stub',
+      { APP_ENV: appEnv, NODE_ENV: nodeEnv },
+      'stub',
+    );
+    if (emailProblem !== undefined && !problems.some((x) => x.startsWith('EMAIL_PROVIDER: ')))
+      problems.push(`EMAIL_PROVIDER: ${emailProblem}`);
+    if (judgeProblem !== undefined && !problems.some((x) => x.startsWith('JUDGE0_MODE: ')))
+      problems.push(`JUDGE0_MODE: ${judgeProblem}`);
     throw new Error(`Invalid environment: ${problems.join('; ')}`);
   }
   // The wrapping key is named by the active kid (SESSION_KEY_ENC_KEY_<kid>), so the schema cannot
