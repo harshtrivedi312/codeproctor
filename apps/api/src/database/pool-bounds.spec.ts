@@ -32,11 +32,15 @@ describe('Prisma pool bounds (FU-BE-194, NFR-09)', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  const bounded = <T>(work: Promise<T>): Promise<T | 'hung'> =>
-    Promise.race([
-      work.catch((e: unknown) => e as T),
-      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), GUARD_MS)),
-    ]);
+  const bounded = <T>(work: Promise<T>): Promise<T | 'hung'> => {
+    let timer: NodeJS.Timeout | undefined;
+    const guard = new Promise<'hung'>((resolve) => {
+      timer = setTimeout(() => resolve('hung'), GUARD_MS);
+    });
+    return Promise.race([work.catch((e: unknown) => e as T), guard]).finally(() =>
+      clearTimeout(timer),
+    );
+  };
 
   it('FU-BE-194: a query against a server that never answers fails within the connect timeout instead of hanging', async () => {
     const client = createPrismaClient(url, { connectionTimeoutMillis: 300, max: 2 });
@@ -68,7 +72,7 @@ describe('Prisma pool bounds (FU-BE-194, NFR-09)', () => {
     const values: Record<string, unknown> = {
       DATABASE_URL: url,
       DB_POOL_MAX: 2,
-      DB_CONNECT_TIMEOUT_MS: 10_000,
+      DB_CONNECT_TIMEOUT_MS: 1_500,
       DB_WARMUP_TIMEOUT_MS: 300,
     };
     const config = { get: (k: string) => values[k] } as unknown as ConfigService<Env, true>;

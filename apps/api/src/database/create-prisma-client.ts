@@ -15,7 +15,10 @@ export const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 export interface PoolOptions {
   /** Most connections the pool opens. */
   max?: number;
-  /** Longest wait for one new connection, in ms. Never 0: pg reads 0 as "wait forever". */
+  /**
+   * Longest wait for a new connection OR for a free pool slot when all `max` are busy, in ms (pg-pool
+   * semantics). Not a query timeout. Never 0: pg reads 0 as "wait forever".
+   */
   connectionTimeoutMillis?: number;
 }
 
@@ -23,8 +26,11 @@ export function createPrismaClient(connectionString: string, pool: PoolOptions =
   return new PrismaClient({
     adapter: new PrismaPg({
       connectionString,
-      max: pool.max ?? DEFAULT_POOL_MAX,
-      connectionTimeoutMillis: pool.connectionTimeoutMillis || DEFAULT_CONNECT_TIMEOUT_MS,
+      max: pool.max && pool.max > 0 ? pool.max : DEFAULT_POOL_MAX,
+      connectionTimeoutMillis:
+        pool.connectionTimeoutMillis && pool.connectionTimeoutMillis > 0
+          ? pool.connectionTimeoutMillis
+          : DEFAULT_CONNECT_TIMEOUT_MS,
     }),
     // No code frame in error messages (FU-DB-70). Never add `log: ['query']` or a query event
     // listener here: they print every query with its parameters. 'minimal' still leaves values in

@@ -408,3 +408,32 @@ describe('NFR-04 environment validation', () => {
     });
   });
 });
+
+describe('FU-BE-194 database pool settings', () => {
+  it('FU-BE-194: defaults apply', () => {
+    const env = validateEnv(valid);
+    expect(env.DB_POOL_MAX).toBe(10);
+    expect(env.DB_CONNECT_TIMEOUT_MS).toBe(5_000);
+    expect(env.DB_WARMUP_TIMEOUT_MS).toBe(5_000);
+  });
+
+  it.each([
+    ['DB_POOL_MAX', ['0', '-1', '1.5', '51', '']],
+    ['DB_CONNECT_TIMEOUT_MS', ['0', '-1', '1.5', '60001', '']],
+    ['DB_WARMUP_TIMEOUT_MS', ['0', '-1', '1.5', '60001', '']],
+  ])('FU-BE-194: %s refuses 0, negatives, fractions, above-max and an empty value', (name, bad) => {
+    for (const value of bad) {
+      expect(() => validateEnv({ ...valid, [name]: value })).toThrow(new RegExp(name));
+    }
+  });
+
+  it('FU-BE-194: the maximum values are accepted', () => {
+    const env = validateEnv({
+      ...valid,
+      DB_POOL_MAX: '50',
+      DB_CONNECT_TIMEOUT_MS: '60000',
+      DB_WARMUP_TIMEOUT_MS: '60000',
+    });
+    expect(env.DB_POOL_MAX).toBe(50);
+  });
+});

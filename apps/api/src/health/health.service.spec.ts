@@ -34,4 +34,51 @@ describe('HealthService Redis probe (NFR-03, QA-D-04)', () => {
       checks: { postgres: 'up', redis: 'up' },
     });
   });
+
+  const make = (
+    ping: () => Promise<void>,
+    query: () => Promise<unknown> = () => Promise.resolve(),
+  ): HealthService => {
+    const r = new ConnectingRedis();
+    r.status = 'ready';
+    return new HealthService(
+      { query } as unknown as Pool,
+      r as unknown as Redis,
+      { get: () => 300 } as unknown as ConfigService<Env, true>,
+      { ping } as unknown as PrismaService,
+    );
+  };
+
+  it('FU-BE-194 B1: N concurrent /health checks run exactly one Prisma ping, and a check right after reuses it', async () => {
+    const ping = jest.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
+    const svc = make(ping);
+    const reports = await Promise.all(Array.from({ length: 25 }, () => svc.check()));
+    expect(reports.every((x) => x.status === 'ok')).toBe(true);
+    await svc.check();
+    expect(ping).toHaveBeenCalledTimes(1);
+  });
+
+  it('FU-BE-194 B1: a hanging ping is shared, not repeated, by later checks while it is in flight', async () => {
+    const ping = jest.fn(() => new Promise<void>(() => undefined));
+    const svc = make(ping);
+    await svc.check();
+    await svc.check();
+    expect(ping).toHaveBeenCalledTimes(1);
+  });
+
+  it('FU-BE-194 S6: Prisma ping rejecting while the health pool succeeds reports postgres down', async () => {
+    const svc = make(() => Promise.reject(new Error('pool timeout')));
+    await expect(svc.check()).resolves.toEqual({
+      status: 'error',
+      checks: { postgres: 'down', redis: 'up' },
+    });
+  });
+
+  it('FU-BE-194 S6: a hanging Prisma ping reports postgres down within the health timeout', async () => {
+    const svc = make(() => new Promise<void>(() => undefined));
+    const started = Date.now();
+    const report = await svc.check();
+    expect(report.checks.postgres).toBe('down');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
 });

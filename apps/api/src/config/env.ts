@@ -75,11 +75,13 @@ export const envSchema = z
     HTTP_TIMEOUT_CHECK_INTERVAL_MS: positiveInt.default(2_000),
     THROTTLE_TTL_MS: positiveInt.default(60_000),
     HEALTH_TIMEOUT_MS: positiveInt.default(2_000),
-    // Prisma's pg pool (FU-BE-194). pg's own defaults wait forever for a connection (timeout 0), so
-    // an unreachable or full Postgres hung requests with no error. The connect timeout bounds one
-    // connection attempt; max bounds the pool. Postgres max_connections must stay above max plus
-    // the health pool (2) plus the worker's share.
-    DB_POOL_MAX: positiveInt.max(100).default(10),
+    // Prisma's pg pool (FU-BE-194). pg's own default waits forever for a connection (timeout 0), so
+    // an unreachable or full Postgres hung requests with no error. In pg-pool the connect timeout
+    // bounds both opening one connection and waiting for a free slot when all `max` connections
+    // are busy; it is NOT a query timeout. Requests that used to queue behind slow queries now fail
+    // after it. Size Postgres max_connections above DB_POOL_MAX times the API instances running at
+    // once (two during a rolling or blue-green deploy) plus the health pool (2) and the worker.
+    DB_POOL_MAX: positiveInt.max(50).default(10),
     DB_CONNECT_TIMEOUT_MS: positiveInt.max(60_000).default(5_000),
     // Upper bound of the best-effort start-up warm-up query; it never fails boot (NFR-09).
     DB_WARMUP_TIMEOUT_MS: positiveInt.max(60_000).default(5_000),
