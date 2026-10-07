@@ -20,6 +20,7 @@ import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import type { Env } from '../config/env';
 import { OrgContextService } from '../database/org-context';
+import { OrgScopeError } from '../database/errors';
 import { PrismaService } from '../database/prisma.service';
 import type { OrgScopedPrismaClient } from '../database/org-scope.extension';
 import { Prisma, UserRole } from '../generated/prisma/client';
@@ -882,22 +883,30 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   ): Promise<SessionOutcome> {
     if (existing.revokedAt) {
       // A rotated or revoked token came back: assume theft and kill the whole family (TC-005).
-      const revoked = await this.revokeFamilyBounded(existing.familyId);
-      // Audit only when the reuse actually killed live tokens, not on every later retry.
-      if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+      const revoked = await this.revokeFamilyBounded(existing.familyId, 'reuse');
+      // Audit only when the reuse actually killed live tokens, not on every later retry. A failed
+      // revocation is detected theft with a live family: the audit row (best effort) is the only
+      // record naming the account, so it is written with revokeFailed.
+      if (!revoked.ok) {
+        await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx, {
+          revokeFailed: true,
+        });
+      } else if (revoked.count > 0) {
+        await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+      }
       throw new UnauthorizedException('Authentication required.');
     }
     if (existing.expiresAt.getTime() <= Date.now()) {
       throw new UnauthorizedException('Authentication required.');
     }
     if (!user.isActive) {
-      await this.revokeFamilyBounded(existing.familyId);
+      await this.revokeFamilyBounded(existing.familyId, 'inactive');
       throw new UnauthorizedException('Authentication required.');
     }
     // Defence in depth: a role that requires 2FA never gets a token from a family that was not
     // opened through 2FA (a promotion racing a password sign-in). Same 401, family revoked.
     if (TOTP_REQUIRED_ROLES.includes(user.role) && !user.totpEnabled) {
-      await this.revokeFamilyBounded(existing.familyId);
+      await this.revokeFamilyBounded(existing.familyId, 'totp');
       throw new UnauthorizedException('Authentication required.');
     }
 
@@ -941,14 +950,20 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       });
     } catch (e) {
       if (e instanceof PasswordChangedSignal) {
-        await this.revokeFamilyBounded(existing.familyId);
+        await this.revokeFamilyBounded(existing.familyId, 'password');
         throw new UnauthorizedException('Authentication required.');
       }
       if (e instanceof RefreshReuseSignal) {
         // Only a real reuse kills live tokens; a reset that revoked the family first does not
         // raise a theft alert (FU-BE-41).
-        const revoked = await this.revokeFamilyBounded(existing.familyId);
-        if (revoked > 0) await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+        const revoked = await this.revokeFamilyBounded(existing.familyId, 'reuse');
+        if (!revoked.ok) {
+          await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx, {
+            revokeFailed: true,
+          });
+        } else if (revoked.count > 0) {
+          await this.auditAfterCommit(user, 'AUTH_REFRESH_REUSE_DETECTED', ctx);
+        }
         throw new UnauthorizedException('Authentication required.');
       }
       // Failure rule (FR-104, TC-005, DL-37, api-contract section 8 Refresh bullet; FU-BE-207).
@@ -971,6 +986,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         this.logger.error(`Refresh rotation failed (${safeErrorName(e)}) REFRESH_ROTATE_FAILED`);
         throw new UnauthorizedException('Authentication required.');
       }
+      // 55P03 after the callback is deliberately treated as unknown too (conservative): a lock
+      // timeout at COMMIT is not expected, and a wrong 503 would invite the retry trap.
       if (code === '40001' || code === '40P01' || code === 'P2034') throw e;
       // Name and fixed code token only, never the message (it can hold SQL and values).
       this.logger.error(
@@ -1366,26 +1383,32 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   /**
    * revokeFamily for the refresh paths (reuse, inactive user, role needing 2FA, changed password).
    * It runs outside the rotation transaction, so contention before commit is a clean failure and
-   * is retried a bounded number of times. On final failure it resolves to 0 and the caller answers
-   * the ordinary 401, never 503 BUSY: an attacker holding a stolen token does not retry, so a 503
-   * would let detected theft fail open. The error log line (REFRESH_REVOKE_FAILED, name and code
-   * only) is the alert signal. Returns the number of tokens revoked.
+   * is retried a bounded number of times. Every error is retried except OrgScopeError (a
+   * programming error that cannot succeed on a retry); the choice is fail-closed on purpose,
+   * because the family must die. On final failure it resolves `{ ok: false }` and the caller
+   * answers the ordinary 401, never 503 BUSY: an attacker holding a stolen token does not retry,
+   * so a 503 would let detected theft fail open. The error log line (REFRESH_REVOKE_FAILED plus a
+   * fixed path token; error name and code only, no user or family id) is the alert signal.
    */
-  private async revokeFamilyBounded(familyId: string): Promise<number> {
+  private async revokeFamilyBounded(
+    familyId: string,
+    path: 'reuse' | 'inactive' | 'totp' | 'password',
+  ): Promise<{ ok: true; count: number } | { ok: false }> {
     let last: unknown;
     for (let attempt = 1; attempt <= REVOKE_ATTEMPTS; attempt += 1) {
       try {
-        return await this.revokeFamily(familyId);
+        return { ok: true, count: await this.revokeFamily(familyId) };
       } catch (e) {
         last = e;
+        if (e instanceof OrgScopeError) break;
         if (attempt < REVOKE_ATTEMPTS)
           await new Promise((r) => setTimeout(r, REVOKE_RETRY_DELAY_MS));
       }
     }
     this.logger.error(
-      `Refresh family revoke failed (${safeErrorName(last)}, ${lockContentionCode(last) ?? 'no-code'}) REFRESH_REVOKE_FAILED`,
+      `Refresh family revoke failed (${safeErrorName(last)}, ${lockContentionCode(last) ?? 'no-code'}) REFRESH_REVOKE_FAILED ${path}`,
     );
-    return 0;
+    return { ok: false };
   }
 
   private async revokeFamily(familyId: string): Promise<number> {

@@ -270,10 +270,14 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
 
   it('FR-104, DL-37, FU-BE-207: a non-database error inside the callback is the ordinary 401: no cookie clearing, no state change, and the old token still works', async () => {
     const { userId, cookie } = await signedIn();
-    failInsideCallback(new TypeError('synthetic'));
+    logged = [];
+    failInsideCallback(new TypeError('secret-marker'));
     expectFixed401(await refresh(cookie), false);
     restoreTransaction();
     expect(await liveCount(userId)).toBe(1);
+    const lines = logged.join('');
+    expect(lines).toContain('REFRESH_ROTATE_FAILED');
+    expect(lines).not.toContain('secret-marker');
   });
 
   it('FR-104, TC-005, DL-37, FU-BE-207: the outcome-unknown 401 clears cp_refresh, writes no audit row, and a later request without the cookie raises no reuse alert', async () => {
@@ -309,24 +313,135 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     expectFixed401(await refresh(cookie), false);
   });
 
-  it('FR-104, TC-005, DL-37, FU-BE-207: a forced 55P03 on revokeFamily during reuse is the ordinary 401 after bounded retries, never 503, and the error line fires', async () => {
-    const { userId, cookie } = await signedIn();
-    await refresh(cookie).expect(200);
+  /** Every revokeFamily attempt of the route fails with 55P03; runs `act` and returns its response. */
+  async function withFailingRevoke(
+    act: () => Promise<request.Response>,
+  ): Promise<{ res: request.Response; calls: number; lines: string }> {
     const model = svc.client.refreshToken as unknown as {
       updateMany: (...a: unknown[]) => Promise<unknown>;
     };
     const spy = jest.spyOn(model, 'updateMany').mockRejectedValue(pgError('55P03'));
     logged = [];
     try {
-      expectFixed401(await refresh(cookie), false);
-      expect(spy).toHaveBeenCalledTimes(3);
+      const res = await act();
+      return { res, calls: spy.mock.calls.length, lines: logged.join('') };
     } finally {
       spy.mockRestore();
     }
-    const lines = logged.join('');
-    expect(lines).toContain('REFRESH_REVOKE_FAILED');
-    expect(lines).not.toContain('synthetic database failure');
+  }
+
+  function expectRevokeFailed(
+    out: { res: request.Response; calls: number; lines: string },
+    path: string,
+  ): void {
+    expectFixed401(out.res, false);
+    expect(out.calls).toBe(3);
+    expect(out.lines).toContain(`REFRESH_REVOKE_FAILED ${path}`);
+    expect(out.lines).not.toContain('synthetic database failure');
+  }
+
+  const reuseAudits = (userId: string): Promise<{ metadata: unknown }[]> =>
+    prisma.auditLog.findMany({
+      where: { actorId: userId, action: 'AUTH_REFRESH_REUSE_DETECTED' },
+      select: { metadata: true },
+    });
+
+  it('FR-104, TC-005, DL-37, FU-BE-207: a forced 55P03 on revokeFamily during reuse is the ordinary 401 after 3 attempts, never 503, the error line fires and the reuse audit row records revokeFailed', async () => {
+    const { userId, cookie } = await signedIn();
+    await refresh(cookie).expect(200);
+    const out = await withFailingRevoke(() => refresh(cookie));
+    expectRevokeFailed(out, 'reuse');
     expect(await liveCount(userId)).toBe(1);
+    const rows = await reuseAudits(userId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.metadata).toEqual({ revokeFailed: true });
+  });
+
+  it('FR-104, DL-37, FU-BE-207: a failed revokeFamily for an inactive user is the ordinary 401 after 3 attempts', async () => {
+    const { userId, cookie } = await signedIn();
+    await prisma.user.update({ where: { id: userId }, data: { isActive: false } });
+    expectRevokeFailed(await withFailingRevoke(() => refresh(cookie)), 'inactive');
+    expect(await liveCount(userId)).toBe(1);
+  });
+
+  it('FR-104, DL-37, FU-BE-207: a failed revokeFamily for a role that needs 2FA without it is the ordinary 401 after 3 attempts', async () => {
+    const { userId, cookie } = await signedIn();
+    await prisma.user.update({ where: { id: userId }, data: { role: UserRole.REVIEWER } });
+    expectRevokeFailed(await withFailingRevoke(() => refresh(cookie)), 'totp');
+    expect(await liveCount(userId)).toBe(1);
+  });
+
+  it('FR-104, DL-37, FU-BE-207: a failed revokeFamily after a changed password (PasswordChangedSignal) is the ordinary 401 after 3 attempts', async () => {
+    const { userId, cookie } = await signedIn();
+    // The hash changes after the route loaded the user and before the rotation INSERT runs.
+    stubTransaction(
+      (real) =>
+        (cb, ...rest) =>
+          real(
+            (tx) =>
+              cb(
+                new Proxy(tx, {
+                  get: (target, key, receiver): unknown => {
+                    const value = Reflect.get(target, key, receiver) as unknown;
+                    if (key !== '$queryRaw' || typeof value !== 'function') return value;
+                    return async (...args: unknown[]) => {
+                      await prisma.user.update({
+                        where: { id: userId },
+                        data: { passwordHash: 'changed-hash' },
+                      });
+                      return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+                    };
+                  },
+                }),
+              ),
+            ...rest,
+          ),
+    );
+    const out = await withFailingRevoke(() => refresh(cookie));
+    restoreTransaction();
+    expectRevokeFailed(out, 'password');
+    expect(await liveCount(userId)).toBe(1);
+  });
+
+  it('FR-104, TC-005, DL-37, FU-BE-207: a failed revokeFamily after a concurrent use (RefreshReuseSignal) is the ordinary 401 after 3 attempts, with the revokeFailed audit row', async () => {
+    const { userId, cookie } = await signedIn();
+    // The flip inside the transaction loses (count 0), as when another request used the token.
+    stubTransaction(
+      (real) =>
+        (cb, ...rest) =>
+          real(
+            (tx) =>
+              cb(
+                new Proxy(tx, {
+                  get: (target, key, receiver): unknown =>
+                    key === 'refreshToken'
+                      ? { updateMany: () => Promise.resolve({ count: 0 }) }
+                      : (Reflect.get(target, key, receiver) as unknown),
+                }),
+              ),
+            ...rest,
+          ),
+    );
+    const out = await withFailingRevoke(() => refresh(cookie));
+    restoreTransaction();
+    expectRevokeFailed(out, 'reuse');
+    expect(await liveCount(userId)).toBe(1);
+    expect((await reuseAudits(userId))[0]?.metadata).toEqual({ revokeFailed: true });
+  });
+
+  it('FR-104, TC-005, FU-BE-207: the outcome-unknown 401 body equals an ordinary 401 body', async () => {
+    const { cookie } = await signedIn();
+    const ordinary = await refresh('cp_refresh=nothing');
+    failAfterCallback(p2028, false);
+    const unknown = await refresh(cookie);
+    restoreTransaction();
+    const shape = (r: request.Response): object => ({
+      ...(r.body as object),
+      traceId: undefined,
+      instance: undefined,
+    });
+    expect(unknown.status).toBe(401);
+    expect(shape(unknown)).toEqual(shape(ordinary));
   });
 
   it('FR-104, DL-37, FU-BE-207: a real 55P03 on the FOR SHARE of the user row (lock held elsewhere, short lock_timeout) is 503 BUSY, and the old token works after the lock is released', async () => {
