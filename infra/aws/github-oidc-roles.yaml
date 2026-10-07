@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CodeProctor pilot: GitHub OIDC provider and the narrow CI deploy role (codeproctor-pilot-deploy:
+  image push and release manifest upload only, ADR 0017 section 7). OWNER-APPLIED, never by CI.
+  Single account, us-east-1. No credentials, keys or account ids live in this file.
+
+# =============================================================================================
+# What the CI role may do (ADR 0017 sections 6 and 7), and nothing else
+#
+#   1. Push images to ECR repositories named codeproctor-pilot-* (only if UseEcr is true; with a
+#      registry that needs no AWS permission, UseEcr=false leaves the role with item 2 only).
+#   2. s3:PutObject on the two release manifest prefixes of the releases bucket:
+#        codeproctor-pilot-releases-<account id>/main/*   and   .../judge0/*
+#
+# Everything else is an explicit Deny on top of the missing Allow: ec2, scheduler, iam, kms,
+# secretsmanager, ssm, logs, cloudwatch, ses, budgets, rds, load balancers, route53 (outside the
+# assess zone), bucket control plane, object reads and writes outside the two prefixes, object
+# listing, code-running services and role chaining.
+#
+# Owned by the OWNER, in separate owner-applied templates (never CI): the data stack
+# (pilot-data-buckets.yaml: key, media, backup and releases buckets), the hosted zone, the
+# instance roles and templates, the scheduler groups and roles, the restore role and drill, the
+# probe, DLQ and SNS, the DNS reset rule and function, the owner's Session Manager role, the S3
+# gateway endpoint policy and the CloudTrail alerts. This stack has no instance role, no
+# scheduler role and no permissions boundary: the roles are made by the owner, and CI has no IAM.
+#
+# Policies are managed policies under the path /codeproctor-guardrails/ (the role's inline limit
+# is 10240 characters, a managed policy 6144).
+# =============================================================================================
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub repository
+        Parameters:
+          - GitHubOwner
+          - GitHubRepo
+      - Label:
+          default: OIDC provider
+        Parameters:
+          - ExistingOidcProviderArn
+      - Label:
+          default: Options
+        Parameters:
+          - UseEcr
+          - AssessHostedZoneId
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub user or organisation that owns the repository (type the real value; no default)
+    AllowedPattern: ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$
+    ConstraintDescription: 1 to 39 letters, digits or hyphens, not starting or ending with a hyphen
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name (type the real value; no default)
+    AllowedPattern: ^[A-Za-z0-9._-]{1,100}$
+    ConstraintDescription: 1 to 100 letters, digits, dots, hyphens or underscores
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+    Description: Leave empty to create the GitHub OIDC provider. If the account already has one, paste its ARN (an account can have only one provider per URL) and make sure it lists sts.amazonaws.com as an audience
+    AllowedPattern: ^$|^arn:aws:iam::[0-9]{12}:oidc-provider/token\.actions\.githubusercontent\.com$
+    ConstraintDescription: Empty, or the ARN of the existing token.actions.githubusercontent.com provider
+  UseEcr:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['false', 'true']
+    Description: true gives CI an image push on ECR repositories codeproctor-pilot-*. false (a registry that needs no AWS permission) leaves CI with the manifest upload only. Owner decision
+  AssessHostedZoneId:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^Z[A-Z0-9]{5,32}$
+    Description: Hosted zone id of the assess zone. Empty means no hosted zone is permitted to CI. Never any other zone (C-50 to C-52). Set it by a stack update only after the hosted-zone stack exists
+
+Rules:
+  RegionMustBeUsEast1:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', us-east-1]
+        AssertDescription: This stack must be created in us-east-1 (C-03)
+  ExistingProviderMustBeInThisAccount:
+    Assertions:
+      - Assert: !Or
+          - !Equals [!Ref ExistingOidcProviderArn, '']
+          - !Equals [
+              !Join [
+                '',
+                [
+                  'arn:aws:iam::',
+                  !Ref 'AWS::AccountId',
+                  ':oidc-provider/token.actions.githubusercontent.com',
+                ],
+              ],
+              !Ref ExistingOidcProviderArn,
+            ]
+        AssertDescription: ExistingOidcProviderArn must be the GitHub provider of THIS account
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+  UseEcrPush: !Equals [!Ref UseEcr, 'true']
+
+Resources:
+  # OIDC identity provider. IAM no longer validates the thumbprint for GitHub (it uses its trusted
+  # root CA library), so ThumbprintList is omitted.
+  GitHubOidcProvider:
+    Type: 'AWS::IAM::OIDCProvider'
+    Condition: 'CreateOidcProvider'
+    Properties:
+      Url: 'https://token.actions.githubusercontent.com'
+      ClientIdList:
+        - 'sts.amazonaws.com'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+  # Deploy role: assumable only from the GitHub environment pilot. The sub claim of an environment
+  # job carries no ref: branch and reviewer rules are GitHub-side (README).
+  PilotDeployRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'codeproctor-pilot-deploy'
+      Path: '/codeproctor-guardrails/'
+      Description: 'GitHub Actions deploy role for the pilot: image push and release manifests only'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'GitHubEnvironmentPilot'
+            Effect: 'Allow'
+            Principal:
+              Federated:
+                !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: 'sts.amazonaws.com'
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOwner}/${GitHubRepo}:environment:pilot'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-github-oidc'
+  PilotDeployReleasePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-release'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: put the two release manifests'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # The only S3 permission: write the two signed release manifests (ADR 0017 section 7).
+          # No read, no list, no delete.
+          - Sid: 'ReleaseManifestsPut'
+            Effect: 'Allow'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/main/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/judge0/*'
+            Condition:
+              StringEquals:
+                aws:ResourceAccount: !Sub '${AWS::AccountId}'
+  PilotDeployEcrPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Condition: 'UseEcrPush'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-ecr'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: image push to codeproctor-pilot-* repositories'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Image push to ECR repositories codeproctor-pilot-* (created by the owner).
+          - Sid: 'EcrAuthToken'
+            Effect: 'Allow'
+            Action: 'ecr:GetAuthorizationToken'
+            Resource: '*'
+          - Sid: 'EcrPushPilotRepositories'
+            Effect: 'Allow'
+            Action:
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:InitiateLayerUpload'
+              - 'ecr:UploadLayerPart'
+              - 'ecr:CompleteLayerUpload'
+              - 'ecr:PutImage'
+              - 'ecr:BatchGetImage'
+              - 'ecr:DescribeImages'
+            Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/codeproctor-pilot-*'
+  PilotDeployGuardPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-deploy-guard'
+      Path: '/codeproctor-guardrails/'
+      Description: 'Pilot deploy: explicit denies'
+      Roles:
+        - !Ref PilotDeployRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # No role may hold any permission on any hosted zone except the assess zone
+          # (AssessHostedZoneId; empty means none). Account-wide actions (ListHostedZones,
+          # CreateHostedZone, route53domains) and every action on any other zone are denied
+          # whether or not the main zone is in this account (OQ-22). On the assess zone the per-
+          # zone actions are only implicitly denied (no allow exists).
+          - Sid: 'DenyRoute53OutsideAssessZone'
+            Effect: 'Deny'
+            Action:
+              - 'route53:*'
+              - 'route53domains:*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
+            # Tag value guards: nothing may be tagged with an Environment value other than pilot,
+            # and nothing tagged otherwise may be touched.
+          - Sid: 'DenyForeignEnvironmentTagOnRequest'
+            Effect: 'Deny'
+            Action: '*'
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:RequestTag/Environment: 'false'
+              StringNotEquals:
+                aws:RequestTag/Environment: 'pilot'
+          - Sid: 'DenyForeignEnvironmentTagOnResource'
+            Effect: 'Deny'
+            Action: '*'
+            Resource: '*'
+            Condition:
+              'Null':
+                aws:ResourceTag/Environment: 'false'
+              StringNotEquals:
+                aws:ResourceTag/Environment: 'pilot'
+            # Object access is denied everywhere except the two release manifest prefixes, which the
+            # carve-out leaves to the one Allow above.
+          - Sid: 'DenyObjectDataPlane'
+            Effect: 'Deny'
+            Action:
+              - 's3:GetObject*'
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:RestoreObject'
+              - 's3:AbortMultipartUpload'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/main/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/judge0/*'
+            # On the two carved-out prefixes CI may only put.
+          - Sid: 'DenyReleasePrefixesExceptPut'
+            Effect: 'Deny'
+            Action:
+              - 's3:GetObject*'
+              - 's3:DeleteObject*'
+              - 's3:PutObjectAcl'
+              - 's3:PutObjectVersionAcl'
+              - 's3:PutObjectTagging'
+              - 's3:RestoreObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/main/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/judge0/*'
+            # Object Lock on the backups bucket: CI can never bypass, shorten or place holds.
+          - Sid: 'DenyObjectLockControls'
+            Effect: 'Deny'
+            Action:
+              - 's3:BypassGovernanceRetention'
+              - 's3:PutObjectRetention'
+              - 's3:PutObjectLegalHold'
+              - 's3:GetObjectRetention'
+              - 's3:GetObjectLegalHold'
+              - 's3:PutBucketObjectLockConfiguration'
+            Resource: '*'
+            # CI cannot list any bucket (no candidate object keys).
+          - Sid: 'DenyListing'
+            Effect: 'Deny'
+            Action:
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:ListBucketMultipartUploads'
+              - 's3:ListAllMyBuckets'
+            Resource: '*'
+          - Sid: 'DenyBucketControlPlane'
+            Effect: 'Deny'
+            Action:
+              - 's3:CreateBucket'
+              - 's3:DeleteBucket*'
+              - 's3:PutBucket*'
+              - 's3:GetBucket*'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutReplicationConfiguration'
+              - 's3:PutAccelerateConfiguration'
+              - 's3:PutAccountPublicAccessBlock'
+              - 's3:CreateAccessPoint*'
+              - 's3:DeleteAccessPoint*'
+              - 's3:PutAccessPointPolicy*'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
+            Resource: '*'
+          # Everything below is not part of CI's job (ADR 0017 section 7: never data buckets, KMS,
+          # instances, instance roles, iam, ec2, scheduler).
+          - Sid: 'DenyInfrastructureAndData'
+            Effect: 'Deny'
+            Action:
+              - 'ec2:*'
+              - 'scheduler:*'
+              - 'iam:*'
+              - 'kms:*'
+              - 'secretsmanager:*'
+              - 'ssm:*'
+              - 'ssmmessages:*'
+              - 'ec2messages:*'
+              - 'ec2-instance-connect:*'
+              - 'logs:*'
+              - 'cloudwatch:*'
+              - 'events:*'
+              - 'sns:*'
+              - 'sqs:*'
+              - 'ses:*'
+              - 'budgets:*'
+              - 'rds:*'
+              - 'rds-db:*'
+              - 'rds-data:*'
+              - 'elasticloadbalancing:*'
+              - 'lambda:*'
+              - 'ecs:*'
+              - 'cloudformation:*'
+              - 'codebuild:*'
+              - 'glue:*'
+              - 'sagemaker:*'
+              - 'batch:*'
+              - 'datapipeline:*'
+              - 'sts:AssumeRole'
+              - 'organizations:*'
+              - 'account:*'
+            Resource: '*'
+          - Sid: 'DenyEcrAdministration'
+            Effect: 'Deny'
+            Action:
+              - 'ecr:CreateRepository'
+              - 'ecr:DeleteRepository*'
+              - 'ecr:SetRepositoryPolicy'
+              - 'ecr:PutLifecyclePolicy'
+              - 'ecr:DeleteLifecyclePolicy'
+              - 'ecr:BatchDeleteImage'
+              - 'ecr:PutImageTagMutability'
+              - 'ecr:PutReplicationConfiguration'
+              - 'ecr:CreatePullThroughCacheRule'
+              - 'ecr:PutRegistryPolicy'
+            Resource: '*'
+          - Sid: 'DenyEcrOutsidePilotRepositories'
+            Effect: 'Deny'
+            Action:
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:InitiateLayerUpload'
+              - 'ecr:UploadLayerPart'
+              - 'ecr:CompleteLayerUpload'
+              - 'ecr:PutImage'
+              - 'ecr:BatchGetImage'
+              - 'ecr:DescribeImages'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/codeproctor-pilot-*'
+  PilotInstanceSsmPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'codeproctor-pilot-instance-ssm'
+      Path: '/codeproctor-guardrails/'
+      Description: 'SSM agent registration and Session Manager channels for the instance roles. Not attached by this stack'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Customer-managed policy for the instance roles (ADR 0017 section 3): agent
+          # registration and the Session Manager channels only. No AWS managed policy. ec2messages
+          # is left out because Run Command is not used; verify at the first start that
+          # registration works without it. The owner attaches this to the instance roles in the
+          # instance template (not CI).
+          - Sid: 'SsmAgentRegistrationAndSessionChannels'
+            Effect: 'Allow'
+            Action:
+              - 'ssm:UpdateInstanceInformation'
+              - 'ssmmessages:CreateControlChannel'
+              - 'ssmmessages:CreateDataChannel'
+              - 'ssmmessages:OpenControlChannel'
+              - 'ssmmessages:OpenDataChannel'
+            Resource: '*'
+
+Outputs:
+  PilotDeployRoleArn:
+    Description: 'Set as GitHub environment pilot variable AWS_ROLE_ARN (not a secret)'
+    Value: !GetAtt PilotDeployRole.Arn
+  OidcProviderArn:
+    Value: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+  PilotInstanceSsmPolicyArn:
+    Description: "Attach to the instance roles in the owner's instance template"
+    Value: !Ref PilotInstanceSsmPolicy

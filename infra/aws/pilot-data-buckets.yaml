@@ -1,0 +1,1028 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  CodeProctor pilot data stores, OWNER-APPLIED (never by CI): media, backup and releases buckets
+  plus one customer-managed KMS key. Single account, us-east-1. Apply after github-oidc-roles.yaml.
+  No credentials, keys or account ids live in this file.
+
+# =============================================================================================
+# Why this is a separate template
+#   CI (codeproctor-pilot-deploy) can only PUT the two release manifests. Bucket policy, Block
+#   Public Access, lifecycle, encryption, versioning and the KMS key are changed only by the owner
+#   through this stack, and the PR 1 role explicitly denies those actions.
+#
+# Layout (ADR 0017 section 5.1, DL-40): media (one bucket, ADR 0013 5.7 prefixes), backup, releases.
+#
+# Retention: RetentionService owns EVERY media data-class clock (C-04, C-26, C-35, 3 year consent).
+# The only age rule on the media bucket is a backstop for face images (tag RetentionClass=face,
+# 88 days). It is NOT a hard 90-days-from-capture cap: the real bound is the capture-to-seal delay
+# (the sealing CopyObject creates a new object and restarts the clock) plus 88 days plus up to 1 day
+# of S3 rounding (next midnight UTC, asynchronous). RetentionService is the real clock.
+#
+# Backups (ADR 0017 section 5.3, C-55): the backup bucket has VERSIONING ON (media and releases stay
+# unversioned). The instance role has NO s3:DeleteObject and NO s3:DeleteObjectVersion on it, so a
+# compromised host's delete or overwrite stays recoverable as a noncurrent version.
+#   - Dumps (ADR 0017 5.3, main at 10f97fd, DL-43): one fixed key db/dump/latest.dump. Lifecycle:
+#     NewerNoncurrentVersions 2 and NoncurrentDays 1, no current-version expiration, so the current
+#     version plus the 2 newest noncurrent ones (the newest 3 dumps) are kept at any age. A dump outside
+#     the newest 3 goes at the later of (its creation + 12 days, the Object Lock) and (its replacement
+#     + 1 day), plus S3's delay.
+#   - OBJECT LOCK: the bucket is created with Object Lock ENABLED (ObjectLockEnabled: true) and a
+#     default retention in GOVERNANCE mode of 12 days. Object Lock needs versioning. S3 has allowed
+#     enabling it on an
+#     existing versioned bucket since late 2023, but the cautious advice stays: a bucket made without it
+#     should be replaced, not reconfigured (and it needs Content-MD5 or a checksum on every upload
+#     and part). No role the instance or CI can assume holds s3:BypassGovernanceRetention (denied
+#     in the CI policy and in this bucket policy for every codeproctor-* role); only the owner's own
+#     principal has it. A compromised host therefore cannot delete or shorten any version for 12 days,
+#     which is the floor for the junk-version push-out attack. A lifecycle expiry of a locked version is
+#     deferred until the lock ends, not an error. With NoncurrentDays 1 and a 12 day lock a lifecycle
+#     expiry that falls inside the lock is skipped and happens once the lock ends (documented S3
+#     behaviour;
+#     UNVERIFIED here, modelled offline and listed in the first-apply checks).
+#     Limit: the lock runs from a version's own creation, so it protects recent dumps only. If backups
+#     stalled for more than 12 days and junk versions then displace the real dumps, the older displaced
+#     versions expire at once and the newest displaced one after 1 day: the alarms must page the owner
+#     first. DETECTION GAPS: (a) at the default of 6 an attacker can push 3 junk dump versions in
+#     one day without tripping DumpVersionsPerDay, and the size alarm is defeated by matching the
+#     size: the 12 day lock keeps the real dumps but nothing pages; (b) the expiry function decides
+#     "the newest 3 full base backups" from key listings it cannot verify (it has no GetObject):
+#     fake base backups spread over several days stay under MaxFullBaseBackupCountChange and could
+#     steer it into deleting real ones after 12 days (database track: a signed or owner-held base-
+#     backup inventory). Day 30 is the owner's decision: NOTHING deletes
+#     automatically at day 30 (no expiry rule), only the 28 day alarm fires.
+#   - ALARMS (the real guard against junk versions). The threat is a compromised main instance, so the
+#     instance must NOT be the producer of any alarmed metric. The owner-applied expiry Lambda is
+#     the ONLY
+#     producer of NewestDumpAgeHours, DumpSizeChangeFactor, DumpVersionsPerDay,
+#     FullBaseBackupCountChange
+#     and OldestKeptBackupAgeDays (namespace codeproctor-pilot), all computed from ListObjectVersions on
+#     db/dump/ and db/wal/ (Size, LastModified). The uploader's BackupSuccess goes to a DIFFERENT
+#     namespace
+#     (codeproctor-pilot-instance) and is a secondary signal only. REQUIREMENT for the owner's instance
+#     template: NO role other than codeproctor-pilot-backup-expiry may PutMetricData into the namespace
+#     codeproctor-pilot (the main, Judge0 and restore roles too): their cloudwatch:PutMetricData
+#     must carry
+#     cloudwatch:namespace = codeproctor-pilot-instance, so none can inflate an alarmed metric.
+#     Metrics are
+#     published WITH NO DIMENSIONS (the alarms have none: with dimensions the notBreaching anomaly
+#     alarms
+#     would never see data and fail silent). The
+#     Lambda is a dependency outside this template (code owned by the database track).
+#   - Base backups and WAL (db/wal/, pgBackRest or WAL-G repository, full base backups only): NO age
+#     lifecycle rule. An owner-applied expiry function, with its own role (codeproctor-pilot-backup-
+#     expiry,
+#     created here), run daily by a schedule and never on the instance, keeps everything younger than
+#     12 days (the lock makes earlier deletion impossible anyway) plus the newest 3 full base
+#     backups and
+#     the WAL from the oldest of them, and deletes the rest. It may delete only under db/wal/,
+#     db/erasure-list/ and db/erasure-completed/ (never db/dump/, which lifecycle owns). The
+#     function and its schedule (code owned by the database track) belong to a later owner
+#     template, ADR 0017 section 7; this stack builds only the role and the bucket policy that
+#     permits it.
+#   - 30 day cap: nothing is kept past 30 days without the owner's decision. Alarms: no new backup for
+#     2 days (Lambda-side metric), and a kept backup reaching 28 days (metrics below).
+#   - ADR 0004 9.2 (versioning off or noncurrent expired within 1 day) was written for the media bucket,
+#     whose RetentionService fails closed on it; it does not read the backup bucket. ADR 0017 5.1 now
+#     says versioning ON for the backup bucket (C-55), so there is no conflict.
+#   - NO-OVERWRITE on the two erasure prefixes only: the bucket policy denies the instance role an
+#     s3:PutObject
+#     under db/erasure-list/* and db/erasure-completed/* that does not send If-None-Match (a conditional
+#     write; entries are written once under unique <stamp>-<uuid>.json names). NOT verified against real
+#     S3 (first-apply checks). It is NOT applied to db/wal/ or the physical repository (the tool
+#     rewrites its
+#     metadata in place: there versioning, the lock and version-aware expiry are the control), nor to
+#     db/dump/latest.dump (overwriting it is the design). The restore and the expiry prune rule treat an
+#     entry as present if ANY version of it, current or noncurrent, was ever non-empty.
+#     Residual: not verified against real S3; If-None-Match succeeds when the current version is a delete
+#     marker (a plain DeleteObject by the expiry function); multipart and copies without the header are
+#     denied by design; the owner's principal is not subject to it; s3:PutObjectTagging on these prefixes
+#     is intentionally not denied (no lifecycle rule on the backup bucket filters on tags).
+#     ROLLOUT: do not apply this stack for pilot use until erasure-list.sh sends --if-none-match and treats
+#     412 as success (FU-QA-18).
+#   - WRITE CONFINEMENT: the backup bucket policy denies the instance role s3:PutObject* on every
+#     key but
+#     db/dump/latest.dump, db/wal/*, db/erasure-list/* and db/erasure-completed/*. A dump under another
+#     key would never expire (a current version never expires and the expiry role is denied under
+#     db/dump/), and nothing deletes outside those prefixes.
+#   - db/erasure-list/ and db/erasure-completed/ never age-expire; they are pruned ONLY by the expiry
+#     function under the ADR 0017 5.3 "Erasure-list pruning" rule. The instance role cannot delete there
+#     either (the ADR gives it no delete on the backups bucket), so erasure-list.sh prune cannot run
+#     on the
+#     instance: flagged for the database track.
+#
+# Versioning is OFF on media and releases (ADR 0004 section 9.2).
+# =============================================================================================
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Roles created by the owner in other templates
+        Parameters:
+          - InstanceRoleName
+          - Judge0RoleName
+          - RestoreRoleName
+      - Label:
+          default: Browser access
+        Parameters:
+          - AppOrigin
+      - Label:
+          default: Alarms
+        Parameters:
+          - DumpSizeChangeFactor
+          - MaxDumpVersionsPerDay
+          - MaxFullBaseBackupCountChange
+          - AssessHostedZoneId
+          - AlarmTopicArn
+
+Parameters:
+  InstanceRoleName:
+    Type: String
+    Default: codeproctor-pilot-app
+    AllowedPattern: ^codeproctor-pilot-[a-z0-9-]{1,40}$
+    Description: Main instance role (path /, created by the OWNER in the instance template). The only role with read and write on the media and backup buckets
+  Judge0RoleName:
+    Type: String
+    Default: codeproctor-pilot-judge0
+    AllowedPattern: ^codeproctor-pilot-[a-z0-9-]{1,40}$
+    Description: Judge0 instance role (path /, created by the owner). Reads only its own prefix of the releases bucket
+  RestoreRoleName:
+    Type: String
+    Default: codeproctor-pilot-restore
+    AllowedPattern: ^codeproctor-pilot-[a-z0-9-]{1,40}$
+    Description: Owner's restore role (path /). Decrypt through S3 plus Get and List on the backup bucket only
+  AppOrigin:
+    Type: String
+    AllowedPattern: ^https://[A-Za-z0-9.-]+(:[0-9]{2,5})?$
+    Description: Web origin that uploads and plays media in the browser (the same value as NEXT_PUBLIC_UPLOAD_ORIGINS). No default. Used for CORS on the media bucket, which CI cannot change later
+  DumpSizeChangeFactor:
+    Type: Number
+    Default: 3
+    MinValue: 1.5
+    Description: Anomaly alarm. A new dump whose size differs from the previous one by more than this factor (either way) pages the owner. Published by the expiry Lambda (namespace codeproctor-pilot, no dimensions)
+  MaxDumpVersionsPerDay:
+    Type: Number
+    Default: 6
+    MinValue: 1
+    Description: Anomaly alarm. More new dump versions in a day than the schedule allows pages the owner. Dumps are taken at every shutdown and before a migration, so a busy day with several slots has several; 6 is a stated allowance, derive it from the booked slots if they exceed it. Published by the expiry Lambda (namespace codeproctor-pilot, no dimensions)
+  MaxFullBaseBackupCountChange:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: Anomaly alarm. A change in the number of full base backups in the physical repository larger than this within a day pages the owner. Needs the expiry function to publish FullBaseBackupCountChange
+  AssessHostedZoneId:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^Z[A-Z0-9]{5,32}$
+    Description: Leave EMPTY (strictly tighter; the expiry role then has no Route 53 permission at all). If you set it, set the same value as in github-oidc-roles.yaml. The expiry role carries the Route 53 deny for every zone except this one
+  AlarmTopicArn:
+    Type: String
+    Default: ''
+    AllowedPattern: ^$|^arn:aws:sns:us-east-1:[0-9]{12}:codeproctor-pilot-[A-Za-z0-9_-]+$
+    Description: SNS topic (created by the owner in the instance and alarms template) that emails the owner. Empty creates the backup alarms without an action; re-apply with the ARN once the topic exists
+
+Rules:
+  RegionMustBeUsEast1:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', us-east-1]
+        AssertDescription: This stack must be created in us-east-1 (C-03)
+
+Conditions:
+  HasAlarmTopic: !Not [!Equals [!Ref AlarmTopicArn, '']]
+
+Resources:
+  # One customer-managed key for the media and backup buckets (ADR 0017 5.2). Tags Environment=pilot
+  # and Purpose=data and the alias match what the CI role's denies expect. Use: the main instance
+  # role (through S3) and the restore role (decrypt through S3). The Judge0 role and CI get nothing.
+  PilotDataKey:
+    Type: 'AWS::KMS::Key'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      Description: 'codeproctor pilot data key (media and backups)'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'OwnerAdminThroughIam'
+            Effect: 'Allow'
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: 'InstanceRoleUseThroughS3'
+            Effect: 'Allow'
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Sub '${AWS::AccountId}'
+                kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'RestoreRoleDecryptThroughS3'
+            Effect: 'Allow'
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Sub '${AWS::AccountId}'
+                kms:ViaService: !Sub 's3.${AWS::Region}.amazonaws.com'
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${RestoreRoleName}'
+          - Sid: 'DenyUseToOtherCodeproctorRoles'
+            Effect: 'Deny'
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:Encrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${RestoreRoleName}'
+          - Sid: 'DenyKeyAdministrationToCodeproctorRoles'
+            Effect: 'Deny'
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:PutKeyPolicy'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:DisableKey*'
+              - 'kms:EnableKey*'
+              - 'kms:CreateGrant'
+              - 'kms:RevokeGrant'
+              - 'kms:RetireGrant'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+              - 'kms:UpdateKeyDescription'
+              - 'kms:CreateAlias'
+              - 'kms:UpdateAlias'
+              - 'kms:DeleteAlias'
+              - 'kms:ImportKeyMaterial'
+              - 'kms:DeleteImportedKeyMaterial'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-pilot-data-buckets'
+        - Key: 'Purpose'
+          Value: 'data'
+  PilotDataKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      AliasName: 'alias/codeproctor-pilot-data'
+      TargetKeyId: !Ref PilotDataKey
+  # Media: recordings, room scans, ID images, selfies, evidence, report PDFs and consent PDFs under
+  # orgs/<org>/... (ADR 0013 5.7). RetentionService deletes on the real clocks. Only face images
+  # (tagged RetentionClass=face, also evidence/sealed/ frames) have an age backstop: 88 days (C-27,
+  # C-35).
+  MediaBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      BucketName: !Sub 'codeproctor-pilot-media-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt PilotDataKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: 'BucketOwnerEnforced'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-pilot-data-buckets'
+        - Key: 'Purpose'
+          Value: 'media'
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'abort-incomplete-multipart'
+            Status: 'Enabled'
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: 'expire-face-images-88-days'
+            Status: 'Enabled'
+            TagFilters:
+              - Key: 'RetentionClass'
+                Value: 'face'
+            ExpirationInDays: 88
+      CorsConfiguration:
+        CorsRules:
+          - Id: 'browser-upload-and-playback'
+            AllowedOrigins:
+              - !Ref AppOrigin
+            AllowedMethods:
+              - 'PUT'
+              - 'GET'
+              - 'HEAD'
+            AllowedHeaders:
+              - 'Content-Type'
+              - 'If-None-Match'
+              - 'x-amz-tagging'
+              - 'x-amz-checksum-crc32'
+              - 'x-amz-sdk-checksum-algorithm'
+            ExposedHeaders:
+              - 'ETag'
+            MaxAge: 3600
+  MediaBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'DenyInsecureTransport'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: 'DenyOtherEncryptionAlgorithm'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption: 'false'
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: 'aws:kms'
+          - Sid: 'DenyOtherKmsKey'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'false'
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt PilotDataKey.Arn
+          - Sid: 'DenyKmsHeaderWithoutKeyId'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-server-side-encryption: 'aws:kms'
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'true'
+          - Sid: 'DenyObjectAccessExceptInstanceRole'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:GetObject*'
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:RestoreObject'
+              - 's3:AbortMultipartUpload'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyListingExceptInstanceRole'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:ListBucketMultipartUploads'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyConfigChangeFromCodeproctorRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutBucket*'
+              - 's3:DeleteBucket*'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutReplicationConfiguration'
+              - 's3:PutAccelerateConfiguration'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-media-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+  # Backups (ADR 0017 5.3, C-55): versioning ON for this bucket only. Dumps: fixed key
+  # db/dump/latest.dump, noncurrent versions expire after 1 day but the newest 3 noncurrent versions
+  # are kept, no current-version expiration. db/wal/ (full base backups and WAL): NO age rule; the
+  # owner-applied expiry function deletes by the 12 day plus newest-3-full-backups rule. db/erasure-
+  # list/ and db/erasure-completed/ never age-expire.
+  BackupBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      BucketName: !Sub 'codeproctor-pilot-backup-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt PilotDataKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: 'BucketOwnerEnforced'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-pilot-data-buckets'
+        - Key: 'Purpose'
+          Value: 'backup'
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'abort-incomplete-multipart'
+            Status: 'Enabled'
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: 'keep-newest-dump-versions'
+            Status: 'Enabled'
+            Prefix: 'db/dump/'
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+              NewerNoncurrentVersions: 2
+      VersioningConfiguration:
+        Status: 'Enabled'
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: 'Enabled'
+        Rule:
+          DefaultRetention:
+            Mode: 'GOVERNANCE'
+            Days: 12
+  BackupBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'DenyInsecureTransport'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: 'DenyOtherEncryptionAlgorithm'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption: 'false'
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: 'aws:kms'
+          - Sid: 'DenyOtherKmsKey'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'false'
+              StringNotEquals:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt PilotDataKey.Arn
+          - Sid: 'DenyKmsHeaderWithoutKeyId'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-server-side-encryption: 'aws:kms'
+              'Null':
+                s3:x-amz-server-side-encryption-aws-kms-key-id: 'true'
+          - Sid: 'DenyObjectAccessExceptNamedRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:GetObject*'
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:RestoreObject'
+              - 's3:AbortMultipartUpload'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${RestoreRoleName}'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-backup-expiry'
+          - Sid: 'DenyListingExceptNamedRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:ListBucketMultipartUploads'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${RestoreRoleName}'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-backup-expiry'
+          - Sid: 'DenyExpiryRoleExceptListAndDelete'
+            Effect: 'Deny'
+            Principal: '*'
+            NotAction:
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-backup-expiry'
+          - Sid: 'DenyRestoreRoleWrites'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:AbortMultipartUpload'
+              - 's3:RestoreObject'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${RestoreRoleName}'
+          - Sid: 'DenyObjectLockControlToCodeproctorRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:BypassGovernanceRetention'
+              - 's3:PutObjectRetention'
+              - 's3:PutObjectLegalHold'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+          - Sid: 'DenyInstanceRoleWritesOutsideKnownKeys'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutObject*'
+              - 's3:AbortMultipartUpload'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/dump/latest.dump'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/wal/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-list/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-completed/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyOverwritingErasureEntries'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-list/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-completed/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+              'Null':
+                s3:if-none-match: 'true'
+          - Sid: 'DenyExpiryRoleOnDumps'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/dump/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-pilot-backup-expiry'
+          - Sid: 'DenyInstanceRoleDeletes'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:DeleteObject'
+              - 's3:DeleteObjectVersion'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyConfigChangeFromCodeproctorRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutBucket*'
+              - 's3:DeleteBucket*'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutReplicationConfiguration'
+              - 's3:PutAccelerateConfiguration'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+  # Releases: the signed release manifests (ADR 0017 section 6), one prefix per instance: main/ and
+  # judge0/. No candidate data, so SSE-S3. CI writes both prefixes only; the main role reads main/,
+  # the Judge0 role reads judge0/. No lifecycle: the objects are tiny and the owner prunes old
+  # manifests (the ADR's keep-last-10 is not expressible in lifecycle without versioning).
+  ReleasesBucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    UpdateReplacePolicy: 'Retain'
+    Properties:
+      BucketName: !Sub 'codeproctor-pilot-releases-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: 'BucketOwnerEnforced'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-pilot-data-buckets'
+        - Key: 'Purpose'
+          Value: 'releases'
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'abort-incomplete-multipart'
+            Status: 'Enabled'
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+  ReleasesBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref ReleasesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'DenyInsecureTransport'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          - Sid: 'DenyMainManifestsExceptInstanceRole'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:GetObject*'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/main/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+          - Sid: 'DenyJudge0ManifestsExceptJudge0Role'
+            Effect: 'Deny'
+            Principal: '*'
+            Action: 's3:GetObject*'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/judge0/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Judge0RoleName}'
+          - Sid: 'DenyWritesExceptDeployRole'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:AbortMultipartUpload'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/*'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-deploy'
+          - Sid: 'DenyDeployRoleOutsideManifestPrefixes'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutObject*'
+              - 's3:DeleteObject*'
+              - 's3:GetObject*'
+            NotResource:
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/main/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/judge0/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-deploy'
+          - Sid: 'DenyDeployRoleReadsAndDeletes'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:GetObject*'
+              - 's3:DeleteObject*'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}/*'
+            Condition:
+              ArnEquals:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/codeproctor-pilot-deploy'
+          - Sid: 'DenyListingExceptManifestReaders'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:ListBucket'
+              - 's3:ListBucketVersions'
+              - 's3:ListBucketMultipartUploads'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+              ArnNotEquals:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceRoleName}'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${Judge0RoleName}'
+          - Sid: 'DenyConfigChangeFromCodeproctorRoles'
+            Effect: 'Deny'
+            Principal: '*'
+            Action:
+              - 's3:PutBucket*'
+              - 's3:DeleteBucket*'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:PutReplicationConfiguration'
+              - 's3:PutAccelerateConfiguration'
+              - 's3:PutInventoryConfiguration'
+              - 's3:PutAnalyticsConfiguration'
+              - 's3:PutMetricsConfiguration'
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-releases-${AWS::AccountId}'
+            Condition:
+              ArnLike:
+                aws:PrincipalArn:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-*'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/codeproctor-guardrails/*'
+  # Expiry role for the owner-applied expiry function (never on the instance). It holds NO
+  # s3:BypassGovernanceRetention (the bucket policy denies it to every codeproctor-* role); with the
+  # 12 day Object Lock it deletes only what is past the lock. It can list the backups bucket and
+  # delete ONLY under db/wal/, db/erasure-list/ and db/erasure-completed/ (the bucket policy denies
+  # it everything else, and any delete under db/dump/). TRUST: the Lambda service only, with NO
+  # aws:SourceArn or aws:SourceAccount condition (Lambda probably does not populate them for an
+  # execution role, and the ADR has no aws:SourceArn here). The guard is instead: no codeproctor-*
+  # role may hold iam:PassRole on this role or lambda:CreateFunction, UpdateFunctionCode or
+  # UpdateFunctionConfiguration (CI already denies iam:* and lambda:*; this is a requirement on the
+  # owner templates). It has no KMS and no GetObject, so it cannot read backup metadata files: see
+  # the follow-ups. The function and its daily schedule come in a later owner template (code owned
+  # by the database track, ADR 0017 section 7).
+  BackupExpiryRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'codeproctor-pilot-backup-expiry'
+      Description: 'Owner-applied backup expiry function: list and delete on the backups bucket only'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'backup-expiry'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'ListBackupsBucket'
+                Effect: 'Allow'
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:ListBucketVersions'
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}'
+              - Sid: 'DeleteBackupObjects'
+                Effect: 'Allow'
+                Action:
+                  - 's3:DeleteObject'
+                  - 's3:DeleteObjectVersion'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/wal/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-list/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::codeproctor-pilot-backup-${AWS::AccountId}/db/erasure-completed/*'
+              - Sid: 'DenyRoute53OutsideAssessZone'
+                Effect: 'Deny'
+                Action:
+                  - 'route53:*'
+                  - 'route53domains:*'
+                NotResource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${AssessHostedZoneId}'
+              - Sid: 'OwnLogs'
+                Effect: 'Allow'
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/codeproctor-pilot-backup-expiry:*'
+              - Sid: 'AlarmedMetrics'
+                Effect: 'Allow'
+                Action: 'cloudwatch:PutMetricData'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: 'codeproctor-pilot'
+      Tags:
+        - Key: 'Environment'
+          Value: 'pilot'
+        - Key: 'ManagedBy'
+          Value: 'codeproctor-pilot-data-buckets'
+  # Backup alarms (C-55, ADR 0017 5.3). Every alarmed metric (namespace codeproctor-pilot) is
+  # produced ONLY by the owner-applied expiry Lambda, from ListObjectVersions (Size, LastModified),
+  # because the threat is a compromised main instance that could keep publishing normal values. The
+  # instance's own BackupSuccess uses another namespace (codeproctor-pilot-instance) and is a
+  # secondary signal only. The producer is a dependency outside this template (database track).
+  # Until it exists the freshness and age alarms sit in ALARM (missing data breaches), so the first
+  # email is expected. The freshness alarm is 2 days (C-55).
+  BackupFreshnessAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-stale-2d'
+      AlarmDescription: 'The newest dump is older than 2 days (Lambda-side metric, published once a day by the expiry function, no dimensions)'
+      Namespace: 'codeproctor-pilot'
+      MetricName: 'NewestDumpAgeHours'
+      Statistic: 'Maximum'
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 48
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'breaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  BackupUploaderSignalAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-uploader-silent-2d'
+      AlarmDescription: 'Secondary signal only: the uploader on the instance reported no success for 2 days'
+      Namespace: 'codeproctor-pilot-instance'
+      MetricName: 'BackupSuccess'
+      Statistic: 'Sum'
+      Period: 86400
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: 'LessThanThreshold'
+      TreatMissingData: 'breaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  DumpSizeAnomalyAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-dump-size-anomaly'
+      AlarmDescription: 'A new dump differs in size from the previous one by more than the allowed factor. The metric is max(new/old, old/new), always >= 1'
+      Namespace: 'codeproctor-pilot'
+      MetricName: 'DumpSizeChangeFactor'
+      Statistic: 'Maximum'
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: !Ref DumpSizeChangeFactor
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  DumpVersionCountAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-dump-versions-per-day'
+      AlarmDescription: 'More dump versions in a day than the schedule allows'
+      Namespace: 'codeproctor-pilot'
+      MetricName: 'DumpVersionsPerDay'
+      Statistic: 'Maximum'
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: !Ref MaxDumpVersionsPerDay
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  BaseBackupCountAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-base-backup-count'
+      AlarmDescription: 'The number of full base backups changed by more than allowed in a day. The metric is the ABSOLUTE change, so drops alarm too'
+      Namespace: 'codeproctor-pilot'
+      MetricName: 'FullBaseBackupCountChange'
+      Statistic: 'Maximum'
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: !Ref MaxFullBaseBackupCountChange
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+  BackupAgeAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: 'codeproctor-pilot-backup-age-28d'
+      AlarmDescription: 'A kept backup is about to reach 30 days (C-55, owner decision needed)'
+      Namespace: 'codeproctor-pilot'
+      MetricName: 'OldestKeptBackupAgeDays'
+      Statistic: 'Maximum'
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 28
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold'
+      TreatMissingData: 'breaching'
+      AlarmActions: !If [HasAlarmTopic, [!Ref AlarmTopicArn], !Ref AWS::NoValue]
+
+Outputs:
+  MediaBucketName:
+    Description: 'S3_MEDIA_BUCKET'
+    Value: !Ref MediaBucket
+  BackupBucketName:
+    Description: 'S3_BACKUP_BUCKET'
+    Value: !Ref BackupBucket
+  ReleasesBucketName:
+    Description: 'Releases bucket (manifests)'
+    Value: !Ref ReleasesBucket
+  DataKeyArn:
+    Value: !GetAtt PilotDataKey.Arn
+  DataKeyAlias:
+    Value: 'alias/codeproctor-pilot-data'
