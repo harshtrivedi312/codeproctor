@@ -74,8 +74,9 @@ function workerBlock() {
   return [
     '',
     '# --- Face-match worker, local demo (apps/worker/tools/be08/run-local.sh; ADR 0014) ---',
-    '# The API and the worker share this signing key; the origin must equal S3_ENDPOINT exactly. Without',
-    '# the model files the worker reports not ready and the identity check answers MANUAL_REVIEW.',
+    '# The signing key is shared with the API once it has a worker client (none on main yet); the origin',
+    '# must equal S3_ENDPOINT exactly. Without the model files the worker reports not ready and the',
+    '# identity check answers MANUAL_REVIEW.',
     'WORKER_BASE_URL=http://localhost:8000',
     'WORKER_HMAC_KEY_ID=local1',
     `WORKER_HMAC_KEY=${b64(32)}`,

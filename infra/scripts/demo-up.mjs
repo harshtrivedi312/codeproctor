@@ -23,7 +23,14 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseEnv } from 'node:util';
 import { parsePids } from './demo-down.mjs';
-import { DEMO_PORTS, dockerContainers, isFree, judgePort } from './demo-ports.mjs';
+import {
+  DEMO_PORTS,
+  dockerContainers,
+  foreignContainers,
+  foreignMessage,
+  isFree,
+  judgePort,
+} from './demo-ports.mjs';
 
 export const API_HEALTH = 'http://localhost:4000/api/v1/health';
 export const WEB_LOGIN = 'http://localhost:3000/admin/login';
@@ -67,7 +74,7 @@ export function planSteps({ hasEnv, hasModules, startApps, startWorker = false }
   }
   if (startWorker) {
     steps.push({
-      name: 'start the face-match worker on the host (optional; needs Python 3.12)',
+      name: 'start the face-match worker on the host (optional; needs Python 3.12; not waited for)',
       app: 'worker',
     });
   }
@@ -166,7 +173,7 @@ function startApp(root, name, cmd, env) {
 /**
  * Starts the face-match worker natively (apps/worker/tools/be08/run-local.sh, DL-57). It is optional: if
  * Python 3.12 is missing, the command is printed instead; if it does not answer in time, a warning is
- * printed and the demo goes on (without it the identity check answers MANUAL_REVIEW).
+ * printed and the demo goes on. It is not waited for: the first run installs large packages.
  */
 async function startWorkerStep(root) {
   const command = `WORKER_OBJECT_STORE_BUCKET=<media bucket> ${WORKER_SCRIPT}`;
@@ -183,22 +190,17 @@ async function startWorkerStep(root) {
   const env = parseEnv(readFileSync(join(root, '.env'), 'utf8'));
   const workerEnv = { ...process.env };
   for (const [k, v] of Object.entries(env)) if (k.startsWith('WORKER_')) workerEnv[k] = v;
+  if (!workerEnv.WORKER_OBJECT_STORE_ORIGINS && env.S3_ENDPOINT)
+    workerEnv.WORKER_OBJECT_STORE_ORIGINS = env.S3_ENDPOINT;
   if (!workerEnv.WORKER_OBJECT_STORE_BUCKET)
     workerEnv.WORKER_OBJECT_STORE_BUCKET = env.S3_MEDIA_BUCKET ?? 'codeproctor-media';
   startApp(root, 'worker', ['bash', WORKER_SCRIPT], workerEnv);
   console.log(
-    'installing and starting it in the background (the first run installs packages and can take several minutes; log: .demo/worker.log)...',
+    'started in the background (the first run installs packages and can take several minutes; log: .demo/worker.log; it answers at ' +
+      WORKER_HEALTH +
+      ' when ready).',
   );
-  try {
-    await waitFor(WORKER_HEALTH, 'the worker', 600);
-    console.log('up.');
-    return 'running (models missing means identity checks go to MANUAL_REVIEW, see the guide)';
-  } catch {
-    console.log(
-      'warning: the worker did not answer yet; see .demo/worker.log. The demo works without it.',
-    );
-    return 'not answering yet (see .demo/worker.log); the demo works without it';
-  }
+  return `starting in the background (log .demo/worker.log; ready when ${WORKER_HEALTH} answers; no face models yet, so identity checks go to MANUAL_REVIEW)`;
 }
 
 async function main() {
@@ -252,6 +254,8 @@ async function main() {
       const ourCompose = join(root, 'infra/docker-compose.yml');
       const containers = dockerContainers();
       const problems = [];
+      const foreign = foreignContainers(containers, ourCompose);
+      if (foreign.length > 0) problems.push(foreignMessage(foreign));
       for (const spec of DEMO_PORTS) {
         if (spec.kind === 'api' && !startApps) continue;
         if (spec.kind === 'web' && !startApps) continue;

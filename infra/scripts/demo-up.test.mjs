@@ -5,7 +5,13 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { looksLikeOurs, parsePids } from './demo-down.mjs';
-import { DEMO_PORTS, judgePort, parseDockerPs } from './demo-ports.mjs';
+import {
+  DEMO_PORTS,
+  foreignContainers,
+  foreignMessage,
+  judgePort,
+  parseDockerPs,
+} from './demo-ports.mjs';
 import { planSteps, summary } from './demo-up.mjs';
 import { REPO_ROOT } from './test-support.mjs';
 
@@ -131,6 +137,28 @@ describe('port checks (local demo)', () => {
       },
       { name: 'web', configFiles: [], ports: [3000, 3000] },
     ]);
+  });
+
+  it('DL-57: a stopped container of another checkout in the shared project is a clash even when its ports are free', () => {
+    const containers = [
+      {
+        name: 'codeproctor-postgres-1',
+        configFiles: ['/other/infra/docker-compose.yml'],
+        ports: [],
+      },
+      { name: 'codeproctor-redis-1', configFiles: [ourCompose], ports: [] },
+      { name: 'unlabelled', configFiles: [], ports: [] },
+    ];
+    const foreign = foreignContainers(containers, ourCompose);
+    assert.deepEqual(
+      foreign.map((c) => c.name),
+      ['codeproctor-postgres-1'],
+    );
+    const message = foreignMessage(foreign);
+    assert.match(message, /codeproctor-postgres-1/);
+    assert.match(message, /\/other\/infra\/docker-compose\.yml/);
+    assert.match(message, /pnpm dev:infra:down/);
+    assert.deepEqual(foreignContainers([containers[1]], ourCompose), []);
   });
 
   it('a free port is fine', () => {

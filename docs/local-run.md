@@ -22,13 +22,13 @@ email address, or a real candidate. Last checked against `main` on 2026-10-07 (c
 - **Docker Desktop** (or Docker Engine) running, for PostgreSQL 16, Redis 8.8 and Adminer.
 - Git. Nothing else: no AWS account, no cloud login.
 
-Free local ports: 5432 (PostgreSQL), 6379 (Redis), 8080 (Adminer), 4000 (API), 3000 (web). If
+Free local ports: 5432 (PostgreSQL), 6379 (Redis), 8080 (Adminer), 1025 and 8025 (Mailpit), 9000 and 9001 (MinIO), 4000 (API), 3000 (web), 8000 (worker). If
 another stack already uses 5432 or 6379, stop it first (or see "Troubleshooting").
 
 ## 2. One command, or step by step
 
-**One command** (from the repository root, with Docker running and ports 5432, 6379, 8025, 8080, 9000,
-9001, 4000 and 3000 free):
+**One command** (from the repository root, with Docker running and ports 5432, 6379, 8080, 1025, 8025, 9000,
+9001, 4000, 3000 and 8000 free):
 
 ```bash
 pnpm install
@@ -40,9 +40,9 @@ use" below), starts the stack, builds the shared package, migrates,
 seeds, gives the seeded invitation a real link, starts the API and the web app in the background (logs in
 `.demo/`), waits until both answer, and prints the links, the accounts and where the password is. It is safe
 to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
-its own pnpm dev commands). `pnpm demo:down` stops the two apps (`pnpm demo:down --infra` stops the containers too; the
+its own pnpm dev commands). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
 data stays in Docker volumes). `pnpm demo:up --dry-run` lists the steps without running them, and
-`--no-apps` starts everything except the API and the web app.
+`--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker.
 
 **Step by step** (what `demo:up` does):
 
@@ -207,7 +207,7 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | MinIO (the object store) in the stack                 | Works: the two buckets exist at start, an upload and a listing through the S3 API work, and a browser preflight from `http://localhost:3000` is allowed while any other origin is not (checked). |
 | File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log still shows a few `Job consent-pdf failed` lines; the job also emails the consent copy, which needs the candidate mail binding (above). Browser uploads from the candidate screens are not exercised here. |
 | Running candidate code                                | The API accepts `JUDGE0_MODE=stub` and `local-env.mjs` switches it on (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
-| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
+| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. **The API has no worker client on `main` yet** (nothing in `apps/api` reads the `WORKER_*` settings), so the worker runs but the identity check does not call it; the match is MANUAL_REVIEW whatever the models. **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
 | Proctoring in a real browser against the real API     | Not wired end to end; the browser parts run in mock mode (`/t/demo/test`, `/dev/proctor`).              |
 
 ## 7. Not on `main` yet: what is planned

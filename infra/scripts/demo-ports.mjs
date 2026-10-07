@@ -30,7 +30,7 @@ export function isFree(port) {
 }
 
 /**
- * The containers that publish ports, from `docker ps`: [{ name, configFiles, ports }]. Reads only;
+ * The containers of the `codeproctor` compose project (running or stopped), from `docker ps -a`: [{ name, configFiles, ports }]. Reads only;
  * a missing docker gives an empty list.
  */
 export function dockerContainers() {
@@ -38,6 +38,9 @@ export function dockerContainers() {
     'docker',
     [
       'ps',
+      '-a',
+      '--filter',
+      'label=com.docker.compose.project=codeproctor',
       '--format',
       '{{.Names}}\t{{.Label "com.docker.compose.project.config_files"}}\t{{.Ports}}',
     ],
@@ -59,6 +62,26 @@ export function parseDockerPs(text) {
     out.push({ name, configFiles: configFiles.split(',').filter(Boolean), ports: published });
   }
   return out;
+}
+
+/**
+ * Pure: containers of the shared `codeproctor` compose project that belong to ANOTHER checkout, running or
+ * stopped. `docker compose up` here would recreate them and reuse their named volumes, which is taking
+ * another stack over, so any such container is a clash even when its ports are free.
+ */
+export function foreignContainers(containers, ourCompose) {
+  return containers.filter((c) => c.configFiles.length > 0 && !c.configFiles.includes(ourCompose));
+}
+
+export function foreignMessage(foreign) {
+  const names = foreign.map((c) => c.name).join(', ');
+  const where = foreign[0]?.configFiles[0] ?? 'another checkout';
+  return (
+    `The compose project "codeproctor" already has containers from another checkout (${names}; ${where}). ` +
+    `They share this project's name and volumes, so starting the stack here would recreate them and reuse their data. ` +
+    `demo:up never stops or reuses another stack's containers. Fix: from that checkout run \`pnpm dev:infra:down\` ` +
+    `(this keeps its data), then run demo:up again.`
+  );
 }
 
 /**
