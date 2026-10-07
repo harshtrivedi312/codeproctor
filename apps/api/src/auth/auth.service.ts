@@ -105,6 +105,15 @@ const SHUTDOWN_SETTLE_MS = 5_000;
 /** Second, catch-all settle in onApplicationShutdown. */
 const SHUTDOWN_CATCH_ALL_MS = 1_000;
 
+/** errorName that cannot throw (a hostile getter must not turn the fixed 401 into a 500). */
+function safeErrorName(e: unknown): string {
+  try {
+    return errorName(e);
+  } catch {
+    return 'unknown';
+  }
+}
+
 @Injectable()
 export class AuthService implements BeforeApplicationShutdown, OnApplicationShutdown {
   private readonly webOrigin: string;
@@ -955,7 +964,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (!callbackFinished && code !== undefined && code !== 'P2028') throw e;
       // Name and fixed code token only, never the message (it can hold SQL and values).
       this.logger.error(
-        `Refresh rotation outcome unknown (${errorName(e)}, ${code ?? 'no-code'}) REFRESH_ROTATE_UNKNOWN`,
+        `Refresh rotation outcome unknown (${safeErrorName(e)}, ${code ?? 'no-code'}) REFRESH_ROTATE_UNKNOWN`,
       );
       throw new UnauthorizedException('Authentication required.');
     }

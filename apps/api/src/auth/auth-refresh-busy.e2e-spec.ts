@@ -182,6 +182,8 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     expect(res.status).toBe(503);
     expect(res.headers['retry-after']).toBeDefined();
     expect((res.body as { code?: string }).code).toBe('BUSY');
+    // A BUSY retry is safe, so the cookie stays.
+    expect(String(res.headers['set-cookie'] ?? '')).not.toContain('cp_refresh=');
   }
 
   const liveCount = (userId: string): Promise<number> =>
@@ -268,6 +270,10 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     expect(set).toHaveLength(1);
     expect(set[0]).toMatch(/^cp_refresh=;/);
     expect(set[0]).toMatch(/Expires=Thu, 01 Jan 1970/);
+    expect(set[0]).toContain('Path=/api/v1/auth');
+    expect(set[0]).toContain('HttpOnly');
+    expect(set[0]).toContain('Secure');
+    expect(set[0]).toContain('SameSite=Strict');
     const reuse = (): Promise<number> =>
       prisma.auditLog.count({ where: { actorId: userId, action: 'AUTH_REFRESH_REUSE_DETECTED' } });
     expect(await reuse()).toBe(0);
@@ -275,6 +281,13 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     await request(app.getHttpServer()).post(`${API}/refresh`).expect(401);
     expect(await reuse()).toBe(0);
     expect(await liveCount(userId)).toBe(1);
+  });
+
+  it('FR-104, TC-005, FU-BE-207: a cookieless refresh 401 sets no cp_refresh cookie, and a tampered cookie is still cleared', async () => {
+    const bare = await request(app.getHttpServer()).post(`${API}/refresh`).expect(401);
+    expect(String(bare.headers['set-cookie'] ?? '')).not.toContain('cp_refresh=');
+    const tampered = await refresh('cp_refresh=s%3Anot-a-valid-signature.AAAA').expect(401);
+    expect(String(tampered.headers['set-cookie'] ?? '')).toMatch(/cp_refresh=;/);
   });
 
   it('FR-104, DL-37, FU-BE-207: a real 55P03 on the FOR SHARE of the user row (lock held elsewhere, short lock_timeout) is 503 BUSY, and the old token works after the lock is released', async () => {
@@ -291,7 +304,7 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
                   get: (target, key, receiver): unknown => {
                     const value = Reflect.get(target, key, receiver) as unknown;
                     if (key !== '$queryRaw' || typeof value !== 'function') return value;
-                    // The first raw statement of the rotation runs after a short lock_timeout.
+                    // Every $queryRaw of the rotation is preceded by a short SET LOCAL lock_timeout.
                     return async (...args: unknown[]) => {
                       await orgContext.runRawSql('test: short lock_timeout for a real 55P03', () =>
                         target.$executeRawUnsafe(`SET LOCAL lock_timeout = '200ms'`),
@@ -307,7 +320,8 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     );
     try {
       await holder.query('BEGIN');
-      await holder.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+      const held = await holder.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+      expect(held.rowCount).toBe(1);
       expectBusy(await refresh(cookie));
     } finally {
       await holder.query('ROLLBACK').catch(() => undefined);

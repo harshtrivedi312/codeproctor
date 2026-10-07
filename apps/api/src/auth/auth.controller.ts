@@ -52,6 +52,16 @@ import {
 } from './dto/auth.dto';
 
 export const REFRESH_COOKIE = 'cp_refresh';
+
+/** True when the request carried a cp_refresh cookie of any value (signed or tampered). */
+function carriedRefreshCookie(req: Request): boolean {
+  // cookie-parser moves a valid signed cookie to signedCookies and leaves a tampered one in cookies
+  // (signedCookies gets `false` for it), so look in both.
+  const has = (jar: unknown): boolean =>
+    typeof jar === 'object' && jar !== null && REFRESH_COOKIE in jar;
+  return has(req.cookies) || has(req.signedCookies);
+}
+
 // Responses that carry a TOTP secret, QR code, recovery codes or a bearer token are never cached.
 const NO_STORE = 'no-store';
 const ALL_STAFF = [UserRole.SUPER_ADMIN, UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER];
@@ -301,8 +311,10 @@ export class AuthController {
       // A refused refresh cookie can never succeed later (unknown, expired, revoked, or the fixed
       // outcome-unknown 401 whose commit may have landed). Clear it so a later page load or tab
       // does not send a revoked token and trip reuse detection (FR-104, TC-005, FU-BE-207).
-      // A 503 BUSY keeps the cookie: that retry is safe by construction.
-      if (e instanceof UnauthorizedException) {
+      // Only when the request carried one (raw cookies, so a tampered signed cookie is cleared
+      // too): a cookieless cross-site POST must not clear a victim's cookie. A 503 BUSY keeps
+      // the cookie: that retry is safe by construction.
+      if (e instanceof UnauthorizedException && carriedRefreshCookie(req)) {
         res.clearCookie(REFRESH_COOKIE, {
           httpOnly: true,
           secure: true,
@@ -321,12 +333,15 @@ export class AuthController {
   @ApiNoContentResponse()
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
     await this.auth.logout(readRefreshCookie(req), ctxOf(req));
-    res.clearCookie(REFRESH_COOKIE, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: cookieOptions.path,
-    });
+    // Only when a cookie was sent: a cookieless cross-site POST must not clear a victim's cookie.
+    if (carriedRefreshCookie(req)) {
+      res.clearCookie(REFRESH_COOKIE, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'strict',
+        path: cookieOptions.path,
+      });
+    }
   }
 
   @Public()
