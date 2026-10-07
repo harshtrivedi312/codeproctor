@@ -854,6 +854,31 @@ export class S {
     expect(state(STATE_TEXT + '\n' + extra)).not.toEqual([]);
   });
 
+  it('TC-008 N-5 a comma inside a parameter type does not split the parameter (the depth tracking of parameterNames)', () => {
+    for (const type of [
+      'SessionLockTx & Record<string, number>',
+      'SessionLockTx & { a: number, b: string }',
+      'SessionLockTx | [number, string]',
+      'SessionLockTx & ((a: number, b: string) => void)',
+    ]) {
+      const text = STATE_TEXT.replace(
+        'async lockAnySession(tx: SessionLockTx, sessionId: string) {',
+        `async lockAnySession(tx: ${type}, sessionId: string) {`,
+      );
+      expect({ type, problems: state(text) }).toEqual({ type, problems: [] });
+    }
+  });
+
+  it.each([
+    ['a parenthesised alias', 'return (coreLockAnySession)(tx, sessionId);'],
+    ['the alias called through .call', 'return coreLockAnySession.call(this, tx, sessionId);'],
+  ])('TC-008 N-5 a lockAnySession wrapper that calls %s is not the thin wrapper', (_what, body) => {
+    const problems = state(STATE_TEXT.replace('return coreLockAnySession(tx, sessionId);', body));
+    expect(problems).toContain(
+      `${SESSION_STATE_FILE}: the core lockAnySession is called 0 times, exactly one call is allowed, inside the lockAnySession wrapper`,
+    );
+  });
+
   it('TC-008 N-1 an arrow type in a parameter type is not a default (its => is not an =)', () => {
     const text = STATE_TEXT.replace(
       'async lockAnySession(tx: SessionLockTx, sessionId: string) {',
@@ -1257,6 +1282,17 @@ describe('S-B: the SessionJobProcessor file: .guardLive( in withLiveSession, .lo
     );
     expect(processor(text)).toEqual([
       `${SESSION_PROCESSOR_FILE}: the withLiveSession method carries a decorator or other code above it: a pinned method takes none`,
+    ]);
+  });
+
+  it('TC-008 N-5 a lock name in a log message of the processor fails (fail closed, as the README says)', () => {
+    const text = PROCESSOR_TEXT.replace(
+      "if ((await this.state.guardLive(tx, sid)) === 'LIVE') await fn();",
+      "if ((await this.state.guardLive(tx, sid)) === 'LIVE') await fn();\n      else this.logger.log('guardLive said ERASED');",
+    );
+    expect(text).not.toEqual(PROCESSOR_TEXT);
+    expect(processor(text)).toEqual([
+      `${SESSION_PROCESSOR_FILE}: guardLive is used other than as a member call (this.state.guardLive(...))`,
     ]);
   });
 
@@ -1789,6 +1825,11 @@ describe('the text tools: brace matching and method spans (NFR-04, TC-008)', () 
     expect(findClassBody('export const A = class {\n  m() {}\n};', 'A')).toBeUndefined();
     expect(findClassBody('class AB {\n  m() {}\n}', 'A')).toBeUndefined();
     expect(findClassBody('class A;', 'A')).toBeUndefined();
+    // N-5: a header with no body is skipped and the search goes on (the `continue`): the real class later is found.
+    const later = 'const doc = `\nclass A;\n`;\nclass A {\n  m() {}\n}\n';
+    const span = findClassBody(later, 'A');
+    expect(span).toBeDefined();
+    expect(later.slice((span?.bodyStart as number) + 1, span?.bodyEnd)).toContain('m() {}');
     expect(findClassBody('class A {\n  m() {\n', 'A')).toBeUndefined();
   });
 
@@ -1800,10 +1841,10 @@ describe('the text tools: brace matching and method spans (NFR-04, TC-008)', () 
     const second = findMethod(code, 'run', body);
     expect(code.slice((second?.bodyStart as number) + 1, second?.bodyEnd)).toContain('return 2');
     expect(findMethod(code, 'missing', body)).toBeUndefined();
-    const only = findClassBody(code, 'First') as { bodyStart: number; bodyEnd: number };
-    expect(
-      findMethod(code.replace('run() {\n    return 1', 'other() {\n    return 1'), 'run', only),
-    ).toBeUndefined();
+    // N-6: the span is computed from the same text it is used on.
+    const renamed = code.replace('run() {\n    return 1', 'other() {\n    return 1');
+    const only = findClassBody(renamed, 'First') as { bodyStart: number; bodyEnd: number };
+    expect(findMethod(renamed, 'run', only)).toBeUndefined();
   });
 
   it('TC-008 N2 findMethod reports the parameter parentheses', () => {
