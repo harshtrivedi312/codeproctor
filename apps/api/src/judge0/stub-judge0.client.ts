@@ -10,6 +10,8 @@ import type { Judge0Client, Judge0RawResult, Judge0Submission } from './judge0.t
 export const STUB_LABEL = 'local stub, not real execution';
 
 export class StubJudge0Client implements Judge0Client {
+  readonly isStub = true;
+
   runBatch(submissions: readonly Judge0Submission[]): Promise<Judge0RawResult[]> {
     return Promise.resolve(
       submissions.map((): Judge0RawResult => ({
