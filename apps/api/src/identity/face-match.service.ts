@@ -14,12 +14,11 @@
 //   - the worker is called with cacheSelfie false (the client enforces it): the API never sees an
 //     embedding, and no score, threshold or reason ever reaches the candidate.
 import { Injectable, Logger } from '@nestjs/common';
-import { DEFAULT_EVENT_SEVERITY, parseEventPayload } from '@codeproctor/shared';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { IdentityFacts } from './identity-facts';
 import { IdentityMedia } from './identity-media';
-import { VerifySessionPort } from './identity-ports';
+import { IdentitySessionJobs } from './identity-session-jobs';
 import { IdentityPurgeService } from './identity-purge.service';
 import { MAX_ATTEMPTS } from './identity.constants';
 import { WorkerClient } from './worker-client';
@@ -96,7 +95,7 @@ export class FaceMatchService {
     private readonly media: IdentityMedia,
     private readonly facts: IdentityFacts,
     private readonly worker: WorkerClient,
-    private readonly verify: VerifySessionPort,
+    private readonly jobs: IdentitySessionJobs,
     private readonly purge: IdentityPurgeService,
   ) {}
 
@@ -175,79 +174,35 @@ export class FaceMatchService {
     result: Resolution,
     requireKeys = true,
   ): Promise<FaceMatchOutcome> {
-    const wrote = await this.orgContext.runInOrg(data.orgId, async () => {
-      // guardLive in spirit: look again at what could have changed during the worker call.
+    // Look again at what could have changed during the worker call (org scope, FU-INB-29) ...
+    const stop = await this.orgContext.runInOrg(data.orgId, async () => {
       const session = await this.facts.session(data.sessionId);
       if (session === null || session.imagesGone) return 'GONE' as const;
       if ((await this.facts.policy(data.sessionId)).waived) return 'WAIVED' as const;
-      return this.prisma.client.$transaction(async (tx) => {
-        // Re-read the erasure fence inside the transaction (guardLive's job once it exists).
-        const live = await tx.session.findUnique({
-          where: { id: data.sessionId },
-          select: {
-            invitation: {
-              select: { candidate: { select: { erasureRequestedAt: true, erasedAt: true } } },
-            },
-          },
-        });
-        const fence = live?.invitation.candidate;
-        if (live === null || fence?.erasureRequestedAt != null || fence?.erasedAt != null) {
-          return 'GONE' as const;
-        }
-        // The keys still being there is part of the compare-and-set (except on the keyless path, where
-        // there are none to compare): a waiver's purge nulls them
-        // under the row lock, so a result computed before the purge updates nothing (DL-30).
-        const target = await tx.identityCheck.findFirst({
-          where: {
-            sessionId: data.sessionId,
-            attempt: data.attempt,
-            status: 'PENDING',
-            ...(requireKeys ? { idImageKey: { not: null }, selfieKey: { not: null } } : {}),
-          },
-          select: { id: true },
-        });
-        if (target === null) return 'LOST' as const; // resolved, or purged, since the pre-check
-        const updated = await tx.identityCheck.updateMany({
-          where: {
-            id: target.id,
-            status: 'PENDING',
-            ...(requireKeys ? { idImageKey: { not: null }, selfieKey: { not: null } } : {}),
-          },
-          data: {
-            status: result.status,
-            reviewReason: result.reason,
-            faceMatchScore: result.score,
-            modelId: result.modelId,
-            threshold: result.threshold,
-          },
-        });
-        if (updated.count !== 1) return 'LOST' as const; // another run resolved it first
-        if (result.status === 'MANUAL_REVIEW') {
-          await tx.proctorEvent.create({
-            data: {
-              sessionId: data.sessionId,
-              type: 'IDENTITY_MANUAL_REVIEW',
-              severity: DEFAULT_EVENT_SEVERITY.IDENTITY_MANUAL_REVIEW,
-              source: 'SERVER',
-              occurredAt: new Date(),
-              payload: parseEventPayload('IDENTITY_MANUAL_REVIEW', {
-                identityCheckId: target.id,
-                reason: result.reason ?? 'MATCH_ERROR',
-              }),
-            },
-          });
-        }
-        return 'WROTE' as const;
-      });
+      return null;
     });
-    if (wrote === 'WAIVED') {
+    if (stop === 'WAIVED') {
       await this.purge.purgeAfterWaiver(data.orgId, data.sessionId);
       return 'SKIPPED';
     }
+    if (stop !== null) return 'SKIPPED';
+    // ... then the compare-and-set under the session lock, on SessionJobProcessor.
+    const wrote = await this.jobs.commit(
+      {
+        orgId: data.orgId,
+        sessionId: data.sessionId,
+        attempt: data.attempt,
+        status: result.status,
+        reason: result.reason,
+        score: result.score,
+        modelId: result.modelId,
+        threshold: result.threshold,
+      },
+      requireKeys,
+    );
     if (wrote !== 'WROTE') return 'SKIPPED';
-    // After the commit: the gate is PASSED or MANUAL_REVIEW, never LOW_CONFIDENCE.
     if (result.status === 'PASSED' || result.status === 'MANUAL_REVIEW') {
-      await this.verify.enqueue(data.orgId, data.sessionId).catch(() => {
+      await this.jobs.enqueueVerify(data.orgId, data.sessionId).catch(() => {
         // Nothing here retries it: the CONSENTED reconciler (ADR 0015 section 11, BE-07) does.
         this.logger.warn('verify-session could not be queued');
       });

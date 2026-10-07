@@ -3,14 +3,17 @@ import { ConfigService } from '@nestjs/config';
 import { CandidateModule } from '../candidate/candidate.module';
 import type { Env } from '../config/env';
 import { StorageModule } from '../media/storage.module';
+import { SessionModule } from '../session/session.module';
+import { VerifySessionJobs } from '../session/verify-session.jobs';
 import { FaceMatchService } from './face-match.service';
+import { IdentitySessionJobs } from './identity-session-jobs';
 import { IdentityCandidateController } from './identity-candidate.controller';
 import { IdentityFacts, PrismaIdentityFacts } from './identity-facts';
 import { IdentityJobsService } from './identity-jobs.service';
 import { IdentityMedia } from './identity-media';
 import { IdentityNamesStore } from './identity-names.store';
 import { IdentityPurgeService } from './identity-purge.service';
-import { FaceMatchQueue, UnboundVerifySessionPort, VerifySessionPort } from './identity-ports';
+import { FaceMatchQueue, VerifySessionPort } from './identity-ports';
 import { IdentityService } from './identity.service';
 import { HttpWorkerClient, UnconfiguredWorkerClient, WorkerClient } from './worker-client';
 
@@ -19,7 +22,7 @@ import { HttpWorkerClient, UnconfiguredWorkerClient, WorkerClient } from './work
 // WAIVED status and the erasure markers exist), and the worker client (unconfigured without the
 // WORKER_* settings, which makes every match MANUAL_REVIEW: the candidate continues, D-05).
 @Module({
-  imports: [CandidateModule, StorageModule],
+  imports: [CandidateModule, SessionModule, StorageModule],
   controllers: [IdentityCandidateController],
   providers: [
     IdentityMedia,
@@ -27,10 +30,18 @@ import { HttpWorkerClient, UnconfiguredWorkerClient, WorkerClient } from './work
     IdentityPurgeService,
     IdentityService,
     FaceMatchService,
+    IdentitySessionJobs,
     IdentityJobsService,
     { provide: FaceMatchQueue, useExisting: IdentityJobsService },
     { provide: IdentityFacts, useClass: PrismaIdentityFacts },
-    { provide: VerifySessionPort, useClass: UnboundVerifySessionPort },
+    {
+      // Called only inside IdentitySessionJobs.enqueueVerify, in the session-job scope enqueueVerifySession requires.
+      provide: VerifySessionPort,
+      inject: [VerifySessionJobs],
+      useFactory: (jobs: VerifySessionJobs): VerifySessionPort => ({
+        enqueue: (orgId, sessionId) => jobs.enqueueVerifySession(orgId, sessionId),
+      }),
+    },
     {
       provide: WorkerClient,
       inject: [ConfigService],

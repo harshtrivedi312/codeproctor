@@ -905,6 +905,48 @@ describe('Identity check (FR-403, TC-033, TC-034, C-34, DL-30, ADR 0013 5.6, ADR
     expect(await rows(a.sessionId)).toHaveLength(1);
   });
 
+  it('FR-403/CS-4.7: the real verify-session enqueue is accepted from the session-job scope, after the commit, and nowhere else', async () => {
+    const actual = <T extends object>(path: string): T => jest.requireActual<T>(path);
+    const { VerifySessionJobs, VerifyEnqueueScopeError } = actual<
+      typeof import('../session/verify-session.jobs')
+    >('../session/verify-session.jobs');
+    const { IdentitySessionJobs } =
+      actual<typeof import('./identity-session-jobs')>('./identity-session-jobs');
+    const { PrismaService } = actual<typeof import('../database/prisma.service')>(
+      '../database/prisma.service',
+    );
+    const { OrgContextService } =
+      actual<typeof import('../database/org-context')>('../database/org-context');
+    const { SessionStateService } = actual<typeof import('../session/session-state.service')>(
+      '../session/session-state.service',
+    );
+    const real = app.get(VerifySessionJobs);
+    const c = await session();
+    // Outside any scope the real enqueue refuses (a coding error, never a request path).
+    await expect(real.enqueueVerifySession(c.orgId, c.sessionId)).rejects.toBeInstanceOf(
+      VerifyEnqueueScopeError,
+    );
+    const writer = new IdentitySessionJobs(
+      app.get(PrismaService),
+      app.get(OrgContextService),
+      app.get(SessionStateService),
+      { enqueue: (o: string, s: string) => real.enqueueVerifySession(o, s) },
+    );
+    await writer.enqueueVerify(c.orgId, c.sessionId);
+    expect(await redis.exists(`vs:${c.sessionId}`)).toBe(1); // the job was queued with its counter
+    // Another organisation's ids from this session's scope are refused too.
+    const o = await session({}, other);
+    const foreign = new IdentitySessionJobs(
+      app.get(PrismaService),
+      app.get(OrgContextService),
+      app.get(SessionStateService),
+      { enqueue: () => real.enqueueVerifySession(o.orgId, o.sessionId) },
+    );
+    await expect(foreign.enqueueVerify(c.orgId, c.sessionId)).rejects.toBeInstanceOf(
+      VerifyEnqueueScopeError,
+    );
+  });
+
   it('FR-403: no token and a bad token are refused', async () => {
     const res = await reply(request(app.getHttpServer()).get(API));
     expect(res.status).toBe(401);
