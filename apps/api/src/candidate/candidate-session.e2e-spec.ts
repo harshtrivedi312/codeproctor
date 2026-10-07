@@ -2568,7 +2568,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
   describe('cross-candidate isolation inside one org (TC-008, ADR 0013 section 5.10, P-24)', () => {
     it("TC-008, CS-1, CS-2: with candidate A's tokens on every candidate route, nothing of candidate B (same org) is read or changed, and no response carries a B value", async () => {
       const B_SIGNED_NAME = 'Beatrice Zzyzx-Marker';
-      const B_ACCOMMODATION = 4242;
+      // A long, unmistakable marker: a short number such as 4242 can match random ids and
+      // timestamps in the raw response text (x-request-id) and made this test flaky.
+      const B_ACCOMMODATION = 7340291;
       const B_DEVICE = 'B-DEVICE-INFO-MARKER';
       const b = await invite({
         ...liveSession({ deviceInfo: { marker: B_DEVICE, ...passedSystemCheck() } }),
