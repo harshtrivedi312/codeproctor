@@ -2,6 +2,7 @@
 import { ArgumentsHost, ConflictException, HttpException, Logger } from '@nestjs/common';
 import { CodedConflictException, CodedForbiddenException } from './coded.exception';
 import { AuditWriteAfterCommitError } from '../audit/audit-write-after-commit.error';
+import { OutcomeUnknownError } from './outcome-unknown.error';
 import { Prisma } from '../generated/prisma/client.js';
 import { lockContentionCode } from './db-contention';
 import { ProblemFilter } from './problem.filter';
@@ -239,6 +240,34 @@ describe('ProblemFilter database lock contention (DL-37, FU-BE-42, NFR-04)', () 
     });
     expect(run(withCode).status).toBe(500);
   });
+
+  it.each(['users.invite', 'users.invite.reissue'])(
+    'DL-37 FU-BE-208: OutcomeUnknownError (%s) is the generic fixed 500, no code, no Retry-After, log has only name and route',
+    (route) => {
+      const generic = run(new Error('boom'));
+      const { status, body, headers } = run(new OutcomeUnknownError(route));
+      expect(status).toBe(500);
+      expect(headers['Retry-After']).toBeUndefined();
+      expect(body).toEqual(generic.body);
+      expect(body).toEqual({
+        type: 'about:blank',
+        title: 'Internal Server Error',
+        status: 500,
+        instance: '/api/v1/x',
+        traceId: 'trace-1',
+      });
+      expect(error).toHaveBeenCalledWith(
+        { traceId: 'trace-1', errorName: 'OutcomeUnknownError', route },
+        'Write outcome unknown',
+      );
+      // A lock code attached never remaps it to 503.
+      const withCode = Object.assign(new OutcomeUnknownError(route), { code: '55P03' });
+      const mapped = run(withCode);
+      expect(mapped.status).toBe(500);
+      expect(mapped.headers['Retry-After']).toBeUndefined();
+      expect(mapped.body.code).toBeUndefined();
+    },
+  );
 
   it('FU-BE-42: a cyclic or very deep cause chain terminates', () => {
     const a: Error & { cause?: unknown } = new Error('a');

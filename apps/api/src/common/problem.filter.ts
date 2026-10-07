@@ -18,6 +18,7 @@ import {
   lockContentionCode,
 } from './db-contention';
 import { AuditWriteAfterCommitError } from '../audit/audit-write-after-commit.error';
+import { OutcomeUnknownError } from './outcome-unknown.error';
 import { getEarlyRejection } from './early-rejection';
 import { resolveRequestId } from './request-id';
 import { OrgContextMissingError, OrgScopeError } from '../database/errors';
@@ -83,7 +84,8 @@ export class ProblemFilter implements ExceptionFilter {
     const lockCode =
       exception instanceof HttpException ||
       exception instanceof OrgScopeError ||
-      exception instanceof AuditWriteAfterCommitError
+      exception instanceof AuditWriteAfterCommitError ||
+      exception instanceof OutcomeUnknownError
         ? undefined
         : lockContentionCode(exception);
     const status = noScope
@@ -114,6 +116,14 @@ export class ProblemFilter implements ExceptionFilter {
       this.logger.error(
         { traceId, errorName: exception.name, auditAction: exception.action },
         'Audit write after commit failed',
+      );
+    } else if (exception instanceof OutcomeUnknownError) {
+      // The action's commit may or may not have landed (FU-BE-208). The generic 500 body (no
+      // detail, no code, no Retry-After). Logged by error name and route only (no entity, actor or
+      // organisation id, no message): this error-level line is the alert signal.
+      this.logger.error(
+        { traceId, errorName: exception.name, route: exception.route },
+        'Write outcome unknown',
       );
     } else if (lockCode !== undefined) {
       // Class name and the fixed code token only: the message can hold SQL and parameters.
