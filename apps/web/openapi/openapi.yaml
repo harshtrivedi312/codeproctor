@@ -2238,7 +2238,10 @@ components:
     ProblemCode:
       type: string
       description: >-
-        The machine codes of docs/api-contract.md (preamble). Guard 403s carry none. BUSY is the 503
+        The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff
+        codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED,
+        IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added
+        here when the web starts branching on them. Guard 403s carry none. BUSY is the 503
         with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a
         client should retry it after Retry-After (the web's automatic retry is a separate change). Candidate-route codes such as
         SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
@@ -2249,6 +2252,7 @@ components:
           SETTINGS_CONFLICT,
           VARIANT_HAS_AI_REFERENCES,
           BUSY,
+          REASON_NOT_ENABLED,
           ANSWER_NOT_MANUAL,
           SESSION_NOT_UNDER_REVIEW,
           VERDICT_ALREADY_SET,
