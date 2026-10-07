@@ -36,6 +36,11 @@ describe('.env.example (DL-52, NFR-04)', () => {
     expect(() => validateEnv({ ...active })).not.toThrow();
   });
 
+  it('DL-55 FU-BE-225 the template DATABASE_URL uses change-me, so a shared env refuses it by name', () => {
+    expect(active['DATABASE_URL']).toMatch(/change-me/);
+    expect(() => validateEnv({ ...active })).not.toThrow();
+  });
+
   it('DL-52 the wrapping key for the active kid is a valid 32-byte key', () => {
     const kid = active['SESSION_KEY_ENC_ACTIVE_KID'] ?? 'k1';
     const key = active[`SESSION_KEY_ENC_KEY_${kid}`] ?? '';

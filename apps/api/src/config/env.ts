@@ -238,6 +238,13 @@ export const envSchema = z
           });
         }
       }
+      if (urlPasswordIsPlaceholder(env.DATABASE_URL)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['DATABASE_URL'],
+          message: 'has a local placeholder password, refused in staging, pilot and production',
+        });
+      }
       if (isPlaceholderKey(env.ENCRYPTION_KEY)) {
         ctx.addIssue({
           code: 'custom',
@@ -375,6 +382,15 @@ function isPlaceholderText(value: string): boolean {
     .replace(/^['"]+/, '')
     .toLowerCase()
     .includes('change-me');
+}
+
+/** True when a URL's decoded password is a change-me placeholder. A malformed URL is not judged here. */
+function urlPasswordIsPlaceholder(url: string): boolean {
+  try {
+    return isPlaceholderText(decodeURIComponent(new URL(url).password));
+  } catch {
+    return false;
+  }
 }
 
 /** A base64 key whose bytes spell a change-me placeholder (the .env.example values). */

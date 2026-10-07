@@ -621,6 +621,69 @@ describe('DL-55 FU-BE-224 NFR-04 APP_ENV is required, with no default', () => {
   });
 });
 
+describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
+  const good = {
+    ...valid,
+    JWT_CANDIDATE_SECRET: 'c'.repeat(40),
+    OTP_PEPPER: 'd'.repeat(40),
+    SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
+  };
+  const bad = 'postgresql://app_user:Change-Me@db.internal:5432/secretdb';
+  const generated = 'postgresql://app_user:x7Kq9ZpL2mVw@db.internal:5432/secretdb';
+
+  it.each(['staging', 'pilot', 'production'])(
+    'DL-55 FU-BE-225: %s refuses a change-me DATABASE_URL password, names only the variable',
+    (APP_ENV) => {
+      const base = { ...good, APP_ENV, ...liveExtras(APP_ENV) };
+      let message = '';
+      try {
+        validateEnv({ ...base, DATABASE_URL: bad });
+      } catch (e) {
+        message = String(e);
+      }
+      expect(message).toMatch(/DATABASE_URL/);
+      for (const part of ['Change-Me', 'app_user', 'db.internal', 'secretdb'])
+        expect(message).not.toContain(part);
+      expect(() => validateEnv({ ...base, DATABASE_URL: generated })).not.toThrow();
+      // An encoded placeholder is decoded before the check.
+      expect(() =>
+        validateEnv({ ...base, DATABASE_URL: 'postgresql://u:change%2Dme@db:5432/d' }),
+      ).toThrow(/DATABASE_URL/);
+    },
+  );
+
+  it('DL-55 FU-BE-225: NODE_ENV=production refuses it whatever APP_ENV says', () => {
+    expect(() =>
+      validateEnv({
+        ...good,
+        APP_ENV: 'development',
+        NODE_ENV: 'production',
+        ...liveExtras('pilot'),
+        DATABASE_URL: bad,
+      }),
+    ).toThrow(/DATABASE_URL/);
+  });
+
+  it.each(['development', 'test'])(
+    'DL-55 FU-BE-225: %s accepts the template password',
+    (APP_ENV) => {
+      expect(validateEnv({ ...good, APP_ENV, DATABASE_URL: bad }).APP_ENV).toBe(APP_ENV);
+    },
+  );
+
+  it('DL-55 FU-BE-225: a malformed URL keeps the existing error and is not echoed', () => {
+    let message = '';
+    try {
+      validateEnv({ ...good, APP_ENV: 'staging', DATABASE_URL: 'not a url change-me' });
+    } catch (e) {
+      message = String(e);
+    }
+    // The existing schema only requires a non-empty string; the check must not crash on it.
+    expect(message).not.toContain('TypeError');
+    expect(message).not.toContain('not a url');
+  });
+});
+
 /** Settings pilot and production need besides the secrets, so only the placeholders can fail. */
 function liveExtras(appEnv: string): Record<string, string> {
   if (appEnv === 'staging') return {};
