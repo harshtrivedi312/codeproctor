@@ -90,5 +90,5 @@ export async function downloadParts(
     chunks.push(...read);
     onProgress(i + 1, parts.length);
   }
-  return new Blob(chunks, { type: contentType });
+  return new Blob(chunks as BlobPart[], { type: contentType });
 }

@@ -150,7 +150,7 @@ export function partsComplete(p: ReviewPlayback): boolean {
   if (!p.parts || p.parts.length === 0) return true;
   const seqs = p.parts.map((x) => x.seq);
   if (seqs.some((q) => typeof q !== 'number')) return false;
-  const sorted = (seqs as number[]).sort((a, b) => a - b);
+  const sorted = seqs.sort((a, b) => a - b);
   return sorted.every((q, i) => i === 0 || q === (sorted[i - 1] ?? 0) + 1);
 }
 
