@@ -51,9 +51,20 @@ describe('FU-BE-193 ProblemCode enum matches the contract', () => {
     const start = contract.indexOf('`code` is set only where this contract names one:');
     expect(start, 'the contract preamble names its codes').toBeGreaterThan(-1);
     const end = contract.indexOf('Candidate-route codes', start);
-    // The preamble also names the API constant `PROBLEM_CODES`, which is not a code.
+    // The preamble also writes other backticked uppercase words that are not problem codes: the API
+    // constant `PROBLEM_CODES`, HTTP methods (`PATCH`) and the ADR 0015 waiver reason value
+    // `REFUSED_BIOMETRIC_PROCESSING`. They are excluded here, by name, so a new real code still counts.
+    const NOT_CODES = new Set([
+      'PROBLEM_CODES',
+      'GET',
+      'POST',
+      'PUT',
+      'PATCH',
+      'DELETE',
+      'REFUSED_BIOMETRIC_PROCESSING',
+    ]);
     const named = [...new Set(ticked(contract.slice(start, end === -1 ? undefined : end)))].filter(
-      (c) => c !== 'PROBLEM_CODES',
+      (c) => !NOT_CODES.has(c),
     );
     expect(named.length).toBeGreaterThan(5);
     const inEnum = enumCodes();

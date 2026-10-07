@@ -1164,6 +1164,7 @@ export interface components {
       | 'SETTINGS_CONFLICT'
       | 'VARIANT_HAS_AI_REFERENCES'
       | 'BUSY'
+      | 'REASON_NOT_ENABLED'
       | 'ANSWER_NOT_MANUAL'
       | 'SESSION_NOT_UNDER_REVIEW'
       | 'VERDICT_ALREADY_SET';
