@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import { createTestRunHandlers, startMockTest } from './test-handlers';
+import { createTestRunHandlers, ingestOpen, startMockTest, testState } from './test-handlers';
 import { apiBaseUrl } from '@/lib/env';
 import type {
   ConsentDocument,
@@ -48,6 +48,11 @@ export const MOCK_TOKENS = {
   strictVerified: 'mock-strictverified-invite-token-0016',
 } as const;
 
+/** The mock session behind a candidate session token, for tests that steer the server state. */
+export function getMockSession(sessionToken: string): object | null {
+  return sessions.get(sessionToken) ?? null;
+}
+
 export const MOCK_OTP = '123456';
 export const MOCK_EXPIRED_OTP = '000000';
 export const MOCK_RECRUITER_CONTACT = 'Jordan Lee, recruiting@acme-hiring.test';
@@ -86,8 +91,10 @@ interface SessionRecord {
   identityAttempts: number;
   uploads: number;
   roomScans: number;
-  /** ROOM_SCAN chunks by seq, like UNIQUE(session_id, stream, seq) (database.md). */
-  roomChunks: Map<number, { segment: number; confirmed: boolean }>;
+  /** Chunks by stream and seq, like UNIQUE(session_id, stream, seq) (database.md). */
+  roomChunks: Map<string, { segment: number; confirmed: boolean }>;
+  /** Confirmed chunks per stream (SCREEN, WEBCAM, AUDIO, ROOM_SCAN). */
+  confirmedChunks: Record<string, number>;
   sideCameraPaired: boolean;
 }
 
@@ -240,6 +247,7 @@ export function createCandidateHandlers() {
         uploads: 0,
         roomScans: 0,
         roomChunks: new Map(),
+        confirmedChunks: {},
         sideCameraPaired: false,
       };
       sessions.set(sessionToken, record);
@@ -266,7 +274,7 @@ export function createCandidateHandlers() {
         legalApproved: s.scenario !== 'placeholderConsent',
         ...(s.scenario === 'approvalRequired' ? { legalApprovalRequired: true } : {}),
         signed: s.status !== 'OPENED',
-        signedAt: null,
+        signedAt: s.status !== 'OPENED' ? '2026-10-05T10:00:00.000Z' : null,
       };
       return HttpResponse.json(doc);
     }),
@@ -356,9 +364,19 @@ export function createCandidateHandlers() {
         seq?: number;
         bytes?: number;
         durationMs?: number;
+        contentType?: string;
       };
+      // Everything but the room scan needs a running test (or the ingest grace after it).
+      if (body.stream !== 'ROOM_SCAN' && !ingestOpen(testState(s))) {
+        return problem(409, 'SESSION_NOT_ACTIVE');
+      }
+      const wantType = body.stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
+      if (body.contentType !== wantType) return problem(400, 'VALIDATION_FAILED');
+      if (body.stream === 'AUDIO' && (body.bytes ?? 0) > 4 * 1024 * 1024) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
       if (
-        body.stream !== 'ROOM_SCAN' ||
+        !['ROOM_SCAN', 'SCREEN', 'WEBCAM', 'AUDIO'].includes(body.stream ?? '') ||
         typeof body.seq !== 'number' ||
         typeof body.segment !== 'number'
       ) {
@@ -372,10 +390,11 @@ export function createCandidateHandlers() {
       ) {
         return problem(400, 'VALIDATION_FAILED');
       }
-      const existing = s.roomChunks.get(body.seq);
+      const chunkKey = `${body.stream}:${body.seq}`;
+      const existing = s.roomChunks.get(chunkKey);
       if (existing && existing.segment !== body.segment) return problem(409, 'SEQ_CONFLICT');
       if (existing?.confirmed) return HttpResponse.json({ alreadyUploaded: true });
-      s.roomChunks.set(body.seq, { segment: body.segment, confirmed: false });
+      s.roomChunks.set(chunkKey, { segment: body.segment, confirmed: false });
       s.uploads += 1;
       return HttpResponse.json({
         url: `${apiBaseUrl}/mock-upload/room-${s.uploads}`,
@@ -388,10 +407,11 @@ export function createCandidateHandlers() {
     http.post(`${base}/media/confirm`, async ({ request }) => {
       const s = bearer(request);
       if (!s) return problem(401, 'UNAUTHENTICATED');
-      const body = (await request.json()) as { seq?: number };
-      const chunk = typeof body.seq === 'number' ? s.roomChunks.get(body.seq) : undefined;
+      const body = (await request.json()) as { stream?: string; seq?: number };
+      const chunk = s.roomChunks.get(`${body.stream}:${body.seq}`);
       if (!chunk) return problem(404, 'CHUNK_NOT_PRESIGNED');
       chunk.confirmed = true;
+      s.confirmedChunks[body.stream ?? ''] = (s.confirmedChunks[body.stream ?? ''] ?? 0) + 1;
       s.roomScans += 1;
       return HttpResponse.json({ uploaded: true, sizeBytes: 1024 });
     }),
