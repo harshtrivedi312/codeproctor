@@ -1,3 +1,5 @@
+import { StubJudge0Client } from '../judge0/stub-judge0.client';
+import { ReferenceValidationService } from './reference-validation.service';
 import { FakeJudge0Client, fakeResult } from '../judge0/fake-judge0.client';
 import { JUDGE0_STATUS, Judge0UnavailableError } from '../judge0/judge0.types';
 import { MAX_RETURNED_OUTPUT_CHARS, ExecutionService } from './execution.service';
@@ -258,5 +260,71 @@ describe('ExecutionService (FR-502, FR-503)', () => {
     await expect(
       service.run({ language: 'python', sourceCode: 's', limits: 'bad', tests: [test('a', '')] }),
     ).rejects.toThrow(InvalidLimitsError);
+  });
+});
+
+describe('ExecutionService with the local Judge0 stub (DL-58, DL-54)', () => {
+  const stubTests = [test('a', '42'), test('b', '7', false)];
+  const stubRequest = { language: 'python' as const, sourceCode: 's', limits, tests: stubTests };
+
+  it('DL-58: every run result carries exactly the stub label and is never a verdict', async () => {
+    const service = new ExecutionService(new StubJudge0Client());
+    const { results } = await service.run(stubRequest);
+    expect(results).toHaveLength(2);
+    for (const r of results) {
+      expect(r).toMatchObject({
+        verdict: 'LOCAL_STUB',
+        passed: false,
+        stub: true,
+        message: 'local stub, not real execution',
+      });
+      expect(['PASSED', 'FAILED', 'INTERNAL_ERROR']).not.toContain(r.verdict);
+    }
+  });
+
+  it('DL-58: submit-time results say not graded (local stub), never pass or fail', async () => {
+    const service = new ExecutionService(new StubJudge0Client());
+    const captured = await service.runCaptured({ ...stubRequest, mode: 'submit' });
+    for (const r of captured.results) {
+      expect(r.message).toBe('not graded (local stub)');
+      expect(r.passed).toBe(false);
+      expect(r.verdict).toBe('LOCAL_STUB');
+    }
+  });
+
+  it('DL-58: real mode INTERNAL_ERROR is unchanged, even with the stub label text', async () => {
+    const { fake, service } = setup();
+    fake.setDefault(() =>
+      fakeResult({
+        statusId: JUDGE0_STATUS.INTERNAL_ERROR,
+        stderr: 'local stub, not real execution',
+      }),
+    );
+    const { results } = await service.run(stubRequest);
+    expect(results[0]).toMatchObject({
+      verdict: 'INTERNAL_ERROR',
+      passed: false,
+      message: 'The code could not be run. Try again.',
+    });
+    expect(results[0]).not.toHaveProperty('stub');
+  });
+
+  it('DL-58: reference validation treats a stub run as not passed and never validates', async () => {
+    const reference = new ReferenceValidationService(new ExecutionService(new StubJudge0Client()));
+    const report = await reference.validate({
+      questionVersionId: 'qv',
+      limits,
+      languages: ['python'],
+      variants: [
+        {
+          variantId: 'v1',
+          referenceSources: { python: 'print(42)' },
+          tests: [{ testCaseId: 't1', position: 1, input: '', expectedOutput: '42' }],
+        },
+      ],
+    } as never);
+    expect(report.passed).toBe(false);
+    expect(report.cells[0]).toMatchObject({ passed: false, testsPassed: 0 });
+    expect(report.failures[0]).toMatchObject({ verdict: 'LOCAL_STUB' });
   });
 });
