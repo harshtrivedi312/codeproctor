@@ -861,10 +861,29 @@ describe('DB-07 versioned backups (NFR-03, ADR 0017 5.3, C-55)', { skip }, () =>
     }
   });
 
+  it('C-55: an existing object whose version id is "null" (versioning suspended) is not overwritten either', async () => {
+    const suspended = await startFakeS3({ versioned: true });
+    try {
+      const body = Buffer.from('the only backup');
+      suspended.objects.set(KEY, body);
+      suspended.versions.set(KEY, [{ id: 'null', body, meta: {} }]);
+      const r = await run(BACKUP, [], {
+        ...env,
+        S3_ENDPOINT: `http://127.0.0.1:${suspended.port}`,
+      });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /Nothing was uploaded/);
+      assert.equal(suspended.objects.get(KEY), body);
+    } finally {
+      await suspended.close();
+    }
+  });
+
   it('C-55: an error other than "not found" while checking for an earlier backup stops the run (fails closed)', async () => {
     const broken = await startFakeS3({ versioned: true });
     try {
       broken.objects.set(KEY, Buffer.from('the only backup'));
+      // The 403 also breaks the later HEADs: the unchanged body proves the refusal came before the upload.
       broken.faults.failHead = true;
       const r = await run(BACKUP, [], { ...env, S3_ENDPOINT: `http://127.0.0.1:${broken.port}` });
       assert.equal(r.status, 1, r.stderr);
