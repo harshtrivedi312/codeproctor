@@ -47,6 +47,8 @@ export function configureApp(app: INestApplication): void {
       callback(null, origin === undefined || origin === webOrigin ? webOrigin : false);
     },
     credentials: true,
+    // A cross-origin client can only read these response headers (DL-37: lock contention 503).
+    exposedHeaders: ['Retry-After'],
   });
   // Public client-error route (C-32): streaming 16 KB cap, no inflation, parsed before the
   // global body parser (which then skips it).
