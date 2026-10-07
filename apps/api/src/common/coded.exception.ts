@@ -53,6 +53,13 @@ export const CANDIDATE_PROBLEM_CODES = [
   'PAYLOAD_TOO_LARGE',
   'UNSUPPORTED_MEDIA_TYPE',
   'NOT_FOUND',
+  // Media presign and confirm (BE-09, ADR 0013 section 5.5).
+  'CHUNK_NOT_PRESIGNED',
+  'UPLOAD_NOT_FOUND',
+  'UPLOAD_MISMATCH',
+  'PRESIGN_QUOTA_EXCEEDED',
+  'STORAGE_UNCONFIGURED',
+  'STORAGE_UNAVAILABLE',
 ] as const;
 export type CandidateProblemCode = (typeof CANDIDATE_PROBLEM_CODES)[number];
 export type ProblemCode = (typeof PROBLEM_CODES)[number];
