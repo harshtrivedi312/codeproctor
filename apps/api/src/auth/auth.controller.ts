@@ -30,6 +30,7 @@ import type { AuthedRequest } from '../common/auth/auth.types';
 import { Public, Roles } from '../common/auth/decorators';
 import { UserRole } from '../generated/prisma/client';
 import { AuthService, REFRESH_TTL_MS } from './auth.service';
+import { RefreshOutcomeUnknownException } from './refresh-outcome-unknown.exception';
 import type { SessionOutcome } from './auth.service';
 import { ctxOf } from '../common/request-context';
 import {
@@ -51,6 +52,16 @@ import {
 } from './dto/auth.dto';
 
 export const REFRESH_COOKIE = 'cp_refresh';
+
+/** True when the request carried a cp_refresh cookie of any value (signed or tampered). */
+function carriedRefreshCookie(req: Request): boolean {
+  // cookie-parser moves a valid signed cookie to signedCookies and leaves a tampered one in cookies
+  // (signedCookies gets `false` for it), so look in both.
+  const has = (jar: unknown): boolean =>
+    typeof jar === 'object' && jar !== null && REFRESH_COOKIE in jar;
+  return has(req.cookies) || has(req.signedCookies);
+}
+
 // Responses that carry a TOTP secret, QR code, recovery codes or a bearer token are never cached.
 const NO_STORE = 'no-store';
 const ALL_STAFF = [UserRole.SUPER_ADMIN, UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER];
@@ -292,9 +303,26 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthSessionDto | undefined> {
-    const outcome = await this.auth.refresh(readRefreshCookie(req), ctxOf(req));
-    setRefreshCookie(res, outcome);
-    return outcome.body.session;
+    try {
+      const outcome = await this.auth.refresh(readRefreshCookie(req), ctxOf(req));
+      setRefreshCookie(res, outcome);
+      return outcome.body.session;
+    } catch (e) {
+      // Only an outcome-unknown rotation clears the cookie (the commit may have landed, so the
+      // presented token may now be revoked and a later silent refresh would look like theft,
+      // TC-005). Never on an ordinary 401: that could wipe a winning tab's new cookie. Only when
+      // the request carried one (raw cookies, so a tampered signed cookie is cleared too): a
+      // cookieless cross-site POST must not clear a victim's cookie. A 503 BUSY keeps the cookie.
+      if (e instanceof RefreshOutcomeUnknownException && carriedRefreshCookie(req)) {
+        res.clearCookie(REFRESH_COOKIE, {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'strict',
+          path: cookieOptions.path,
+        });
+      }
+      throw e;
+    }
   }
 
   @Public()
@@ -304,12 +332,15 @@ export class AuthController {
   @ApiNoContentResponse()
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
     await this.auth.logout(readRefreshCookie(req), ctxOf(req));
-    res.clearCookie(REFRESH_COOKIE, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: cookieOptions.path,
-    });
+    // Only when a cookie was sent: a cookieless cross-site POST must not clear a victim's cookie.
+    if (carriedRefreshCookie(req)) {
+      res.clearCookie(REFRESH_COOKIE, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'strict',
+        path: cookieOptions.path,
+      });
+    }
   }
 
   @Public()
