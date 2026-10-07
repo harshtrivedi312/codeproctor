@@ -4,26 +4,32 @@
 // ids only (never an email, a name or an object key).
 import { Injectable } from '@nestjs/common';
 
-export type FenceResult = 'fenced' | 'alreadyErased' | 'held';
-
 /**
- * The session fence (ADR 0004 9.5 step 3): through SessionStateService.guardLive and closeIngest.
- * Bumps `auth_epoch` (the candidate token gets 401), moves the session to ERASED (terminal, no exit),
- * keeps an existing `retention_anchor_at` or sets the fence time, closes ingest at once with no
- * grace, destroys the HMAC key, tells the worker to evict the selfie embedding, and, when
- * `closeOpenAppeal` is true, moves an OPEN appeal to CLOSED_ERASED (audited). Retention never writes
- * `sessions.status` itself.
+ * The session fence (ADR 0004 9.5 step 3; hub ruling on the erasure fence): a SERVICE session job in
+ * `SessionJobProcessor.withLiveSession`, enqueued with ids and the `closeOpenAppeal` flag only. Inside
+ * the job, under the session lock, `guardLive` returning ERASED means "already erased"; a session that is
+ * UNDER_REVIEW or APPEALED, or has an open appeal, while `closeOpenAppeal` is false, is held and left as
+ * it is (the C-06 hold); otherwise the job bumps `auth_epoch` (the candidate token gets 401), moves the
+ * session to ERASED (terminal, no exit), keeps `retention_anchor_at` or sets the fence time, closes
+ * ingest at once with no grace, destroys the HMAC key, tells the worker to evict the selfie embedding,
+ * and, when `closeOpenAppeal` is true, moves an OPEN appeal to CLOSED_ERASED (audited).
+ * Retention never writes `sessions.status` itself and never calls `guardLive` from a plain org scope.
+ *
+ * The port only REQUESTS the fence; the answer is read back from the database. The erasure service runs
+ * its data steps (object delete, row purge) only for sessions it reads as ERASED, and runs again until
+ * every session is.
  */
 export abstract class SessionFencePort {
   /**
-   * 'held' when the session is UNDER_REVIEW or APPEALED, or has an open appeal, and `closeOpenAppeal`
-   * is false. Idempotent: an ERASED session answers 'alreadyErased'. Never throws a value.
+   * Enqueues the fence job for one session. Idempotent (the job id is fixed per session, so a second
+   * request while one is queued or running is a no-op). Resolves once the job is queued, not when it has
+   * run. Never throws a value.
    */
-  abstract fence(args: {
+  abstract requestFence(args: {
     orgId: string;
     sessionId: string;
     closeOpenAppeal: boolean;
-  }): Promise<FenceResult>;
+  }): Promise<void>;
 }
 
 /** The delayed re-run of the prefix delete and the database steps (ADR 0004 9.5 step 7). */
@@ -88,7 +94,7 @@ export abstract class ErasureListPort {
 /** Each refuses every call until the real module binds it: nothing can erase half-wired. */
 @Injectable()
 export class UnconfiguredSessionFence extends SessionFencePort {
-  fence(): Promise<FenceResult> {
+  requestFence(): Promise<void> {
     return Promise.reject(new Error('session fence is not configured'));
   }
 }

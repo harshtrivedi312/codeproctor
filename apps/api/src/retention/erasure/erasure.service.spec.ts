@@ -19,28 +19,32 @@ import {
   ErasureSchedulerPort,
   SessionFencePort,
 } from './erasure.ports';
-import type { ErasureAlertKind, FenceResult } from './erasure.ports';
+import type { ErasureAlertKind } from './erasure.ports';
 import { NOW, daysAgo, useRetentionDatabase } from '../../test/retention/retention-harness';
 import type { PrismaClient } from '../../generated/prisma/client.js';
 
+/**
+ * Stands in for the SERVICE session job that BE-07 / Backend B builds: `requestFence` records the request and
+ * runs what the job would do under the session lock (held, or ERASED with the epoch bump and the anchor).
+ */
 class FakeFence extends SessionFencePort {
   calls: Array<{ sessionId: string; closeOpenAppeal: boolean }> = [];
   constructor(private readonly owner: PrismaClient) {
     super();
   }
-  async fence(a: {
+  async requestFence(a: {
     orgId: string;
     sessionId: string;
     closeOpenAppeal: boolean;
-  }): Promise<FenceResult> {
+  }): Promise<void> {
     this.calls.push({ sessionId: a.sessionId, closeOpenAppeal: a.closeOpenAppeal });
     const s = await this.owner.session.findUniqueOrThrow({ where: { id: a.sessionId } });
-    if (s.status === SessionStatus.ERASED) return 'alreadyErased';
+    if (s.status === SessionStatus.ERASED) return;
     const open = await this.owner.appeal.count({
       where: { status: 'OPEN', sessionReview: { sessionId: a.sessionId } },
     });
     if ((s.status === 'UNDER_REVIEW' || s.status === 'APPEALED' || open > 0) && !a.closeOpenAppeal)
-      return 'held';
+      return; // held: left as it is
     if (open > 0)
       await this.owner.appeal.updateMany({
         where: { status: 'OPEN', sessionReview: { sessionId: a.sessionId } },
@@ -54,7 +58,6 @@ class FakeFence extends SessionFencePort {
         retentionAnchorAt: s.retentionAnchorAt ?? NOW,
       },
     });
-    return 'fenced';
   }
 }
 class FakeScheduler extends ErasureSchedulerPort {
@@ -525,8 +528,14 @@ describe('erasure on request (FR-704, C-06, C-17)', () => {
     const cid = await candidateOf(h.A);
     await h.owner.candidate.update({ where: { id: cid }, data: { erasureRequestedAt: NOW } });
     const { svc, scheduler } = service();
+    // The first three clock reads jump 100 s (the sweep has been running a while); later reads advance 1 s.
     let t = 0;
-    svc.clock = () => (t += 100_000);
+    let reads = 0;
+    svc.clock = () => {
+      reads += 1;
+      t += reads <= 3 ? 100_000 : 1_000;
+      return t;
+    };
     await svc.runDue(NOW);
     const row = await h.owner.auditLog.findFirstOrThrow({
       where: { entityId: sid, action: 'ERASURE_SESSION_FENCED' },

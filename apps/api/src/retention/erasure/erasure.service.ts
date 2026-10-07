@@ -28,6 +28,8 @@ import {
 import { ErasureRepository, requestIdOf } from './erasure.repository';
 
 const DAY_MS = 86_400_000;
+/** A requested fence is looked at again after this long (the job normally finishes in seconds). */
+const FENCE_POLL_MS = 15_000;
 const SETTLE_MS = (ERASURE_RERUN_BASE_SECONDS + STORAGE_SWEEP_MARGIN_SECONDS) * 1000;
 
 export interface ErasureRunResult {
@@ -132,6 +134,7 @@ export class ErasureService {
     }
 
     let heldAny = false;
+    let requested = 0;
     for (const s of sessions) {
       if (s.status === 'ERASED') continue;
       const wouldHold =
@@ -140,24 +143,22 @@ export class ErasureService {
         heldAny = true;
         continue;
       }
-      const result = await this.fence.fence({ orgId, sessionId: s.id, closeOpenAppeal: !hold });
-      if (result === 'held') {
-        heldAny = true;
-        continue;
-      }
-      if (result === 'fenced') {
-        // Record the fence time first: completion waits for it, even if the next call fails.
-        const fencedAt = await inOrg(() =>
-          this.repo.fenceTime({ orgId, candidateId, sessionId: s.id, requestId, now: current() }),
-        );
-        await this.scheduler.scheduleRerun({
-          orgId,
-          candidateId,
-          requestId,
-          fencedAt,
-          runAt: new Date(fencedAt.getTime() + SETTLE_MS),
-        });
-      }
+      // Only a request: the fence runs as a SERVICE session job and decides under the session lock
+      // (a session that became held in the meantime stays as it is). The status is read back below.
+      await this.fence.requestFence({ orgId, sessionId: s.id, closeOpenAppeal: !hold });
+      requested += 1;
+    }
+    if (requested > 0) {
+      // Look again once the job has had time to run; the repair in the purge loop then records the fence
+      // time (the first time the session is READ as ERASED, never earlier than the real fence) and
+      // schedules the post-margin re-run.
+      await this.scheduler.scheduleRerun({
+        orgId,
+        candidateId,
+        requestId,
+        fencedAt: current(),
+        runAt: new Date(current().getTime() + FENCE_POLL_MS),
+      });
     }
     if (heldAny) {
       const key = { candidateId, requestId, action: ERASURE_AUDIT_ACTIONS.DELAY_NOTIFIED };
