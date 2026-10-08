@@ -319,4 +319,39 @@ describe('demo:up compose project (local demo)', () => {
     assert.equal(failureHint(['pnpm', 'db:migrate'], 'P3009 failed migration', 'x'), '');
     assert.equal(failureHint(['pnpm', 'dev:infra'], 'P1000', 'x'), '');
   });
+
+  it("this checkout's own dev stack (project codeproctor) holding a port is a clash for the demo project", () => {
+    const ourCompose = '/work/codeproctor/infra/docker-compose.yml';
+    const spec = DEMO_PORTS.find((p) => p.port === 5432);
+    const dev = [
+      {
+        name: 'codeproctor-postgres-1',
+        configFiles: [ourCompose],
+        ports: [5432],
+        project: 'codeproctor',
+      },
+    ];
+    const verdict = judgePort({
+      spec,
+      free: false,
+      containers: dev,
+      ourCompose,
+      ourAppUp: false,
+      project: 'codeproctor-demo',
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.message, /pnpm dev:infra:down/);
+    const mine = [{ ...dev[0], project: 'codeproctor-demo' }];
+    assert.equal(
+      judgePort({
+        spec,
+        free: false,
+        containers: mine,
+        ourCompose,
+        ourAppUp: false,
+        project: 'codeproctor-demo',
+      }).ok,
+      true,
+    );
+  });
 });

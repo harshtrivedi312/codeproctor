@@ -147,7 +147,8 @@ export function summary({ invite, appsStarted, workerStatus = 'skipped' }) {
 }
 
 function run(root, cmd, { capture = false, env, watch = false } = {}) {
-  // `watch` also pipes stderr, echoed unchanged, so a known failure can get a hint.
+  // `watch` also pipes stderr (no longer a terminal, so no colour; shown when the step ends), echoed
+  // unchanged, so a known failure can get a hint.
   const r = spawnSync(cmd[0], cmd.slice(1), {
     cwd: root,
     stdio: capture
@@ -156,6 +157,7 @@ function run(root, cmd, { capture = false, env, watch = false } = {}) {
         ? ['inherit', 'inherit', 'pipe']
         : 'inherit',
     encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
     ...(env === undefined ? {} : { env }),
   });
   if (watch && r.stderr) process.stderr.write(r.stderr);
@@ -262,6 +264,7 @@ async function main() {
     console.error('demo-up: Docker is not running. Start Docker Desktop and try again.');
     process.exit(1);
   }
+  const project = demoProject();
   let invite = '';
   let workerStatus = startWorker ? 'not started' : 'skipped (--no-worker)';
   let n = 0;
@@ -284,7 +287,6 @@ async function main() {
     }
     if (step.check === 'ports') {
       const ourCompose = join(root, 'infra/docker-compose.yml');
-      const project = demoProject();
       // The dev stack's containers too: they hold the same ports, whatever the project.
       const projects = project === DEV_PROJECT ? [project] : [project, DEV_PROJECT];
       const containers = projects.flatMap((p) => dockerContainers(p));
@@ -298,7 +300,7 @@ async function main() {
         const free = await isFree(spec.port);
         const url = { api: API_HEALTH, web: WEB_LOGIN, worker: WORKER_HEALTH }[spec.kind];
         const ourAppUp = !free && url !== undefined && (await isUp(url));
-        const verdict = judgePort({ spec, free, containers, ourCompose, ourAppUp });
+        const verdict = judgePort({ spec, free, containers, ourCompose, ourAppUp, project });
         if (!verdict.ok) problems.push(verdict.message);
         else if (verdict.note) console.log(verdict.note);
       }
@@ -336,7 +338,7 @@ async function main() {
     });
     if (!r.ok) {
       console.error(`demo-up: step ${n} failed: ${step.cmd.join(' ')}`);
-      const hint = failureHint(step.cmd, r.stderr, demoProject());
+      const hint = failureHint(step.cmd, r.stderr, project);
       if (hint !== '') console.error(hint);
       process.exit(1);
     }

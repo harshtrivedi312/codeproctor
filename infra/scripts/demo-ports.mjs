@@ -66,7 +66,7 @@ export function dockerContainers(project = DEV_PROJECT) {
     { encoding: 'utf8' },
   );
   if (r.status !== 0) return [];
-  return parseDockerPs(r.stdout);
+  return parseDockerPs(r.stdout).map((c) => ({ ...c, project }));
 }
 
 /** Pure: `docker ps` lines to containers with the host ports they publish. */
@@ -84,7 +84,7 @@ export function parseDockerPs(text) {
 }
 
 /**
- * Pure: containers of the shared `codeproctor` compose project that belong to ANOTHER checkout, running or
+ * Pure: containers of the demo's compose project that belong to ANOTHER checkout, running or
  * stopped. `docker compose up` here would recreate them and reuse their named volumes, which is taking
  * another stack over, so any such container is a clash even when its ports are free.
  */
@@ -109,11 +109,20 @@ export function foreignMessage(foreign, project = DEMO_PROJECT) {
  * an app of ours already answers its health URL on that port.
  * Returns { ok: true, note? } or { ok: false, message }.
  */
-export function judgePort({ spec, free, containers, ourCompose, ourAppUp }) {
+export function judgePort({
+  spec,
+  free,
+  containers,
+  ourCompose,
+  ourAppUp,
+  project = DEMO_PROJECT,
+}) {
   if (free) return { ok: true };
   const holder = containers.find((c) => c.ports.includes(spec.port));
   if (holder !== undefined) {
-    if (holder.configFiles.includes(ourCompose)) {
+    // Ours only in the demo's own project: this checkout's dev stack (project `codeproctor`) holds the same
+    // ports and `docker compose up` for the demo would fail on them.
+    if (holder.configFiles.includes(ourCompose) && (holder.project ?? project) === project) {
       return {
         ok: true,
         note: `${spec.name} (port ${spec.port}) is held by this checkout's own stack.`,
