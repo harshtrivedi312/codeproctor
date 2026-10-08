@@ -522,6 +522,94 @@ describe('plain-args: hidden keys, anywhere in the tree (FU-DB-281; #261 delta r
       void client.$disconnect();
     }
   });
+
+  it('TC-008 a value goes only where a value goes: a real Date, byte array, Decimal, field reference or Json null where a query object is expected is refused', () => {
+    const client = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    try {
+      const ref = (client as unknown as { session: { fields: Record<string, object> } }).session
+        .fields.deadlineAt as object;
+      const VALUES: Array<[string, object]> = [
+        ['a Date', new Date()],
+        ['a Buffer', Buffer.from('x')],
+        ['a Uint8Array', new Uint8Array(0)],
+        ['a Decimal', new Prisma.Decimal('1.5')],
+        ['a field reference', ref],
+        ['Prisma.DbNull', Prisma.DbNull],
+        ['Prisma.JsonNull', Prisma.JsonNull],
+      ];
+      const QUERY_OBJECT: Array<[string, (value: object) => unknown]> = [
+        ...[
+          'select',
+          'include',
+          'omit',
+          'where',
+          'having',
+          'orderBy',
+          'cursor',
+          '_count',
+          '_sum',
+          'data',
+          'create',
+          'update',
+        ].map((key): [string, (value: object) => unknown] => [key, (value) => ({ [key]: value })]),
+        ['a where under AND', (value) => ({ where: { AND: [value] } })],
+        ['a where under NOT', (value) => ({ where: { NOT: value } })],
+        ['a relation filter', (value) => ({ where: { invitation: value } })],
+        ['a relation filter body', (value) => ({ where: { invitation: { is: value } } })],
+        ['a createMany row', (value) => ({ data: [{ orgId: 'x' }, value] })],
+        ['the select of relation args', (value) => ({ select: { invitation: { select: value } } })],
+        ['the where of relation args', (value) => ({ include: { invitation: { where: value } } })],
+        ['the select of _count', (value) => ({ select: { _count: { select: value } } })],
+        ['an aggregate inside having', (value) => ({ having: { pausedMs: { _avg: value } } })],
+      ];
+      for (const [kind, value] of VALUES) {
+        for (const [place, put] of QUERY_OBJECT) {
+          expect({ kind, place, refused: !passes(() => plain(put(value))) }).toEqual({
+            kind,
+            place,
+            refused: true,
+          });
+        }
+        expect(() => plain({ where: value })).toThrow(/where a query object is expected/);
+      }
+      // Where a value goes, each still passes.
+      for (const [kind, value] of VALUES.filter(([k]) => !k.startsWith('Prisma.'))) {
+        for (const args of [
+          { where: { startedAt: value } },
+          { where: { startedAt: { gte: value } } },
+          { where: { id: { in: [value] } } },
+          { cursor: { id: value } },
+          { data: { lastHeartbeat: value } },
+          {
+            create: { lastHeartbeat: value },
+            update: { lastHeartbeat: value },
+            where: { id: 'x' },
+          },
+        ]) {
+          expect({ kind, args: Object.keys(args), ok: passes(() => plain(args)) }).toEqual({
+            kind,
+            args: Object.keys(args),
+            ok: true,
+          });
+        }
+      }
+      for (const nullValue of [Prisma.DbNull, Prisma.JsonNull, Prisma.AnyNull]) {
+        expect(() =>
+          plain({
+            where: { deviceInfo: { equals: nullValue } },
+            data: { deviceInfo: nullValue },
+          }),
+        ).not.toThrow();
+      }
+    } finally {
+      void client.$disconnect();
+    }
+  });
+
+  it('TC-008 Prisma.skip is not exported by this client (no strictUndefinedChecks preview): a Skip instance is walked and refused; enabling the preview must add Prisma.skip to isValueObject by identity', () => {
+    expect(Object.hasOwn(Prisma, 'skip')).toBe(false);
+    expect('skip' in Prisma).toBe(false);
+  });
 });
 
 describe('plain-args: own-key reads (defence in depth against a polluted Object.prototype)', () => {
@@ -990,6 +1078,35 @@ describe('plain-args: through the real client, in every scope (review of #185, B
           expect(error).toBeInstanceOf(OrgScopeViolationError);
           expect((error as Error).message).toMatch(HIDDEN_KEY);
         }
+      }
+    });
+
+    it('TC-008 FU-DB-281: the walk is the guarantee, not the clone: a byte array whose own slice returns a branded object, or a byte array with own keys, is refused', async () => {
+      const slicesTo = (result: object): object =>
+        Object.assign(new Uint8Array(0), { slice: () => result });
+      const makes: Array<() => Promise<unknown>> = [
+        () =>
+          client.session.update({
+            where: { id: SID },
+            data: {
+              lastHeartbeat: slicesTo(
+                Object.defineProperty({ [BRAND]: true }, 'select', { value: { hmacKeyEnc: true } }),
+              ),
+            },
+          } as never),
+        () =>
+          client.session.findFirst({
+            select: slicesTo(Object.assign(new Uint8Array(0), { hmacKeyEnc: true })),
+          } as never),
+        () =>
+          client.session.findFirst({
+            where: slicesTo(Object.assign(new Uint8Array(0), { hmacKeyEnc: 'guess' })),
+          } as never),
+      ];
+      for (const make of makes) {
+        const error = await run(() => outcome(make()));
+        expect(error).toBeInstanceOf(OrgScopeViolationError);
+        expect((error as Error).message).toMatch(refused);
       }
     });
 

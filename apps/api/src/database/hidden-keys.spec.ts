@@ -24,7 +24,8 @@ import type { SessionChain, TenantFixture } from './testing/tenant-fixtures';
 
 /** Prisma's brand of its null sentinels: its argument clone passes an object that carries it by reference. */
 const BRAND = Symbol.for('prisma.objectEnumValue');
-const HIDDEN_KEY = /a non-enumerable key|an accessor|a symbol key|a Proxy/;
+const HIDDEN_KEY =
+  /a non-enumerable key|an accessor|a symbol key|a Proxy|where a query object is expected/;
 
 /** A branded object with `key` held as a non-enumerable own value. */
 const branded = (key: string, value: unknown): object =>
@@ -70,12 +71,16 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
     });
   const asStaff = <R>(fn: () => Promise<R>): Promise<R> =>
     orgContext.runAsUser({ orgId: T.orgId, userId: T.userId, role: T.userRole }, fn);
-  /** Refused with OrgScopeViolationError for a hidden key, and no statement reached the database. */
-  async function expectRefusedBeforeAnyStatement(run: () => Promise<unknown>): Promise<void> {
+  /** Refused with OrgScopeViolationError for `reason` (one of the hidden-key faults), and no statement ran. */
+  async function expectRefusedBeforeAnyStatement(
+    reason: RegExp,
+    run: () => Promise<unknown>,
+  ): Promise<void> {
     const before = await statementCount();
     const error = await failure(run());
     expect(error).toBeInstanceOf(OrgScopeViolationError);
     expect((error as Error).message).toMatch(HIDDEN_KEY);
+    expect((error as Error).message).toMatch(reason);
     expect(await statementCount()).toBe(before);
   }
 
@@ -133,7 +138,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
   });
 
   it('TC-008 system scope: a branded _count with a non-enumerable select (the review scenario) is refused', async () => {
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/a non-enumerable key/, () =>
       orgContext.runSystem('BACKGROUND_JOB', () =>
         client.invitation.findMany({
           select: { id: true, _count: branded('select', { sessions: true }) },
@@ -150,7 +155,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
           key === BRAND ? true : key === 'select' ? { sessions: true } : undefined,
       },
     );
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/a Proxy/, () =>
       orgContext.runSystem('BACKGROUND_JOB', () =>
         client.invitation.findMany({ select: { id: true, _count: trap } } as never),
       ),
@@ -163,7 +168,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
       {},
       { invitation: { omit: { _count: false } } },
     );
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/an accessor/, () =>
       asStaff(() =>
         client.sessionQuestion.findFirst({ select: { id: true, session: carrier } } as never),
       ),
@@ -172,7 +177,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
   });
 
   it('TC-008 STAFF: a hidden include inside a relation args object is refused', async () => {
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/a non-enumerable key/, () =>
       asStaff(() =>
         client.sessionQuestion.findFirst({
           include: { session: branded('include', { invitation: true }) },
@@ -187,7 +192,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
       {},
       { invitation: { omit: { _count: false } } },
     );
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/an accessor/, () =>
       orgContext.runInOrg(T.orgId, () =>
         client.sessionQuestion.findFirst({ select: { id: true, session: carrier } } as never),
       ),
@@ -202,7 +207,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
     });
     const { carrier } = brandedGetter('status', before.status, 'ERASED');
     Object.defineProperty(carrier, 'lastHeartbeat', { value: new Date(), enumerable: true });
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/an accessor/, () =>
       orgContext.runAsSessionJob(T.chain.orgId, T.chain.sessionId, () =>
         client.session.update({
           where: { id: T.chain.sessionId },
@@ -225,7 +230,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
       [{ invitation: { tokenHash: { startsWith: 'a' } } }],
     );
     Object.defineProperty(carrier, 'id', { value: T.chain.sessionId, enumerable: true });
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/an accessor/, () =>
       asCandidate(T.chain, () =>
         client.session.findFirst({ where: carrier, select: { id: true } } as never),
       ),
@@ -238,10 +243,30 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
       value: true,
       enumerable: false,
     });
-    await expectRefusedBeforeAnyStatement(() =>
+    await expectRefusedBeforeAnyStatement(/a non-enumerable key/, () =>
       asCandidate(T.chain, () =>
         client.session.findFirst({ where: { id: T.chain.sessionId }, select } as never),
       ),
+    );
+  });
+
+  it("TC-008 CANDIDATE: Prisma's brand alone (the by-reference route) is refused as a symbol key", async () => {
+    await expectRefusedBeforeAnyStatement(/a symbol key/, () =>
+      asCandidate(T.chain, () =>
+        client.session.findFirst({
+          where: { id: T.chain.sessionId },
+          select: { [BRAND]: true, id: true },
+        } as never),
+      ),
+    );
+  });
+
+  it('TC-008 STAFF: a byte array whose own slice returns a byte array with keys, as the select, is refused (a value where a query object goes)', async () => {
+    const select = Object.assign(new Uint8Array(0), {
+      slice: () => Object.assign(new Uint8Array(0), { tokenHash: true }),
+    });
+    await expectRefusedBeforeAnyStatement(/where a query object is expected/, () =>
+      asStaff(() => client.invitation.findFirst({ select } as never)),
     );
   });
 
