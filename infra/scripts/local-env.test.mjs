@@ -109,6 +109,26 @@ describe('local-env (local demo)', () => {
     }
   });
 
+  it('the worker settings are written: a random signing key, the media bucket, and the origin equal to S3_ENDPOINT', () => {
+    const env = parseEnv(readFileSync(join(dir, '.env'), 'utf8'));
+    // An origin only (no path), on the address the worker binds (127.0.0.1); #129 reads these three.
+    assert.equal(env.WORKER_BASE_URL, 'http://127.0.0.1:8000');
+    assert.match(env.WORKER_HMAC_KEY_ID, /^[A-Za-z0-9_-]{1,32}$/);
+    assert.equal(
+      Buffer.from(env.WORKER_HMAC_KEY, 'base64').toString('base64'),
+      env.WORKER_HMAC_KEY,
+    );
+    assert.equal(env.WORKER_HMAC_KEY_ID, 'local1');
+    assert.ok(Buffer.from(env.WORKER_HMAC_KEY, 'base64').length >= 32);
+    assert.equal(env.WORKER_OBJECT_STORE_BUCKET, env.S3_MEDIA_BUCKET);
+    assert.equal(env.WORKER_OBJECT_STORE_ORIGINS, env.S3_ENDPOINT);
+    const example = readFileSync(`${REPO_ROOT}.env.example`, 'utf8');
+    assert.notEqual(
+      parseEnv(buildLocalEnv(example)).WORKER_HMAC_KEY,
+      parseEnv(buildLocalEnv(example)).WORKER_HMAC_KEY,
+    );
+  });
+
   it('two runs give different secrets', () => {
     const example = readFileSync(`${REPO_ROOT}.env.example`, 'utf8');
     assert.notEqual(

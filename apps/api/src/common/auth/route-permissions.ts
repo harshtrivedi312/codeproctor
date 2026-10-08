@@ -143,6 +143,14 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_session:heartbeat',
   },
+  'POST /candidate/session/events': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_events:write',
+  },
+  'POST /candidate/session/keystrokes': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_keystrokes:write',
+  },
   'POST /candidate/session/proctor-key': {
     principal: 'CANDIDATE',
     permission: 'candidate_session:key',
@@ -181,6 +189,22 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_media:presign',
   },
+
+  // Candidate identity check (FR-403; BE-08b). The status read reuses the upload permission: the
+  // shared contract has no candidate_identity:read yet (hub question, design notes section 7).
+  'POST /candidate/session/identity/presign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+  'POST /candidate/session/identity': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+  'GET /candidate/session/identity': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+
   // Organization settings (FR-103, ADR 0010 org_settings:manage; SUPER_ADMIN only, own org only).
   // The PATCH needs the admin's currentPassword (step-up) and writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
   'GET /admin/org-settings': orgSettingsManage,

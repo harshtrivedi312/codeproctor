@@ -1,6 +1,6 @@
 // One command to a running local demo (docs/local-run.md; DL-52, D-67):
 //
-//   pnpm demo:up [--dry-run] [--no-apps]
+//   pnpm demo:up [--dry-run] [--no-apps] [--no-worker]
 //
 // It writes .env if missing, starts the local stack (PostgreSQL, Redis, Mailpit, MinIO, Adminer),
 // builds the shared package, migrates, seeds, gives one seeded invitation a real link, starts the API
@@ -13,25 +13,42 @@
 // secret; the demo password lives in prisma/seed/guard.ts (DEMO_PASSWORD).
 //   --dry-run   print the steps, run nothing
 //   --no-apps   do everything except start the API and the web app (start them in your own terminals)
+//   --no-worker do not start the face-match worker on the host (it is optional: without it the identity
+//               check answers MANUAL_REVIEW and the candidate continues)
+// It checks first that the ports it needs are free and stops with a message that names the port and what
+// holds it. It never stops or reuses another stack's containers.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseEnv } from 'node:util';
 import { parsePids } from './demo-down.mjs';
+import {
+  DEMO_PORTS,
+  dockerContainers,
+  foreignContainers,
+  foreignMessage,
+  isFree,
+  judgePort,
+} from './demo-ports.mjs';
 
 export const API_HEALTH = 'http://localhost:4000/api/v1/health';
 export const WEB_LOGIN = 'http://localhost:3000/admin/login';
+export const WORKER_HEALTH = 'http://127.0.0.1:8000/health';
+export const WORKER_SCRIPT = 'apps/worker/tools/be08/run-local.sh';
 
 /** The ordered steps (pure: used for --dry-run and the tests). */
-export function planSteps({ hasEnv, hasModules, startApps }) {
+export function planSteps({ hasEnv, hasModules, startApps, startWorker = false }) {
   const steps = [];
   if (!hasEnv)
     steps.push({
       name: 'write .env (random local secrets)',
       cmd: ['node', 'infra/scripts/local-env.mjs'],
     });
-  steps.push({ name: 'check .env is a local development environment', check: 'env' });
+  steps.push(
+    { name: 'check .env is a local development environment', check: 'env' },
+    { name: 'check that the ports the demo needs are free', check: 'ports' },
+  );
   if (!hasModules)
     steps.push({ name: 'install dependencies', cmd: ['pnpm', 'install', '--frozen-lockfile'] });
   steps.push(
@@ -55,11 +72,17 @@ export function planSteps({ hasEnv, hasModules, startApps }) {
       { name: 'start the web app in the background', app: 'web' },
     );
   }
+  if (startWorker) {
+    steps.push({
+      name: 'start the face-match worker on the host (optional; needs Python 3.12; not waited for)',
+      app: 'worker',
+    });
+  }
   return steps;
 }
 
 /** The summary printed at the end (pure). `invite` is the output of demo-invite.mjs, or ''. */
-export function summary({ invite, appsStarted }) {
+export function summary({ invite, appsStarted, workerStatus = 'skipped' }) {
   const lines = [
     '',
     'Local demo is ready.',
@@ -86,6 +109,7 @@ export function summary({ invite, appsStarted }) {
         .map((l) => `    ${l}`),
     );
   }
+  lines.push('', `  Face-match worker: ${workerStatus}`);
   if (appsStarted) {
     lines.push(
       '',
@@ -129,7 +153,7 @@ async function isUp(url) {
   }
 }
 
-function startApp(root, name, cmd) {
+function startApp(root, name, cmd, env) {
   const dir = join(root, '.demo');
   mkdirSync(dir, { recursive: true });
   const log = openSync(join(dir, `${name}.log`), 'a');
@@ -137,6 +161,7 @@ function startApp(root, name, cmd) {
     cwd: root,
     detached: true,
     stdio: ['ignore', log, log],
+    ...(env === undefined ? {} : { env }),
   });
   child.unref();
   const file = join(dir, 'pids.json');
@@ -145,20 +170,55 @@ function startApp(root, name, cmd) {
   writeFileSync(file, JSON.stringify(pids));
 }
 
+/**
+ * Starts the face-match worker natively (apps/worker/tools/be08/run-local.sh, DL-57). It is optional: if
+ * Python 3.12 is missing, the command is printed instead; if it does not answer in time, a warning is
+ * printed and the demo goes on. It is not waited for: the first run installs large packages.
+ */
+async function startWorkerStep(root) {
+  const command = `WORKER_OBJECT_STORE_BUCKET=<media bucket> ${WORKER_SCRIPT}`;
+  if (await isUp(WORKER_HEALTH)) {
+    console.log('already running, left alone.');
+    return 'running';
+  }
+  if (spawnSync('python3.12', ['--version'], { stdio: 'ignore' }).status !== 0) {
+    console.log(
+      `Python 3.12 was not found, so the worker is not started. To start it later: ${command}`,
+    );
+    return `not started (Python 3.12 missing); command: ${command}`;
+  }
+  const env = parseEnv(readFileSync(join(root, '.env'), 'utf8'));
+  const workerEnv = { ...process.env };
+  for (const [k, v] of Object.entries(env)) if (k.startsWith('WORKER_')) workerEnv[k] = v;
+  if (!workerEnv.WORKER_OBJECT_STORE_ORIGINS && env.S3_ENDPOINT)
+    workerEnv.WORKER_OBJECT_STORE_ORIGINS = env.S3_ENDPOINT;
+  if (!workerEnv.WORKER_OBJECT_STORE_BUCKET)
+    workerEnv.WORKER_OBJECT_STORE_BUCKET = env.S3_MEDIA_BUCKET ?? 'codeproctor-media';
+  startApp(root, 'worker', ['bash', WORKER_SCRIPT], workerEnv);
+  console.log(
+    'started in the background (the first run installs packages and can take several minutes; log: .demo/worker.log; it answers at ' +
+      WORKER_HEALTH +
+      ' when ready).',
+  );
+  return `starting in the background (log .demo/worker.log; ready when ${WORKER_HEALTH} answers; no face models yet, so identity checks go to MANUAL_REVIEW)`;
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const unknown = args.filter((a) => a !== '--dry-run' && a !== '--no-apps');
+  const unknown = args.filter((a) => !['--dry-run', '--no-apps', '--no-worker'].includes(a));
   if (unknown.length > 0) {
-    console.error('demo-up: usage: pnpm demo:up [--dry-run] [--no-apps]');
+    console.error('demo-up: usage: pnpm demo:up [--dry-run] [--no-apps] [--no-worker]');
     process.exit(1);
   }
   const dry = args.includes('--dry-run');
   const startApps = !args.includes('--no-apps');
+  const startWorker = startApps && !args.includes('--no-worker');
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
   const steps = planSteps({
     hasEnv: existsSync(join(root, '.env')),
     hasModules: existsSync(join(root, 'node_modules')),
     startApps,
+    startWorker,
   });
   if (dry) {
     steps.forEach((s, i) =>
@@ -171,6 +231,7 @@ async function main() {
     process.exit(1);
   }
   let invite = '';
+  let workerStatus = startWorker ? 'not started' : 'skipped (--no-worker)';
   let n = 0;
   for (const step of steps) {
     n += 1;
@@ -187,6 +248,35 @@ async function main() {
         );
         process.exit(1);
       }
+      continue;
+    }
+    if (step.check === 'ports') {
+      const ourCompose = join(root, 'infra/docker-compose.yml');
+      const containers = dockerContainers();
+      const problems = [];
+      const foreign = foreignContainers(containers, ourCompose);
+      if (foreign.length > 0) problems.push(foreignMessage(foreign));
+      for (const spec of DEMO_PORTS) {
+        if (spec.kind === 'api' && !startApps) continue;
+        if (spec.kind === 'web' && !startApps) continue;
+        if (spec.kind === 'worker' && !startWorker) continue;
+        const free = await isFree(spec.port);
+        const url = { api: API_HEALTH, web: WEB_LOGIN, worker: WORKER_HEALTH }[spec.kind];
+        const ourAppUp = !free && url !== undefined && (await isUp(url));
+        const verdict = judgePort({ spec, free, containers, ourCompose, ourAppUp });
+        if (!verdict.ok) problems.push(verdict.message);
+        else if (verdict.note) console.log(verdict.note);
+      }
+      if (problems.length > 0) {
+        console.error('\ndemo-up: cannot start, a port is taken:');
+        for (const message of problems) console.error(`  - ${message}`);
+        process.exit(1);
+      }
+      console.log('ports are free.');
+      continue;
+    }
+    if (step.app === 'worker') {
+      workerStatus = await startWorkerStep(root);
       continue;
     }
     if (step.app) {
@@ -211,7 +301,7 @@ async function main() {
     }
     if (step.capture === 'invite') invite = r.stdout;
   }
-  console.log(summary({ invite, appsStarted: startApps }));
+  console.log(summary({ invite, appsStarted: startApps, workerStatus }));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) await main();
