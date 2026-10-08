@@ -199,9 +199,10 @@ export function orgScopeExtension(
           );
         }
 
-        // Arguments must be plain (B1 of the #185 review): Prisma reads inherited keys that the checks
-        // below do not see, so a foreign prototype or an inherited key is refused before anything else
-        // reads the arguments, in EVERY scope, system and staff included (plain-args.ts).
+        // Arguments must be plain (B1 of the #185 review; FU-DB-281): Prisma reads inherited keys, and on an
+        // object it passes by reference a non-enumerable key or a getter, that the checks below do not see, so a
+        // foreign prototype, an inherited, symbol or non-enumerable key, an accessor and a Proxy are refused before
+        // anything else reads the arguments, in EVERY scope, system and staff included (plain-args.ts).
         if (model !== undefined) assertPlainArgs(model, operation, args);
         // `omit` takes only `true`, in every scope: Prisma turns any other value into a selection of that key,
         // a relation or `_count` included, which would bypass the relation checks below (omit-args.ts).
