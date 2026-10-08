@@ -43,7 +43,11 @@ export const TWO_FACTOR_ON_LOGIN_PATH = '/admin/login?reason=two-factor-on';
 /** Set-up confirm had an unknown outcome: the notice does not claim whether 2FA is on. */
 export const TWO_FACTOR_UNCONFIRMED_LOGIN_PATH = '/admin/login?reason=two-factor-unconfirmed';
 
-/** The server already ended every session (a confirmed answer), so no logout call is made. */
+/**
+ * Why the user is signed out after a two-factor change. The server has ended (or may have ended)
+ * every session; the web still forgets the session first and sends one POST /auth/logout, where a
+ * 401 counts as confirmed.
+ */
 export type SessionRevokedReason = 'off' | 'on' | 'unconfirmed';
 const REVOKED_PATHS: Record<SessionRevokedReason, string> = {
   off: TWO_FACTOR_OFF_LOGIN_PATH,
@@ -240,7 +244,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
   const runSignOut = React.useCallback(
     async (target: string) => {
       setSignedOutByUser(true);
-      setLoginPath(target === LOGIN_PATH ? LOGIN_PATH : target);
+      setLoginPath(target);
       // Blocks new refreshes at once and forgets the session at once: a refresh already running
       // may take seconds, and until it settles the old token must not be used. Logout works from
       // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
@@ -268,7 +272,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     [router, confirmLogout, queryClient],
   );
 
-  const signOut = React.useCallback(() => runSignOut('/admin/login'), [runSignOut]);
+  const signOut = React.useCallback(() => runSignOut(LOGIN_PATH), [runSignOut]);
   const signOutRevoked = React.useCallback(
     (reason: SessionRevokedReason) => runSignOut(REVOKED_PATHS[reason]),
     [runSignOut],
