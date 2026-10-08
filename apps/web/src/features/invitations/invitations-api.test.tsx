@@ -100,12 +100,29 @@ describe('Invitations mock: single invitation, in the order the API checks (FR-3
     expect(JSON.stringify(bad.body)).not.toContain('"x"');
   });
 
+  it('FR-303: a windowStart more than 5 minutes in the past is a 400, like the real API; a minute old is accepted', async () => {
+    const old = await call('RECRUITER', 'POST', '/v1/tests/test-backend/invitations', {
+      candidate: { email: 'late.start@example.test', name: 'Late Start' },
+      windowStart: new Date(Date.now() - 6 * 60_000).toISOString(),
+      windowEnd: win().windowEnd,
+    });
+    expect(old.status).toBe(400);
+    expect(errorsOf(old).join(' ')).toMatch(/windowStart may be at most 5 minutes in the past/);
+    const recent = await call('RECRUITER', 'POST', '/v1/tests/test-backend/invitations', {
+      candidate: { email: 'ok.start@example.test', name: 'Ok Start' },
+      windowStart: new Date(Date.now() - 60_000).toISOString(),
+      windowEnd: win().windowEnd,
+    });
+    expect(recent.status).toBe(201);
+  });
+
   it('404 for an unknown test and 422 for a window that has closed', async () => {
     expect((await call('RECRUITER', 'POST', '/v1/tests/nope/invitations', one())).status).toBe(404);
     const closed = await call('RECRUITER', 'POST', path, {
       candidate: { email: 'late@example.test', name: 'Late' },
-      windowStart: new Date(Date.now() - 2 * day).toISOString(),
-      windowEnd: new Date(Date.now() - day).toISOString(),
+      // The start may be at most 5 minutes old (else 400), so the closed window is a short one.
+      windowStart: new Date(Date.now() - 60_000).toISOString(),
+      windowEnd: new Date(Date.now() - 30_000).toISOString(),
     });
     expect(closed.status).toBe(422);
   });

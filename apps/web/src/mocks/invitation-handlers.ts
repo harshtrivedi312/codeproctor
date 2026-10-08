@@ -274,6 +274,9 @@ function windowProblems(b: Record<string, unknown>): string[] {
     if (typeof b[k] !== 'string' || Number.isNaN(Date.parse(b[k])))
       out.push(`${k} must be an ISO 8601 date string`);
   }
+  // The real API: windowStart may be at most 5 minutes in the past (invitations.service.ts).
+  if (out.length === 0 && Date.parse(b.windowStart as string) < Date.now() - 5 * 60_000)
+    out.push('windowStart may be at most 5 minutes in the past');
   if (out.length === 0 && Date.parse(b.windowEnd as string) <= Date.parse(b.windowStart as string))
     out.push('windowEnd must be after windowStart');
   return out;
