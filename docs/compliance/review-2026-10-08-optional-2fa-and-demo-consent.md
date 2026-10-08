@@ -155,3 +155,14 @@ This is a consent-integrity weakness (candidate data and consent), so by the pro
 3. If a version that promised a security control was signed before the control was removed, is a notice or re-consent required?
 
 *All wording above is a draft for owner approval and has not been reviewed by a licensed lawyer.*
+
+## Re-review of #327 at `049bcec4` (2026-10-08, after D-77 to D-79)
+
+The owner decided (D-78) that 2FA stays optional inside CodeProctor, because it will sit behind a host application that already uses a second factor (Azure Authenticator), and (D-79) to merge #322 now and build the F6 API refusal as a pre-pilot blocker. #327 applies F1, F2, F3 and F5 and records D-78. I checked the diff against this review.
+
+- **Accurate and consistent.** Consent section 6 no longer promises a security control, and the duplicated logging sentence is gone. R1 is High for EU/UK and Illinois "until the host application's sign-in with a second factor, or an equivalent control, is in place"; section 9 and the Art. 36 line match it; DPIA section 6 item 9 gates the first real candidate; D-76 is shown as planned, not in place. The C-21 note and drafting note 10 are as proposed. No new consent version or re-consent is needed.
+- **Honest about what exists.** The text says the host sign-in is "not built today". Keep that wording until it is.
+- **Should-fix S-D78 (small, can follow #327).** The host-application control only works if it cannot be bypassed. If CodeProctor keeps its own password login reachable in the pilot, an attacker with a stolen password skips the host's second factor. Add to DPIA section 6 item 9: "...and CodeProctor's own password sign-in is disabled or unreachable for staff in that environment." Also record the host-application integration as a scope item for the hub (it is not in the BRD or ADRs), since R1's rating now depends on it.
+- **Still needs counsel.** Whether the compensating measures alone are enough, and whether Art. 36 consultation applies while R1 is High.
+
+Verdict: **compliance-reviewed, no blockers.** The F6 refusal (K2) stays a pre-pilot blocker owned by Backend B (D-79); the demo text banner (M1) goes to Database A.
