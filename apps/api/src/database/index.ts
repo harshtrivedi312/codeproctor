@@ -22,7 +22,14 @@ export {
   OrgScopeError,
   OrgScopeViolationError,
   RawQueryNotAllowedError,
+  // The outcomes of the session write locks. The module that throws them, ./session-locks, is NOT
+  // exported here: FU-DB-67 pins its importers. A caller catches these to drop a job or answer 404/409.
+  AccommodationLockedError,
+  SESSION_LOCK_ERROR_CODES,
+  SessionLockRetryError,
+  SessionNotFoundError,
 } from './errors';
+export type { SessionLockErrorCode } from './errors';
 export type { OrgScopedPrismaClient } from './org-scope.extension';
 // For the log boundary: scrub a Prisma or driver error before it is logged (FU-DB-70, FU-DB-112).
 export { scrubPrismaError } from './error-scrub';

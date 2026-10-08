@@ -7,6 +7,7 @@ import { Global, Logger, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { isLiveEnv } from '../config/env';
 import type { Env } from '../config/env';
+import { DirectMailSender } from './direct-mail.sender';
 import { EmailQueuePort } from './email-queue.port';
 import { InProcessEmailQueue } from './in-process-email-queue';
 import { MailPort, NoopMailPort } from './mail.port';
@@ -70,12 +71,27 @@ const sesOnly = (config: ConfigService<Env, true>): boolean => {
           : null,
     },
     {
+      // Awaited send for candidate mail (OTP, consent copy); see direct-mail.sender.ts.
+      provide: DirectMailSender,
+      inject: [ConfigService, MailTransport],
+      useFactory: (
+        config: ConfigService<Env, true>,
+        transport: MailTransport | null,
+      ): DirectMailSender =>
+        new DirectMailSender(transport, {
+          allowHttp: !isLiveEnv({
+            APP_ENV: config.get('APP_ENV', { infer: true }),
+            NODE_ENV: config.get('NODE_ENV', { infer: true }),
+          }),
+        }),
+    },
+    {
       provide: MailPort,
       inject: [EmailQueuePort],
       useFactory: (queue: EmailQueuePort | null): MailPort =>
         queue ? new QueuedMailPort(queue) : new NoopMailPort(),
     },
   ],
-  exports: [MailPort],
+  exports: [MailPort, DirectMailSender],
 })
 export class MailModule {}

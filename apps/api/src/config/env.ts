@@ -186,6 +186,46 @@ export const envSchema = z
     SES_FROM_ADDRESS: emptyAsUnset(z.email()),
     SES_CONFIGURATION_SET: emptyAsUnset(z.string().min(1)),
     SES_ENDPOINT: emptyAsUnset(z.url()),
+    // Object storage (BE-09, ADR 0001 section 2.1, ADR 0013 section 5.7): one S3-compatible
+    // interface. Cloudflare R2 on staging (synthetic data only), AWS S3 on pilot and production;
+    // only these values differ. Unset locally and on a fresh staging: the media routes then answer
+    // 503 STORAGE_UNCONFIGURED. The two credentials are secrets (never log); both or neither (AWS
+    // may use the instance role).
+    // Empty for AWS S3; https://<account>.r2.cloudflarestorage.com for R2.
+    // An empty value (a copied .env template line such as `S3_REGION=`) counts as unset, like the
+    // SES settings above (DL-52): the live-environment checks below still require real values.
+    S3_ENDPOINT: emptyAsUnset(z.url()),
+    // The AWS region, or `auto` for R2.
+    S3_REGION: emptyAsUnset(z.string().min(1)),
+    S3_MEDIA_BUCKET: emptyAsUnset(
+      z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a valid bucket name'),
+    ),
+    S3_ACCESS_KEY_ID: emptyAsUnset(z.string().min(1)),
+    S3_SECRET_ACCESS_KEY: emptyAsUnset(z.string().min(1)),
+    S3_FORCE_PATH_STYLE: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Sign `If-None-Match: *` on chunk PUTs (ADR 0013 section 5.5 control 3). AWS S3 supports it;
+    // R2 is not verified (BE-09 spike), so it stays off until a staging check proves it.
+    S3_CONDITIONAL_WRITES: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
+    // Analysis worker (BE-08b, ADR 0014 section 4): the API calls it over HMAC-signed HTTP. Unset
+    // means the identity match answers MANUAL_REVIEW (the candidate continues, D-05). The key id is
+    // short and the key is a secret (32 random bytes, base64; never log).
+    // Empty counts as unset (a copied .env template line, DL-52), like the SES and S3 settings.
+    WORKER_BASE_URL: emptyAsUnset(z.url()),
+    WORKER_HMAC_KEY_ID: emptyAsUnset(z.string().regex(/^[A-Za-z0-9_-]{1,32}$/)),
+    WORKER_HMAC_KEY: emptyAsUnset(
+      z
+        .string()
+        .refine(
+          (v) => /^[A-Za-z0-9+/_-]+={0,2}$/.test(v) && Buffer.from(v, 'base64').length >= 32,
+          { message: 'must be at least 32 bytes, base64 encoded' },
+        ),
+    ),
   })
   .superRefine((env, ctx) => {
     const live = isLiveEnv(env);
@@ -357,6 +397,79 @@ export const envSchema = z
       for (const key of ['JWT_CANDIDATE_SECRET', 'OTP_PEPPER'] as const) {
         if (env[key] === undefined) {
           ctx.addIssue({ code: 'custom', path: [key], message: 'is required outside development' });
+        }
+      }
+    }
+    const workerSet = [env.WORKER_BASE_URL, env.WORKER_HMAC_KEY_ID, env.WORKER_HMAC_KEY].filter(
+      (v) => v !== undefined,
+    ).length;
+    if (workerSet !== 0 && workerSet !== 3) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['WORKER_HMAC_KEY'],
+        message: 'WORKER_BASE_URL, WORKER_HMAC_KEY_ID and WORKER_HMAC_KEY must be set together',
+      });
+    }
+    if (env.WORKER_BASE_URL !== undefined) {
+      const url = new URL(env.WORKER_BASE_URL);
+      const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+      // Only the origin: `new URL(path, base)` would silently drop a base path, and a userinfo or
+      // query would put a credential in the config.
+      if (
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.username !== '' ||
+        url.password !== '' ||
+        url.search !== '' ||
+        url.hash !== '' ||
+        url.pathname !== '/'
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['WORKER_BASE_URL'],
+          message: 'must be an http(s) origin with no user, path or query',
+        });
+      }
+      // ADR 0014 4.4: plain HTTP only on the single-host internal network; anywhere else TLS.
+      if (
+        (live || env.NODE_ENV === 'production') &&
+        url.protocol !== 'https:' &&
+        !loopback &&
+        !/^[a-z0-9-]+$/.test(url.hostname)
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['WORKER_BASE_URL'],
+          message: 'must be https unless the worker is on the same host network',
+        });
+      }
+    }
+    if ((env.S3_ACCESS_KEY_ID === undefined) !== (env.S3_SECRET_ACCESS_KEY === undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['S3_SECRET_ACCESS_KEY'],
+        message: 'S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together',
+      });
+    }
+    if (deployed) {
+      for (const key of ['S3_REGION', 'S3_MEDIA_BUCKET'] as const) {
+        if (env[key] === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: 'is required in pilot and production',
+          });
+        }
+      }
+      if (env.S3_ENDPOINT !== undefined) {
+        const url = new URL(env.S3_ENDPOINT);
+        // Pilot and production use AWS S3 (ADR 0001 section 2.1): an R2 or other endpoint there
+        // would send candidate media to a store the pilot has no agreement with.
+        if (url.protocol !== 'https:' || !url.hostname.endsWith('.amazonaws.com')) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['S3_ENDPOINT'],
+            message: 'must be unset or an https *.amazonaws.com endpoint in pilot and production',
+          });
         }
       }
     }
