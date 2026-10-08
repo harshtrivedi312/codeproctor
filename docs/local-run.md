@@ -42,7 +42,7 @@ seeds, gives the seeded invitation a real link, starts the API and the web app i
 to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
 its own pnpm dev commands). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
 data stays in Docker volumes). `pnpm demo:up --dry-run` lists the steps without running them, and
-`--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker.
+`--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker. On a re-run where the seeded invitation was already used, `demo:up` prints "No unused seeded invitation" and carries on (create one from the recruiter UI, Tests → Invite candidates; the link arrives in Mailpit); `--no-invite` skips that step.
 
 **Step by step** (what `demo:up` does):
 

@@ -14,7 +14,7 @@ import {
   judgePort,
   parseDockerPs,
 } from './demo-ports.mjs';
-import { failureHint, planSteps, summary } from './demo-up.mjs';
+import { INVITE_NONE_EXIT, failureHint, judgeStep, planSteps, summary } from './demo-up.mjs';
 import { REPO_ROOT } from './test-support.mjs';
 
 const names = (steps) => steps.map((s) => s.name);
@@ -352,6 +352,35 @@ describe('demo:up compose project (local demo)', () => {
         project: 'codeproctor-demo',
       }).ok,
       true,
+    );
+  });
+});
+
+describe('demo:up invitation step (local demo)', () => {
+  const invite = planSteps({ hasEnv: true, hasModules: true, startApps: true }).find((s) =>
+    s.cmd?.join(' ').includes('demo-invite'),
+  );
+
+  it('"no unused seeded invitation" is not fatal: the run goes on to the apps', () => {
+    assert.equal(judgeStep(invite, 0), 'ok');
+    assert.equal(judgeStep(invite, INVITE_NONE_EXIT), 'skip');
+    assert.equal(judgeStep(invite, 1), 'fail', 'a real failure still stops the run');
+    assert.equal(judgeStep(invite, null), 'fail');
+  });
+
+  it('only the invitation step may be skipped that way', () => {
+    const others = planSteps({ hasEnv: false, hasModules: false, startApps: true }).filter(
+      (s) => s.cmd && !s.cmd.join(' ').includes('demo-invite'),
+    );
+    for (const s of others) assert.equal(judgeStep(s, INVITE_NONE_EXIT), 'fail', s.name);
+  });
+
+  it('--no-invite leaves the step out and the rest of the plan unchanged', () => {
+    const without = planSteps({ hasEnv: true, hasModules: true, startApps: true, invite: false });
+    assert.ok(!names(without).some((n) => /real link/.test(n)));
+    assert.equal(
+      without.length,
+      planSteps({ hasEnv: true, hasModules: true, startApps: true }).length - 1,
     );
   });
 });
