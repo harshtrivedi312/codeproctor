@@ -17,6 +17,7 @@ import { GradingModule } from './grading/grading.module';
 import { SubmissionsModule } from './submissions/submissions.module';
 import { OrgSettingsModule } from './org-settings/org-settings.module';
 import { UsersModule } from './users/users.module';
+import { InvitationsModule } from './invitations/invitations.module';
 import { ReviewModule } from './review/review.module';
 import { TestsModule } from './tests/tests.module';
 import { QuestionsModule } from './questions/questions.module';
@@ -139,6 +140,7 @@ function areaOf(context: ExecutionContext): Area {
     UsersModule,
     OrgSettingsModule,
     TestsModule,
+    InvitationsModule,
     ReviewModule,
     QuestionsModule,
     HealthModule,

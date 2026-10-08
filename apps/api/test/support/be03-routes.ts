@@ -142,6 +142,8 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
   'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
   'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  // Invitations (FR-303, BE-06 slice 6c): role matrix, isolation, audit and races in apps/api/src/invitations/invitations.e2e-spec.ts.
+  'POST /tests/:id/invitations': 'apps/api/src/invitations/invitations.e2e-spec.ts',
   // Reviewer read API (REVIEWER and SUPER_ADMIN): role matrix, cross-org 404, audit in apps/api/src/review/review.e2e-spec.ts. BE13_DEFAULT stays false.
   'GET /review/queue': 'apps/api/src/review/review.e2e-spec.ts',
   'GET /review/sessions/:id': 'apps/api/src/review/review.e2e-spec.ts',
