@@ -504,8 +504,14 @@ and when a column of the schema is none of the five (a new column breaks the bui
   (an array: other than `Array.prototype`; a data row too, since the hook only ever sees Prisma's plain clone of a
   DTO), or has an own symbol key, an own non-enumerable key, an own getter or setter, or (an array) an own key that
   is not an index. A Date, a byte array, a Decimal, a field reference and the Json null sentinels are skipped only
-  when real (exact prototype and own keys, not a Proxy); a look-alike is walked and refused. An array one level
-  below a column is a value: its prototype, a Proxy and a symbol key are checked, not its elements.
+  when real (exact prototype and own keys, not a Proxy); a look-alike is walked and refused. A value goes only where
+  a value goes (a filter operand, a cursor value, a column value): one where a query object is expected (the value
+  of an argument key, a where under AND, OR, NOT or a relation filter, a data row, or the select, include, omit,
+  where, orderBy, cursor, having or an aggregate of a relation's args) is refused. The walk is the guarantee, not
+  the clone: the clone calls a byte array's own `slice(0)`, so the hook sees whatever that returns. An array one
+  level below a column is a value: its prototype, a Proxy and a symbol key are checked, not its elements. A Skip
+  instance is refused (`Prisma.skip` is not exported without the `strictUndefinedChecks` preview, and a spec fails
+  when it appears).
 
 **Writes are CS-4.4's "Write" column as an allowlist** (`CANDIDATE_MODELS` in `session-scope-map.ts`): a
 create and an update carry only the columns listed for the model, anything else throws, an update on a
