@@ -136,6 +136,7 @@ export function ProctoredTest({
             enterFullscreen: () => controller.enterFullscreen(),
             startRecorders: () => controller.startRecorders(),
             clearNotice: () => controller.clearNotice(),
+            setSubmitting: (on) => controller.setSubmitting(on),
           }
         : undefined,
     [controller, state],
