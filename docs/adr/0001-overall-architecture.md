@@ -81,7 +81,7 @@ flowchart LR
 | ID | Boundary | Rule |
 | --- | --- | --- |
 | TB-1 | Candidate to API | All client input is untrusted, including detector output, timestamps and HMAC-signed batches, because the key is in the browser (R-04). Server time is the only clock (FR-505, TC-047). The candidate token scopes each request to one session. |
-| TB-2 | Staff to API | 15-minute access JWT plus a rotated refresh cookie (FR-104). TOTP for SUPER_ADMIN and REVIEWER (FR-102). Every route has deny-by-default RBAC and an org scope check (CLAUDE.md). |
+| TB-2 | Staff to API | 15-minute access JWT plus a rotated refresh cookie (FR-104). TOTP optional and recommended for every staff role (FR-102, D-70; it was mandatory for SUPER_ADMIN and REVIEWER). Every route has deny-by-default RBAC and an org scope check (CLAUDE.md). |
 | TB-3 | Browsers to object storage | Presigned URLs only. The API never proxies media. |
 | TB-4 | API to Judge0 | Candidate code is hostile. Judge0 has a private network, no egress and per-submission limits (FR-503, TC-042..TC-044). Only the API can call it. |
 | TB-5 | App to data stores | Private network only. The app connects as `app_user`, which cannot UPDATE or DELETE `audit_logs` (architecture.md Security). |
@@ -98,7 +98,7 @@ flowchart LR
 | F4 Events and keystrokes | Batches (events every 5 s, keystrokes every 2 s) carry HMAC-SHA256 and a monotonic sequence. The API verifies them and stores `proctor_events` and `keystroke_batches`. HIGH events go to Redis `live:{orgId}` and then to /live. | FR-601..FR-610, FR-801; TC-050..TC-065 |
 | F5 Media | 10 s MediaRecorder chunks. The API presigns a PUT, the browser uploads straight to object storage and confirms, and the API writes `media_chunks`. An IndexedDB buffer (200 MB) holds failed uploads. Playback uses 15-minute GET URLs, and the retention job deletes objects. | FR-701..FR-704, NFR-08; TC-063, TC-070..TC-072 |
 | F6 Analysis | After SUBMITTED, `grade-session` runs, then `analyze-session` (the worker reads audio from object storage, plus keystrokes, events and submissions). Results go to the API, and SessionStateService moves the session to UNDER_REVIEW (MEDIUM or HIGH) or COMPLETED. | FR-802..FR-805; TC-073..TC-076; order open (Q-22) |
-| F7 Review and live | Reviewer with TOTP opens the queue, then an audited review bundle, decides flags, and sets a verdict once every HIGH flag is decided. Appeals go to another reviewer. /live uses Socket.IO with the Redis adapter, and pause and message reach the candidate. | FR-901..FR-904; TC-077..TC-080; candidate channel open (Q-20) |
+| F7 Review and live | Reviewer (with TOTP if enrolled, D-70) opens the queue, then an audited review bundle, decides flags, and sets a verdict once every HIGH flag is decided. Appeals go to another reviewer. /live uses Socket.IO with the Redis adapter, and pause and message reach the candidate. | FR-901..FR-904; TC-077..TC-080; candidate channel open (Q-20) |
 | F8 Reporting | PDF stored in object storage with a signed link, SQL dashboard aggregates, HMAC-signed webhooks retried through BullMQ, CSV export | FR-1001..FR-1003; TC-081 |
 
 ## 5. Cross-cutting decisions
