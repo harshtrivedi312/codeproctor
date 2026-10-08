@@ -19,11 +19,10 @@
 //   2. nested structure objects (`where`, `select`, `orderBy`, `having`, `cursor`, `omit`, `include` and the
 //      aggregates, walked fully) that have the same fault, or an enumerable key inherited from anywhere;
 //   3. the row of `data`, `create` and `update` (and each row of a `createMany`) and ONE level below it (a
-//      `{ set }` or `{ increment }` object, a JSON value): an own `__proto__` key or an inherited enumerable
-//      key. Json column contents are not walked, so an ingest path pays O(columns) and not O(payload).
-// A class instance with no enumerable inherited key (a DTO) passes in `data`; it never passes as a top-level
-// args object or as a structure object. Dates, byte arrays, Decimals, the Json null sentinels and field
-// references are values, not structure, and are skipped.
+//      `{ set }` or `{ increment }` object, a JSON value) with the same fault. Json column contents are not
+//      walked, so an ingest path pays O(columns) and not O(payload).
+// Dates, byte arrays, Decimals, the Json null sentinels and field references are values, not structure, and
+// are skipped (the real ones only: see "Hidden keys" below).
 //
 // The operand of a Json filter is a VALUE, not structure (review of #185, S1): `where: { accommodations: {
 // equals: stored } }` is a compare-and-set (retention, the org settings, the device-info fence), and `stored`
@@ -38,6 +37,29 @@
 //
 // The checks that read `select`, `omit`, `where`, `data` and the rest also read through ownValue(), so a key
 // that is not the caller's own is never seen (defence in depth against a polluted Object.prototype).
+//
+// Hidden keys (FU-DB-281; the #261 delta review, S1; CLAUDE.md rule 3). The checks walk with `Object.entries`
+// and `Object.values`, which see own ENUMERABLE string keys only, and they read a getter once. Prisma reads a
+// relation's args with `function Wt({ select, include, ...rest })`, a [[Get]] that also finds a NON-ENUMERABLE
+// own `select` or `include` and calls a getter again. Its argument clone (a for-in copy, made before the hook
+// runs) normally drops non-enumerable and symbol keys and snapshots getters and Proxies, but it passes an
+// object BY REFERENCE when `value[Symbol.for('prisma.objectEnumValue')] === true` (the brand of its null
+// sentinels; the symbol is a registered one, so any code can set it), and a FieldRef or Skip instance too.
+// Confirmed against Postgres on Prisma 7.10: in system scope, a branded `_count` with a non-enumerable
+// `select: { sessions: true }` counted the relation, and in STAFF scope a branded relation args object with a
+// getter `include` gave the omit check `{}` and Prisma `{ invitation: { omit: { _count: false } } }`.
+// So every object and array of the tree that the walk visits (the args, structure, where and having, the
+// filter object of a Json column, the data rows and one level below each column) is refused when it:
+//   - is a Proxy (its traps can answer the checks and Prisma differently);
+//   - has a prototype other than Object.prototype or null (an array: other than Array.prototype), the
+//     data rows included: Prisma hands the hook its own clone, so a DTO arrives here as a plain object;
+//   - has an own symbol key (the brand among them), an own non-enumerable key, an own accessor (a getter
+//     or a setter), or (an array) an own key that is not an index.
+// A Date, a byte array, a Decimal, a field reference and the Json null sentinels are values and are skipped
+// only when they are the real thing (an exact shape and prototype, no extra own key, not a Proxy); anything
+// else that looks like one is walked as structure, so it is refused. The arrays one level below a column (a
+// scalar list, a Json array) get the prototype, Proxy and symbol checks; their elements are values.
+import { types } from 'node:util';
 import { Prisma } from '../generated/prisma/client.js';
 import { deepFreeze } from './deep-freeze';
 import { OrgScopeViolationError } from './errors';
@@ -146,16 +168,112 @@ export function isFieldRef(value: unknown): boolean {
   );
 }
 
-/** A value Prisma takes as it is, not a structure to walk. */
-function isValueObject(value: object): boolean {
+/** The own keys of a Prisma field reference (`client.model.fields.column`), as its class declares them. */
+const FIELD_REF_KEYS: ReadonlySet<string> = new Set([
+  'modelName',
+  'name',
+  'typeName',
+  'isList',
+  'isEnum',
+]);
+/** The own keys of a decimal.js Decimal (the instance owns its constructor). */
+const DECIMAL_KEYS: ReadonlySet<string> = new Set(['constructor', 's', 'e', 'd']);
+
+/** True when every own key of `object` is a string in `allowed`, held as an enumerable data property. */
+function hasOnlyDataKeys(object: object, allowed: ReadonlySet<string>): boolean {
+  for (const key of Reflect.ownKeys(object)) {
+    if (typeof key !== 'string' || !allowed.has(key)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (descriptor === undefined || !('value' in descriptor)) return false;
+    if (key !== 'constructor' && descriptor.enumerable !== true) return false;
+  }
+  return true;
+}
+
+/** A Date that carries nothing: no own key, and a realm's Date.prototype (not a subclass's) as its prototype. */
+function isRealDate(value: object): boolean {
+  const proto: unknown = Object.getPrototypeOf(value);
   return (
-    Object.prototype.toString.call(value) === '[object Date]' ||
-    ArrayBuffer.isView(value) ||
-    Prisma.Decimal.isDecimal(value) ||
+    types.isDate(value) &&
+    Reflect.ownKeys(value).length === 0 &&
+    typeof proto === 'object' &&
+    proto !== null &&
+    Object.hasOwn(proto, 'getTime') &&
+    isPlainPrototype(Object.getPrototypeOf(proto))
+  );
+}
+
+/**
+ * A byte array: a typed array whose prototype is a realm's Uint8Array.prototype (or another element type's) or
+ * Node's Buffer.prototype, with no symbol key (Prisma's brand among them). Prisma reads a byte array as bytes
+ * (`buffer`, `byteOffset` and `byteLength`, then base64), never as structure, so its own string keys are not listed:
+ * that would cost O(length) (about 100 ms for 1 MiB). The clone hands the hook a `slice(0)` copy, which owns its indices
+ * only; a byte array keeps its own keys only by reference, and that needs the brand, which is refused here (an own
+ * symbol) or on its prototype (not a builtin one).
+ */
+function isRealByteArray(value: object): boolean {
+  if (!types.isTypedArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (typeof proto !== 'object' || proto === null) return false;
+  const builtin =
+    proto === Buffer.prototype ||
+    (Object.hasOwn(proto, 'BYTES_PER_ELEMENT') &&
+      isPlainPrototype(Object.getPrototypeOf(Object.getPrototypeOf(proto))));
+  return builtin && Object.getOwnPropertySymbols(value).length === 0;
+}
+
+/** A Prisma Decimal (the class the client and its clone build): its own `s`, `e` and `d`, and nothing else. */
+function isRealDecimal(value: object): boolean {
+  // The prototype and the own keys first: no getter of the caller's runs before the object is known to be one.
+  return (
+    Object.getPrototypeOf(value) === Prisma.Decimal.prototype &&
+    Object.hasOwn(value, 's') &&
+    Object.hasOwn(value, 'e') &&
+    Object.hasOwn(value, 'd') &&
+    hasOnlyDataKeys(value, DECIMAL_KEYS) &&
+    Prisma.Decimal.isDecimal(value)
+  );
+}
+
+/**
+ * A field reference as the runtime builds it: the five own keys of its class and nothing else, and a prototype that
+ * owns only `constructor` and `_toGraphQLInputType`, on Object.prototype. A look-alike, a reference with a key
+ * added, or an object built on a reference (`Object.create(ref)`) is not one, and is walked (and refused).
+ */
+function isRealFieldRef(value: object): boolean {
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (
+    typeof proto !== 'object' ||
+    proto === null ||
+    !isPlainPrototype(Object.getPrototypeOf(proto))
+  ) {
+    return false;
+  }
+  const own = Reflect.ownKeys(proto);
+  return (
+    own.length === 2 &&
+    Object.hasOwn(proto, 'constructor') &&
+    typeof Object.getOwnPropertyDescriptor(proto, '_toGraphQLInputType')?.value === 'function' &&
+    hasOnlyDataKeys(value, FIELD_REF_KEYS) &&
+    Object.keys(value).length === FIELD_REF_KEYS.size &&
+    isFieldRef(value)
+  );
+}
+
+/**
+ * A value Prisma takes as it is, not a structure to walk: the real thing only (see the header). A Proxy is never
+ * one, whatever it wraps.
+ */
+function isValueObject(value: object): boolean {
+  if (types.isProxy(value)) return false;
+  return (
     value === Prisma.DbNull ||
     value === Prisma.JsonNull ||
     value === Prisma.AnyNull ||
-    isFieldRef(value)
+    isRealDate(value) ||
+    isRealByteArray(value) ||
+    isRealDecimal(value) ||
+    isRealFieldRef(value)
   );
 }
 
@@ -167,28 +285,54 @@ function hasInheritedKey(object: object): boolean {
   return false;
 }
 
+/** A canonical array index ('0', '1', ... but not '01' or '-1'), below 2^32 - 1. */
+function isArrayIndex(key: string): boolean {
+  if (!/^(?:0|[1-9]\d*)$/.test(key)) return false;
+  return Number(key) < 4294967295;
+}
+
 function refusal(model: string, operation: string, place: string, what: string) {
   return new OrgScopeViolationError(
     `${model}.${operation}: ${what} in ${place} is refused: query arguments must be plain objects ` +
-      '(Prisma reads inherited keys that the scope checks do not see; ADR 0013 CS-4.4, #185 B1).',
+      '(Prisma reads keys that the scope checks do not see; ADR 0013 CS-4.4, #185 B1, FU-DB-281).',
   );
 }
 
 /**
- * One object of the arguments. `strict`: the prototype must be Object.prototype or null (the args, and the
- * structure objects). Otherwise only the keys count: no own `__proto__`, no inherited enumerable key.
+ * The own keys of one object or array: no symbol key, no own `__proto__`, no accessor and no non-enumerable key
+ * (an array's `length` aside), and for an array (`array` set) no key but its indices.
  */
-function checkObject(
+function checkOwnKeys(
   model: string,
   operation: string,
   object: object,
   place: string,
-  strict: boolean,
+  array: boolean,
 ): void {
-  if (Object.hasOwn(object, '__proto__')) {
-    throw refusal(model, operation, place, 'an own "__proto__" key');
+  for (const key of Reflect.ownKeys(object)) {
+    if (typeof key === 'symbol') throw refusal(model, operation, place, 'a symbol key');
+    if (key === '__proto__') throw refusal(model, operation, place, 'an own "__proto__" key');
+    if (array && key === 'length') continue;
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (descriptor === undefined || !('value' in descriptor)) {
+      throw refusal(model, operation, place, 'an accessor (a getter or a setter)');
+    }
+    if (descriptor.enumerable !== true) {
+      throw refusal(model, operation, place, 'a non-enumerable key');
+    }
+    if (array && !isArrayIndex(key)) {
+      throw refusal(model, operation, place, 'an array with a key that is not an index');
+    }
   }
-  if (strict && !isPlainPrototype(Object.getPrototypeOf(object))) {
+}
+
+/**
+ * One object of the arguments, wherever it is (args, structure, where, a data row, a column value): not a Proxy,
+ * a prototype of Object.prototype or null, clean own keys (checkOwnKeys) and no inherited enumerable key.
+ */
+function checkObject(model: string, operation: string, object: object, place: string): void {
+  if (types.isProxy(object)) throw refusal(model, operation, place, 'a Proxy');
+  if (!isPlainPrototype(Object.getPrototypeOf(object))) {
     throw refusal(
       model,
       operation,
@@ -196,7 +340,32 @@ function checkObject(
       'an object with a prototype other than Object.prototype',
     );
   }
+  checkOwnKeys(model, operation, object, place, false);
   if (hasInheritedKey(object)) throw refusal(model, operation, place, 'an inherited key');
+}
+
+/**
+ * One array of the arguments: not a Proxy, a realm's Array.prototype as its prototype, no symbol key, and (when
+ * `keys` is set, for structure and the rows of a createMany) no own key but its indices, each a plain value. The
+ * arrays one level below a data column are values (a scalar list, a Json array): `keys` is off for them, so a
+ * long one costs O(1) here.
+ */
+function checkArray(
+  model: string,
+  operation: string,
+  array: readonly unknown[],
+  place: string,
+  keys: boolean,
+): void {
+  if (types.isProxy(array)) throw refusal(model, operation, place, 'a Proxy');
+  const proto: unknown = Object.getPrototypeOf(array);
+  if (!Array.isArray(proto) || !isPlainPrototype(Object.getPrototypeOf(proto))) {
+    throw refusal(model, operation, place, 'an array with a prototype other than Array.prototype');
+  }
+  if (keys) checkOwnKeys(model, operation, array, place, true);
+  else if (Object.getOwnPropertySymbols(array).length > 0) {
+    throw refusal(model, operation, place, 'a symbol key');
+  }
 }
 
 /** A structure object (a where, a select, an orderBy, ...) and everything under it. */
@@ -217,10 +386,11 @@ function walkStructure(
     );
   }
   if (Array.isArray(value)) {
+    checkArray(model, operation, value, place, true);
     for (const item of value) walkStructure(model, operation, item, place, depth + 1);
     return;
   }
-  checkObject(model, operation, value, place, true);
+  checkObject(model, operation, value, place);
   for (const inner of Object.values(value))
     walkStructure(model, operation, inner, place, depth + 1);
 }
@@ -238,7 +408,7 @@ function walkJsonFilter(
     walkStructure(model, operation, filter, place, depth);
     return;
   }
-  checkObject(model, operation, filter, place, true);
+  checkObject(model, operation, filter, place);
   for (const [operator, operand] of Object.entries(filter)) {
     if (JSON_VALUE_OPERATORS.has(operator)) continue; // a JSON document (or a field reference): a value
     walkStructure(model, operation, operand, place, depth + 1);
@@ -268,10 +438,11 @@ function walkWhere(
     );
   }
   if (Array.isArray(where)) {
+    checkArray(model, operation, where, place, true);
     for (const item of where) walkWhere(model, operation, item, place, depth + 1, owner);
     return;
   }
-  checkObject(model, operation, where, place, true);
+  checkObject(model, operation, where, place);
   for (const [key, inner] of Object.entries(where)) {
     if (LOGICAL_KEYS.has(key) || RELATION_FILTER_KEYS.has(key)) {
       walkWhere(model, operation, inner, place, depth + 1, owner);
@@ -288,20 +459,18 @@ function walkWhere(
 /** The row(s) of a write and one level below each column. JSON contents are not walked. */
 function walkData(model: string, operation: string, value: unknown, place: string): void {
   if (Array.isArray(value)) {
+    checkArray(model, operation, value, place, true);
     for (const row of value) walkData(model, operation, row, place);
     return;
   }
   if (typeof value !== 'object' || value === null || isValueObject(value)) return;
-  checkObject(model, operation, value, place, false);
+  checkObject(model, operation, value, place);
   for (const inner of Object.values(value) as unknown[]) {
-    if (
-      typeof inner === 'object' &&
-      inner !== null &&
-      !Array.isArray(inner) &&
-      !isValueObject(inner)
-    ) {
-      checkObject(model, operation, inner, `${place} (a column value)`, false);
-    }
+    if (typeof inner !== 'object' || inner === null) continue;
+    if (Array.isArray(inner))
+      checkArray(model, operation, inner, `${place} (a column value)`, false);
+    else if (!isValueObject(inner))
+      checkObject(model, operation, inner, `${place} (a column value)`);
   }
 }
 
@@ -314,7 +483,7 @@ const WRITE_KEYS = ['data', 'create', 'update'] as const;
  */
 export function assertPlainArgs(model: string, operation: string, args: unknown): void {
   if (typeof args !== 'object' || args === null || Array.isArray(args)) return;
-  checkObject(model, operation, args, 'the arguments', true);
+  checkObject(model, operation, args, 'the arguments');
   const owner = Object.hasOwn(Prisma.ModelName, model) ? (model as ModelName) : undefined;
   for (const [key, value] of Object.entries(args)) {
     if ((WRITE_KEYS as readonly string[]).includes(key)) walkData(model, operation, value, key);
