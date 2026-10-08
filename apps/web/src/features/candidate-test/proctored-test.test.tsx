@@ -421,8 +421,9 @@ describe('proctored test (ADR 0013, FR-601..FR-603, FR-609, FR-701, TC-030)', ()
         await screen.findByText(/section 2 of 2/i);
       }
     }
-    // No click on "continue": the next heartbeat after the close sees "not active" and the screen
-    // goes to the submitted page, where the finish runs (devices stop, credentials are cleared).
+    // The pending panel is up first (the close has not landed), then, with no click on "continue",
+    // the next heartbeat after the close sees "not active" and the screen goes to the submitted
+    // page, where the finish runs (devices stop, credentials are cleared).
     expect(await screen.findByTestId('test-submitted', undefined, { timeout: 6000 })).toBeVisible();
     expect(screen.queryByTestId('test-inactive')).not.toBeInTheDocument();
     await waitFor(() => expect(onSubmitted).toHaveBeenCalled(), { timeout: 6000 });
@@ -462,6 +463,57 @@ describe('proctored test (ADR 0013, FR-601..FR-603, FR-609, FR-701, TC-030)', ()
     expect(
       await screen.findByTestId('test-inactive', undefined, { timeout: 4000 }),
     ).toHaveTextContent(/no longer running/i);
+  }, 25_000);
+
+  it('FU-FEB-60 ADR 0013 5.3: an earlier section whose close was pending does not make a failed last-section finish look submitted', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const user = userEvent.setup();
+    const { onSubmitted } = mount();
+    await passGate(user);
+    // Section 1's close is slow, so section 1 is marked "pending" (the real API always answers 202).
+    testState(session).closeDelayMs = 250;
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await user.click(await screen.findByRole('button', { name: /continue to the next section/i }));
+    await waitFor(
+      async () => {
+        const again = screen.queryByRole('button', { name: /continue to the next section/i });
+        if (again) await user.click(again);
+        expect(screen.getByText(/section 2 of 2/i)).toBeInTheDocument();
+      },
+      { timeout: 4000 },
+    );
+    testState(session).closeDelayMs = 0;
+    // The last finish fails and so does the re-read, while the session really ends (heartbeats
+    // meet 409). The earlier section's stale "pending" must not turn that into "submitted".
+    server.use(
+      http.post(`${cand}/session/section/finish`, async ({ request }) => {
+        const body = (await request.clone().json()) as { position?: number };
+        if (body.position !== 2) return undefined;
+        testState(session).submitted = true;
+        await delay(300);
+        return HttpResponse.json({ code: 'INTERNAL' }, { status: 503 });
+      }),
+      http.get(`${cand}/session`, () => HttpResponse.json({ code: 'INTERNAL' }, { status: 500 })),
+    );
+    let sawSubmitted = false;
+    const watch = new MutationObserver(() => {
+      if (screen.queryByTestId('test-submitted')) sawSubmitted = true;
+    });
+    watch.observe(document.body, { childList: true, subtree: true });
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    expect(
+      await screen.findByTestId('test-inactive', undefined, { timeout: 4000 }),
+    ).toHaveTextContent(/no longer running/i);
+    watch.disconnect();
+    expect(sawSubmitted).toBe(false);
+    expect(onSubmitted).not.toHaveBeenCalled();
   }, 25_000);
 });
 

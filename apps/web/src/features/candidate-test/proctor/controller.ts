@@ -268,6 +268,9 @@ export class ProctorController {
     this.submitting = on;
     if (!on && this.notActiveWhileSubmitting) {
       this.notActiveWhileSubmitting = false;
+      // end() only acts if the test is still running. If finish() already started (the submitted
+      // page is up) the page must not be withdrawn, so serverClosed stays as it is.
+      if (this.finishing || this.stopped || this.state.endedBecause) return;
       this.set({ serverClosed: false });
       this.end('not-active', true);
     }
