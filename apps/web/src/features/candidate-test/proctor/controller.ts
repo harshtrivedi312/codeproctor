@@ -223,6 +223,8 @@ export class ProctorController {
   private dropping = false;
   private stopped = false;
   private finishing = false;
+  /** The candidate's own last-section finish is in flight or accepted: "not active" is the normal end. */
+  private submitting = false;
   private torn = false;
 
   constructor(private readonly o: ProctorControllerOptions) {}
@@ -244,9 +246,21 @@ export class ProctorController {
     this.set({ notice: null });
   }
 
+  /**
+   * Called by the test screen around the candidate's own last-section finish. While it is on, the
+   * server's "not active" (the session is SUBMITTED the moment the close lands) is the normal end,
+   * not a reason to purge and show "no longer running"; finish() follows once the submitted page
+   * is up. It is turned off again if the finish did not go through.
+   */
+  setSubmitting(on: boolean): void {
+    this.submitting = on;
+  }
+
   private end(because: NonNullable<ProctorUiState['endedBecause']>, purge: boolean): void {
     // While finishing (or already stopped) the server's "not active" is the normal end.
     if (this.state.endedBecause || this.stopped || this.finishing) return;
+    // The same holds from the moment the candidate submits their last section.
+    if (this.submitting && because === 'not-active') return;
     this.set({ phase: 'ended', endedBecause: because });
     void this.teardown({ purge });
   }

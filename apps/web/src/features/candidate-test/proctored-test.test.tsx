@@ -1,6 +1,6 @@
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { getSessionToken, setSessionToken } from '@/features/candidate-flow/session-store';
@@ -351,6 +351,54 @@ describe('proctored test (ADR 0013, FR-601..FR-603, FR-609, FR-701, TC-030)', ()
       'FULLSCREEN_RESTORED',
     );
   });
+
+  it('FU-FEB-60 FR-505 ADR 0002: a heartbeat that meets "not active" while the candidate submits the last section does not replace the submitted page', async () => {
+    const devices = setupDevices();
+    const session = await startedSession();
+    const user = userEvent.setup();
+    const { onSubmitted } = mount();
+    await passGate(user);
+    // The server closes the last section the moment the finish arrives and answers 202 only after a
+    // while, so several heartbeats (60 ms apart) see 409 SESSION_NOT_ACTIVE in between: the exact
+    // window in which the screen used to show "no longer running" and purge the recording.
+    let finishing = false;
+    let heartbeatsDuringFinish = 0;
+    server.use(
+      // Counts every heartbeat sent while the last finish is pending (the mock only counts the
+      // ones the server accepts), then lets the normal handler answer it.
+      http.post(`${cand}/session/heartbeat`, () => {
+        if (finishing) heartbeatsDuringFinish += 1;
+        return undefined;
+      }),
+      http.post(`${cand}/session/section/finish`, async ({ request }) => {
+        const body = (await request.clone().json()) as { position?: number };
+        if (body.position !== 2) return undefined;
+        finishing = true;
+        testState(session).submitted = true;
+        await delay(400);
+        finishing = false;
+        return HttpResponse.json({ accepted: true }, { status: 202 });
+      }),
+    );
+    for (let i = 0; i < 2; i += 1) {
+      await user.click(screen.getByRole('button', { name: 'Finish section' }));
+      await user.click(
+        within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+      );
+      if (i === 0) {
+        await user.click(
+          await screen.findByRole('button', { name: /continue to the next section/i }),
+        );
+        await screen.findByText(/section 2 of 2/i);
+      }
+    }
+    expect(await screen.findByTestId('test-submitted')).toBeInTheDocument();
+    expect(screen.queryByTestId('test-inactive')).not.toBeInTheDocument();
+    await waitFor(() => expect(onSubmitted).toHaveBeenCalled(), { timeout: 6000 });
+    expect(devices.display.stops).toHaveBeenCalled();
+    // The window really contained heartbeats; otherwise this test would prove nothing.
+    expect(heartbeatsDuringFinish).toBeGreaterThan(0);
+  }, 20_000);
 });
 
 /** Asks the SDK to send queued batches now (it flushes on pagehide), then reads what the server got. */

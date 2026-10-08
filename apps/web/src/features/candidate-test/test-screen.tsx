@@ -449,12 +449,19 @@ function TestScreenInner({
   const finishSection = async () => {
     setFinishing(true);
     setFinishError(null);
+    // The last section's finish is the candidate's own submit: from the request on, the server's
+    // "not active" (the session is SUBMITTED once the close lands) must not end the test as "no
+    // longer running" or purge the recording. Turned off again if the finish did not go through.
+    const isLastSection = section.position === section.totalSections;
+    let finishedOk = false;
+    if (isLastSection) proctor?.setSubmitting(true);
     const markFinished = (
       nextSectionId: string | null,
       next?: Schemas['CandidateSession'],
       submitted = false,
       pending = false,
     ) => {
+      finishedOk = true;
       onFinished({
         sectionId: section.id,
         title: section.title,
@@ -534,6 +541,7 @@ function TestScreenInner({
         'We could not reach the server, so the section is not finished. Check your connection and try again.',
       );
     } finally {
+      if (isLastSection && !finishedOk) proctor?.setSubmitting(false);
       setFinishing(false);
     }
   };
