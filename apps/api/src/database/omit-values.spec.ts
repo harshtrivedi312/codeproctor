@@ -1,4 +1,4 @@
-// `omit` takes only `true`, in every scope (omit-args.ts; ADR 0013 CS-4.4 relation vectors; CLAUDE.md rule 3).
+// `omit` takes only `true`, in every scope (omit-args.ts; ADR 0013 CS-4.5 relation vectors; CLAUDE.md rule 3).
 // Real Postgres 16 (Testcontainers) with the real migrations, through the org-scoped client as app_user. Each case
 // is a shape that, before the check, Prisma 7 turned into a selection: the related QuestionVersion row (its
 // referenceSolution included) through `omit: { questionVersion: false }`, and every relation count through
@@ -14,7 +14,7 @@ import type { MigratedDatabase } from './testing/migrated-postgres';
 import { createTenant } from './testing/tenant-fixtures';
 import type { SessionChain, TenantFixture } from './testing/tenant-fixtures';
 
-describe('omit takes only true, against Postgres, in every scope (ADR 0013 CS-4.4; NFR-04, TC-008)', () => {
+describe('omit takes only true, against Postgres, in every scope (ADR 0013 CS-4.5; NFR-04, TC-008)', () => {
   let db: MigratedDatabase;
   let owner: PrismaClient;
   let appUser: PrismaClient;
@@ -120,6 +120,60 @@ describe('omit takes only true, against Postgres, in every scope (ADR 0013 CS-4.
         client.organization.findMany({ omit: { _count: false } } as never),
       ),
     );
+  });
+
+  it('TC-008 org job scope (runInOrg): omit _count false is refused', async () => {
+    await expectRefusedBeforeAnyStatement(() =>
+      orgContext.runInOrg(T.orgId, () =>
+        client.session.findFirst({ omit: { _count: false } } as never),
+      ),
+    );
+  });
+
+  it('TC-008 STAFF: an omit nested under a select is refused', async () => {
+    await expectRefusedBeforeAnyStatement(() =>
+      asStaff(() =>
+        client.sessionQuestion.findFirst({
+          select: { id: true, session: { omit: { hmacKeyEnc: false } } },
+        } as never),
+      ),
+    );
+  });
+
+  it('TC-008 STAFF: the fluent API carries its args into the selection, and a non-true omit there is refused', async () => {
+    await expectRefusedBeforeAnyStatement(() =>
+      asStaff(() =>
+        client.session
+          .findUnique({ where: { id: T.chain.sessionId } })
+          .invitation({ omit: { accommodations: false } } as never),
+      ),
+    );
+  });
+
+  it('TC-008 B1 of the #314 review: relation args built on a field reference prototype are refused in STAFF and system scope', async () => {
+    const fieldRefPrototype = Object.getPrototypeOf(appUser.session.fields.id) as object;
+    const carrier = (): object =>
+      Object.create(
+        Object.assign(Object.create(fieldRefPrototype) as object, {
+          include: { invitation: { omit: { accommodations: false } } },
+        }),
+      ) as object;
+    const before = await statementCount();
+    for (const run of [
+      () =>
+        asStaff(() =>
+          client.sessionQuestion.findFirst({ include: { session: carrier() } } as never),
+        ),
+      () =>
+        orgContext.runSystem('BACKGROUND_JOB', () =>
+          client.sessionQuestion.findFirst({ include: { session: carrier() } } as never),
+        ),
+    ]) {
+      const error = await failure(run());
+      expect(error).toBeInstanceOf(OrgScopeViolationError);
+      expect((error as Error).message).toMatch(/plain object/);
+    }
+    expect(await statementCount()).toBe(before);
   });
 
   it('TC-008 an omit of exactly true still works: the column is left out', async () => {

@@ -6,7 +6,7 @@ const check =
   () =>
     assertOmitValues(model, operation, args);
 
-describe('omit takes only true, in every scope (ADR 0013 CS-4.4 relation vectors; NFR-04, TC-008)', () => {
+describe('omit takes only true, in every scope (ADR 0013 CS-4.5 relation vectors; NFR-04, TC-008)', () => {
   it.each([
     ['false on a relation (selects the related row)', { omit: { questionVersion: false } }],
     ['false on a column', { omit: { answer: false } }],
@@ -55,9 +55,48 @@ describe('omit takes only true, in every scope (ADR 0013 CS-4.4 relation vectors
     expect(check({ omit: { questionVersion: false } }, operation)).toThrow(OrgScopeViolationError);
   });
 
+  it('TC-008 B1 of the #314 review: relation args on another prototype (a field reference carrier) are refused', () => {
+    // Built in code: a field reference's prototype (the marker that plain-args treats as a value), carrying an
+    // include that Prisma reads through the prototype chain and an own-key walk does not see.
+    const fieldRefLike = Object.create({ _toGraphQLInputType: () => undefined }) as object;
+    const carrier = Object.create(
+      Object.assign(Object.create(fieldRefLike) as object, {
+        include: { invitation: { omit: { accommodations: false } } },
+      }),
+    ) as object;
+    expect(check({ include: { session: carrier } })).toThrow(/must be a plain object/);
+    expect(check({ select: { id: true, session: carrier } })).toThrow(/must be a plain object/);
+    class Args {
+      include = { invitation: true };
+    }
+    expect(check({ include: { session: new Args() } })).toThrow(/must be a plain object/);
+  });
+
+  it('TC-008 B1: an omit that is not a plain object is refused', () => {
+    const inherited = Object.create({ answer: false }) as object;
+    expect(check({ omit: inherited })).toThrow(/omit must be a plain object/);
+  });
+
+  it('TC-008 N4: omit null and an empty omit pass (Prisma.skip is not exported without the strictUndefinedChecks preview)', () => {
+    expect(check({ omit: null })).not.toThrow();
+    expect(check({ omit: {} })).not.toThrow();
+  });
+
+  it('TC-008 N2: a very long key is not echoed into the message', () => {
+    const key = 'k'.repeat(10_000);
+    let message = '';
+    try {
+      check({ omit: { [key]: false } })();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message.length).toBeLessThan(400);
+    expect(message).toContain('an omit entry');
+  });
+
   it('TC-008 an omit that is not an object is refused', () => {
-    expect(check({ omit: ['answer'] })).toThrow(/omit must be an object/);
-    expect(check({ omit: 'answer' })).toThrow(/omit must be an object/);
+    expect(check({ omit: ['answer'] })).toThrow(/omit must be a plain object/);
+    expect(check({ omit: 'answer' })).toThrow(/omit must be a plain object/);
   });
 
   it('TC-008 omit entries that are exactly true pass, top level and nested, and calls with no omit pass', () => {

@@ -427,8 +427,8 @@ and when a column of the schema is none of the five (a new column breaks the bui
   `createManyAndReturn`, `update`, `updateManyAndReturn`, `upsert`) runs with an `omit` of every scalar
   column that is not in its default select. The list is **computed from the generated client**
   (`Prisma.<Model>ScalarFieldEnum`) minus the readable and key columns, so a column that a migration adds is
-  hidden until it is listed, not visible until it is denied. A caller's own `omit` is merged and ours wins
-  (`omit: { hmacKeyEnc: false }` brings nothing back); a `select` together with an `omit` is refused (Prisma
+  hidden until it is listed, not visible until it is denied. A caller's own `omit` names scalar columns of the model
+  only, each `true` (anything else is refused, here and by the hook's omit check below), and it is merged and ours wins; a `select` together with an `omit` is refused (Prisma
   refuses it too); a `select` or an `omit` that is not an object is refused. The row that a write returns has
   the same shape as a read. **PR 1's rule "every read must name its `select`" is dropped** (FU-DB-190). The
   `omit` is added for all **eleven** row-returning operations (the ten above and `delete`, which a candidate
@@ -470,6 +470,13 @@ and when a column of the schema is none of the five (a new column breaks the bui
   `undefined` is refused too. Prisma 7.10 answers those shapes with a validation error today, which is a Prisma
   detail and not a promise, so the scope does not rely on it. A hidden column named `false` is still refused by
   name.
+- **`omit` takes only `true`, in every scope** (#314; `omit-args.ts`; ADR 0013 CS-4.5 and ADR 0006 section 8.4, the
+  relation vectors). Prisma 7 turns an `omit` entry that is not `true` into a selection of that key, a relation or
+  `_count` included, past the relation refusals (which read `include` and `select`). Right after the plain-arguments
+  check and before any other, in every scope, the hook refuses any `omit` entry in the selection tree (the top-level
+  `omit` and the `omit` of every args object under `include` and `select`, at any depth) that is not exactly `true`,
+  any `_count` in an `omit`, and a nested args object or an `omit` that is not a plain object (a carrier built on a
+  field reference's prototype would hide `include`, `select` or `omit` from an own-key walk). FU-DB-280.
 - **Arguments must be plain, in every scope** (review of #185, B1; `plain-args.ts`). Prisma 7.10 clones the
   arguments before the extension sees them: an inherited key is copied to an own key (so every check sees it),
   but a key named `__proto__` that `JSON.parse` made an own property becomes the **prototype** of the top-level
@@ -1278,6 +1285,7 @@ which stays one statement, and be ready to retry on `P2002` elsewhere.
 | `candidate-facts.ts`                           | `setCandidateFacts`: **CandidateSessionGuard only**, not exported from `index.ts`                                                                                                                                                                                                                                                                                 |
 | `deep-freeze.ts`                               | `deepFreeze`: the scope tables are frozen when their module loads                                                                                                                                                                                                                                                                                                 |
 | `plain-args.ts`                                | `assertPlainArgs` (the hook refuses arguments Prisma and the checks would read differently), `ownValue` and `ownArgs` (own-key reads), `isFieldRef`                                                                                                                                                                                                               |
+| `omit-args.ts`                                 | `assertOmitValues`: every `omit` entry in the selection tree is exactly `true`, no `_count` in an `omit`, nested args and `omit` are plain objects (#314, FU-DB-280)                                                                                                                                                                                              |
 | `candidate-interim.ts`                         | `CANDIDATE_READ` (CS-4.4's read column per model: readable, key, explicit-only, RUN-only), `omit`, the RUN filter, `COMPOUND_UNIQUES`, the field-reference refusal. Not interim any more: the name stays because `retention/consent-access.spec.ts` pins the path (FU-DB-211)                                                                                     |
 | `errors.ts`                                    | `OrgContextMissingError`, `OrgScopeViolationError`, `RawQueryNotAllowedError`, and the session-lock outcomes `SessionNotFoundError`, `SessionLockRetryError`, `AccommodationLockedError`                                                                                                                                                                          |
 | `session-locks.ts`, `session-lock-scope.ts`    | `guardLive`, `lockForAccommodation` and `lockAnySession`, the lock core: **not exported from `index.ts`**; only SessionStateService imports it (import guard, `allowed: []` today), `CALL_SITES` and the caller rules pin who uses each name (FU-DB-67); the scope file is the actor allowlist (SERVICE, STAFF; plain `runInOrg` for `lockForAccommodation` only) |
