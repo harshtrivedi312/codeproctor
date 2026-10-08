@@ -1,5 +1,6 @@
-// TC-003 (FR-102): 2FA required for reviewer. Expected: forced TOTP enrollment before any page
-// loads, i.e. no session, no refresh cookie and no data route until enrollment is confirmed.
+// TC-003 (FR-102): 2FA is optional for every role (owner decision, replaces "required for reviewer").
+// Expected: a user without TOTP signs in with the password alone and is told 2FA is recommended; a
+// user with TOTP still needs the code at login; any role may switch it off with password and code.
 import { authenticator } from 'otplib';
 import request from 'supertest';
 import { sha256Hex } from '../../src/auth/crypto.util';
@@ -25,7 +26,7 @@ import {
   TOTP_SECRET,
 } from '../support/harness';
 
-describe('TC-003 (FR-102): 2FA required for reviewer', () => {
+describe('TC-003 (FR-102): 2FA optional for every role', () => {
   let h: Harness;
   beforeAll(async () => {
     h = await boot();
@@ -37,89 +38,100 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
   const post = (path: string): request.Test =>
     request(h.app.getHttpServer()).post(`${API}/auth/${path}`);
 
-  it.each([UserRole.REVIEWER, UserRole.SUPER_ADMIN])(
-    'TC-003: a %s without TOTP gets an enrollment challenge only: no session, no cookie, no access token',
+  it.each([UserRole.SUPER_ADMIN, UserRole.REVIEWER, UserRole.RECRUITER, UserRole.AUTHOR])(
+    'TC-003: a %s without TOTP signs in with the password alone: authenticated, a session and cookie, twoFactorRecommended true, never an enrollment status (FR-102)',
     async (role) => {
       const u = await createUser(h, { role });
       const res = await login(h, u.email).expect(200);
       const body = res.body as Body;
-      expect(body.status).toBe('two_factor_enrollment_required');
-      expect(body.session).toBeUndefined();
-      expect(body.accessToken).toBeUndefined();
-      expect(res.headers['set-cookie']).toBeUndefined();
-      expectNoTotpEnabled(res);
-      expect(await h.owner.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+      expect(body.status).toBe('authenticated');
+      expect(body.challengeToken).toBeUndefined();
+      expect(sessionUser(body, 'nested')).toMatchObject({
+        totpEnabled: false,
+        twoFactorRecommended: true,
+      });
+      expect(res.headers['set-cookie']).toBeDefined();
+      expect(JSON.stringify(body)).not.toContain('enrollment');
+      expect(await h.owner.refreshToken.count({ where: { userId: u.id } })).toBe(1);
+      const renewed = await refresh(h, refreshCookie(res)).expect(200);
+      expect(sessionUser(renewed.body, 'flat').twoFactorRecommended).toBe(true);
     },
   );
 
-  it('TC-003: the enrollment challenge opens no protected route and cannot be exchanged for a refresh token', async () => {
+  it('TC-003: a wrong password for a role without TOTP is the same 401, sets nothing and counts toward lockout (FR-101)', async () => {
     const u = await createUser(h, { role: UserRole.REVIEWER });
-    const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    await post('2fa/setup/start')
-      .set('Authorization', `Bearer ${challengeToken}`)
-      .send({ currentPassword: PASSWORD })
-      .expect(401);
-    expectNoTotpEnabled(await post('refresh').expect(401));
-    const verify = await post('2fa/verify').send({ challengeToken, code: '123456' });
-    expect([400, 401]).toContain(verify.status);
-    expectNoTotpEnabled(verify);
+    const res = await login(h, u.email, 'Nope-Nope-1').expect(401);
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(1);
   });
 
-  it('TC-003: enrollment shows a QR code and manual key, keeps the secret encrypted, and stays off until a valid code is confirmed', async () => {
+  it('TC-003: an enrolled REVIEWER still gets two_factor_required and no session until the code is given, and twoFactorRecommended is false afterwards (FR-102)', async () => {
+    const u = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
+    const res = await login(h, u.email).expect(200);
+    const body = res.body as Body;
+    expect(body.status).toBe('two_factor_required');
+    expect(body.session).toBeUndefined();
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(await h.owner.refreshToken.count({ where: { userId: u.id } })).toBe(0);
+    await post('2fa/verify')
+      .send({ challengeToken: body.challengeToken, code: '000000' })
+      .expect(400);
+    const done = await post('2fa/verify')
+      .send({
+        challengeToken: body.challengeToken,
+        code: authenticator.generate(TOTP_SECRET),
+      })
+      .expect(200);
+    expect(sessionUser(done.body, 'flat')).toMatchObject({
+      totpEnabled: true,
+      twoFactorRecommended: false,
+    });
+  });
+
+  it.each(['start', 'confirm'])(
+    'TC-003: the pre-login forced-enrollment route 2fa/enroll/%s no longer exists (FR-102)',
+    async (step) => {
+      await post(`2fa/enroll/${step}`).send({ challengeToken: 'x', code: '123456' }).expect(404);
+    },
+  );
+
+  it('TC-003: signed-in setup shows a QR code and manual key, keeps the secret encrypted, stays off until a valid code, then issues 10 hashed recovery codes and an audit row; the next login asks for the code (ADR 0011)', async () => {
     const u = await createUser(h, { role: UserRole.REVIEWER });
-    const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    const start = (await post('2fa/enroll/start').send({ challengeToken }).expect(200))
-      .body as Body;
+    const auth = await signIn(h, u.email);
+    const startRes = await post('2fa/setup/start')
+      .set(auth)
+      .send({ currentPassword: PASSWORD })
+      .expect(200);
+    expectNoTotpEnabled(startRes);
+    const start = startRes.body as Body;
     expect(start.qrDataUrl).toMatch(/^data:image\/png;base64,/);
     expect(start.otpauthUri).toMatch(/^otpauth:\/\/totp\//);
     expect(start.manualKey).toMatch(/^[A-Z2-7]{16,}$/);
     const stored = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
-    expect(stored.totpSecretEnc).toBeTruthy();
     expect(stored.totpSecretEnc).not.toContain(start.manualKey);
     expect(stored.totpEnabled).toBe(false);
-
-    await post('2fa/enroll/confirm').send({ challengeToken, code: '000000' }).expect(400);
+    await post('2fa/setup/confirm')
+      .set(auth)
+      .send({ currentPassword: PASSWORD, code: '000000' })
+      .expect(400);
     expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(false);
-    // Still forced after a half-finished enrollment.
-    expect(((await login(h, u.email).expect(200)).body as Body).status).toBe(
-      'two_factor_enrollment_required',
-    );
-  });
+    // Still password-only while setup is half-finished.
+    expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('authenticated');
 
-  it('TC-003: a correct code completes enrollment: session, 10 recovery codes stored only as hashes, an audit row, and the next login asks for the code', async () => {
-    const u = await createUser(h, { role: UserRole.REVIEWER });
-    const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    const startRes = await post('2fa/enroll/start').send({ challengeToken }).expect(200);
-    expectNoTotpEnabled(startRes);
-    expect((startRes.body as Body).session).toBeUndefined();
-    const start = startRes.body as Body;
-    const done = await post('2fa/enroll/confirm')
-      .send({ challengeToken, code: authenticator.generate(start.manualKey) })
+    const done = await post('2fa/setup/confirm')
+      .set(auth)
+      .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
       .expect(200);
     const body = done.body as Body;
-    expect(body.session.accessToken).toEqual(expect.any(String));
-    expect(sessionUser(body, 'nested').totpEnabled).toBe(true);
     expect(body.recoveryCodes).toHaveLength(10);
     expect(new Set(body.recoveryCodes).size).toBe(10);
-
     const row = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
     expect(row.totpEnabled).toBe(true);
-    expect(row.recoveryCodeHashes).toHaveLength(10);
     expect(row.recoveryCodeHashes.sort()).toEqual(body.recoveryCodes.map(sha256Hex).sort());
     expect(
       await h.owner.auditLog.count({ where: { actorId: u.id, action: 'AUTH_TOTP_ENABLED' } }),
     ).toBe(1);
-
     expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('two_factor_required');
-    // The session from enrollment works with the refresh token.
-    const refreshed = await refresh(h, refreshCookie(done)).expect(200);
-    expect(sessionUser(refreshed.body, 'flat').totpEnabled).toBe(true);
-  });
-
-  it('TC-003: once enrolled, the enrollment endpoints refuse to replace the secret', async () => {
-    const u = await createUser(h, { role: UserRole.REVIEWER, totp: 'JBSWY3DPEHPK3PXP' });
-    const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    await post('2fa/enroll/start').send({ challengeToken }).expect(409);
   });
 
   it('TC-003: a recovery code works once and is gone afterwards', async () => {
@@ -208,9 +220,15 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     expect((ok.body as Body).session).toBeUndefined();
     expectNoTotpEnabled(ok);
     expect(ok.headers['cache-control']).toContain('no-store');
-    // The refresh cookie from before the change must report the new state, not a cached one.
-    const afterOn = await refresh(h, cookie).expect(200);
-    expect(sessionUser(afterOn.body, 'flat').totpEnabled).toBe(true);
+    // Turning 2FA on signs the user out everywhere: the refresh cookie from before is refused,
+    // the response clears it, and the access token is dead at once (FR-107, ADR 0011).
+    expect(
+      ((ok.headers['set-cookie'] as unknown as string[] | undefined) ?? []).some(
+        (c) => c.startsWith('cp_refresh=;') && /Max-Age=0|Expires=Thu, 01 Jan 1970/i.test(c),
+      ),
+    ).toBe(true);
+    await refresh(h, cookie).expect(401);
+    await post('2fa/setup/start').set(auth).send({ currentPassword: PASSWORD }).expect(401);
     const next = await login(h, u.email).expect(200);
     expect((next.body as Body).status).toBe('two_factor_required');
     expectNoTotpEnabled(next);
@@ -254,19 +272,27 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     expect(stableProblem(confirm)).toEqual(wrongBody);
   });
 
-  it('FR-102, FR-107: enrol and recovery-code responses are Cache-Control no-store', async () => {
+  it('FR-102, FR-107: setup and recovery-code responses are Cache-Control no-store', async () => {
     const u = await createUser(h, { role: UserRole.REVIEWER });
-    const { challengeToken } = (await login(h, u.email).expect(200)).body as Body;
-    const start = await post('2fa/enroll/start').send({ challengeToken }).expect(200);
+    const auth = await signIn(h, u.email);
+    const start = await post('2fa/setup/start')
+      .set(auth)
+      .send({ currentPassword: PASSWORD })
+      .expect(200);
     expect(start.headers['cache-control']).toContain('no-store');
-    const done = await post('2fa/enroll/confirm')
-      .send({ challengeToken, code: authenticator.generate((start.body as Body).manualKey) })
+    const done = await post('2fa/setup/confirm')
+      .set(auth)
+      .send({
+        currentPassword: PASSWORD,
+        code: authenticator.generate((start.body as Body).manualKey),
+      })
       .expect(200);
     expect(done.headers['cache-control']).toContain('no-store');
 
-    const auth = { Authorization: `Bearer ${(done.body as Body).session.accessToken}` };
+    // The confirm ended that session; regenerate needs a sign-in with the code.
+    const enrolled = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
     const regen = await post('2fa/recovery-codes/regenerate')
-      .set(auth)
+      .set(await signInWithTotp(h, enrolled.email))
       .send({ currentPassword: PASSWORD })
       .expect(200);
     expect(regen.headers['cache-control']).toContain('no-store');
@@ -493,11 +519,10 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
     });
 
     it.each([UserRole.SUPER_ADMIN, UserRole.REVIEWER])(
-      'TC-003: a %s cannot disable 2FA: 403 TWO_FACTOR_REQUIRED_FOR_ROLE only with BOTH factors correct (a wrong factor is REAUTH_FAILED), 2FA and sessions stay',
+      'TC-003: a %s can disable 2FA with password AND code: a wrong factor is REAUTH_FAILED and counts toward lockout, success is 204 and signs out everywhere (FR-102, FR-107, ADR 0011)',
       async (role) => {
         const u = await createUser(h, { role, totp: TOTP_SECRET });
         const { auth, cookie } = await signInPrevStep(u.email);
-        const before = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
         expectDisableReauthFailed(
           await disable(auth, { currentPassword: 'Nope-Nope-1', totpCode: goodCode() }),
         );
@@ -506,20 +531,23 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         );
         await disable(auth, {}).expect(400);
         await disable(auth, { currentPassword: PASSWORD }).expect(400);
-        const failedBefore = await failedLogins(u.id); // the two refusals above counted
-        const res = await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() });
-        expect(res.status).toBe(403);
-        expect(res.headers['content-type']).toContain('application/problem+json');
-        expect((res.body as Body).code).toBe('TWO_FACTOR_REQUIRED_FOR_ROLE');
-        expect(await failedLogins(u.id)).toBe(failedBefore); // a role refusal is not a failure
+        expect(await failedLogins(u.id)).toBe(2); // the two refusals above counted
+        expect((await h.owner.user.findUniqueOrThrow({ where: { id: u.id } })).totpEnabled).toBe(
+          true,
+        );
+        await refresh(h, cookie).expect(200); // the refusals revoked nothing
+        await disable(auth, { currentPassword: PASSWORD, totpCode: goodCode() }).expect(204);
         const rowAfter = await h.owner.user.findUniqueOrThrow({ where: { id: u.id } });
-        expect(rowAfter.totpEnabled).toBe(true);
-        expect(rowAfter.totpSecretEnc).toBe(before.totpSecretEnc);
-        expect(rowAfter.recoveryCodeHashes).toEqual(before.recoveryCodeHashes);
+        expect(rowAfter.totpEnabled).toBe(false);
+        expect(rowAfter.totpSecretEnc).toBeNull();
+        expect(rowAfter.recoveryCodeHashes).toEqual([]);
+        expect(await h.owner.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
         expect(
           await h.owner.auditLog.count({ where: { actorId: u.id, action: 'AUTH_2FA_DISABLED' } }),
-        ).toBe(0);
-        await refresh(h, cookie).expect(200); // the refusal revoked nothing
+        ).toBe(1);
+        expect(((await login(h, u.email).expect(200)).body as Body).status).toBe('authenticated');
       },
     );
 
@@ -573,7 +601,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
   describe('FR-102: super admin 2FA reset', () => {
     const resetOf = (id: string): request.Test => post(`2fa/reset/${id}`);
 
-    it('TC-003: a SUPER_ADMIN clears a colleague 2FA with their own password: 204, sessions revoked, audit row; the colleague must re-enrol at next login', async () => {
+    it('TC-003: a SUPER_ADMIN clears a colleague 2FA with their own password: 204, sessions revoked, audit row; the colleague then signs in with the password alone', async () => {
       const admin = await createUser(h, { role: UserRole.SUPER_ADMIN, totp: TOTP_SECRET });
       const target = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
       const { challengeToken } = (await login(h, target.email).expect(200)).body as Body;
@@ -603,7 +631,7 @@ describe('TC-003 (FR-102): 2FA required for reviewer', () => {
         }),
       ).toBe(1);
       expect(((await login(h, target.email).expect(200)).body as Body).status).toBe(
-        'two_factor_enrollment_required',
+        'authenticated',
       );
     });
 
@@ -739,7 +767,7 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
   // Fixtures that need Redis are made first; then Redis is stopped for the three tests below.
   let verifyCase: { id: string; challengeToken: string };
   let disableCase: { id: string; accessToken: string };
-  let confirmCase: { id: string; challengeToken: string; code: string };
+  let confirmCase: { id: string; accessToken: string; code: string };
   let recoveryCase: { id: string; challengeToken: string; code: string };
   let recruiterToken: string;
   let auditBefore: number;
@@ -772,12 +800,13 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
       .expect(200);
     disableCase = { id: d.id, accessToken: (dSession.body as Body).accessToken ?? '' };
     const e = await createUser(h, { role: UserRole.REVIEWER });
-    const eChallenge = ((await login(h, e.email).expect(200)).body as Body).challengeToken;
-    const eStart = (await post('2fa/enroll/start').send({ challengeToken: eChallenge }).expect(200))
-      .body as Body;
+    const eAuth = await signIn(h, e.email);
+    const eStart = (
+      await post('2fa/setup/start').set(eAuth).send({ currentPassword: PASSWORD }).expect(200)
+    ).body as Body;
     confirmCase = {
       id: e.id,
-      challengeToken: eChallenge,
+      accessToken: eAuth.Authorization.replace('Bearer ', ''),
       code: authenticator.generate(eStart.manualKey),
     };
     auditBefore = await h.owner.auditLog.count();
@@ -855,21 +884,23 @@ describe('TC-003 (FR-102): replay store outage reaches the handlers', () => {
     expect(await h.owner.refreshToken.count({ where: { userId: recoveryCase.id } })).toBe(0);
   }, 90000);
 
-  it('TC-003: with Redis down, /2fa/enroll/confirm with a correct code answers the handler 503: 2FA stays off, no recovery codes, no session', async () => {
+  it('TC-003: with Redis down, /2fa/setup/confirm with a correct code answers the handler 503: 2FA stays off, no recovery codes, no session', async () => {
     const before = await row(confirmCase.id);
+    spy ??= h.skipFreshnessCheck();
     expectHandler503(
       await slow(
-        post('2fa/enroll/confirm').send({
-          challengeToken: confirmCase.challengeToken,
-          code: confirmCase.code,
-        }),
+        post('2fa/setup/confirm')
+          .set({ Authorization: `Bearer ${confirmCase.accessToken}` })
+          .send({ currentPassword: PASSWORD, code: confirmCase.code }),
       ),
     );
     const after = await row(confirmCase.id);
     expect(after.totpEnabled).toBe(false);
     expect(after.recoveryCodeHashes).toEqual(before.recoveryCodeHashes);
     expect(after.failedLogins).toBe(before.failedLogins);
-    expect(await h.owner.refreshToken.count({ where: { userId: confirmCase.id } })).toBe(0);
+    expect(
+      await h.owner.refreshToken.count({ where: { userId: confirmCase.id, revokedAt: null } }),
+    ).toBe(1); // the sign-in's own family, untouched
   }, 90000);
 
   it('TC-003: none of the refused outage calls wrote an audit row', async () => {

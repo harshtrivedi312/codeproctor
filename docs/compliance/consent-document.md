@@ -1,6 +1,6 @@
 # Consent document: proctored coding assessment
 
-Status: **DRAFT v0.3 for owner approval** (owner fill-ins, C-17..C-19 and C-26..C-33 applied 2026-10-05) (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
+Status: **DRAFT v0.4 for owner approval** (owner fill-ins, C-17..C-19 and C-26..C-33 applied 2026-10-05; v0.4, 2026-10-08: section 6 no longer promises reviewer two-factor sign-in, after the owner's D-70) (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
 
 The placeholder guard stays: pilot and production refuse to run until the owner approves a final version, and that version is loaded with its own version number (C-09, FR-401). Items in [square brackets] are filled in per organisation or before approval. The drafting notes at the end are not shown to candidates.
 
@@ -78,11 +78,11 @@ Your code is also run against test cases to calculate a score. Your score, the r
 
 Only these people and companies can see your data:
 - **Our staff with the Recruiter role** for this role see your invitation, status, scores and the final decision.
-- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication.
+- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. They sign in to their own accounts.
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
 - **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage, plus Amazon Simple Email Service for sending your invitation, one-time codes and a copy of this document, and Amazon CloudWatch for system logs, which never contain your recordings, images, codes or passwords), and Cloudflare (delivering the web pages). They may not use your data for their own purposes.
 
-Every time a staff member opens your recordings or images, it is logged. Your scores and status may also be sent to [our applicant tracking system] through an export or automatic notification. We don't share your data with anyone else unless the law requires it.
+Every time a staff member opens one of your recordings or images, it is logged. Your scores and status may also be sent to [our applicant tracking system] through an export or automatic notification. We don't share your data with anyone else unless the law requires it.
 
 ### 7. Where your data is stored
 
@@ -143,3 +143,4 @@ We record the document version, your age confirmation, your typed name, the date
 12. **Legitimate interests (C-29).** Section 5a states the basis. The full legitimate interests assessment is in the DPIA, section 3a. Objections from EU/UK candidates are handled case by case, like accommodations.
 13. **Age (C-30).** The 18+ confirmation is a required tick box. A candidate who doesn't tick it can't sign, and sees the recruiter contact.
 14. **The privacy email** privacy@example.com is a demo address and must be replaced before the pilot.
+15. **Changes to who can see data or how it is secured (F5, compliance review 2026-10-08).** Once a version is approved and served, any change to a statement about who can see candidate data or how it is secured needs a new version number and a fresh signature from candidates who have not yet signed. If the change weakens a promise that signed candidates saw, they also get a notice. v0.4 (D-73) needs neither, because no version has been approved or served. Backend to confirm that opening an ID image or selfie is audited (only `REVIEW_PLAYBACK_ISSUED` was found); if it is not, section 6 says "recordings" only until it is.
