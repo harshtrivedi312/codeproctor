@@ -1,4 +1,5 @@
 import { api, type Schemas } from '@/lib/api/client';
+import { isBusyResponse } from '@/lib/api/busy';
 import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
 import { REAUTH_FAILED_CODE } from './schemas';
 
@@ -57,7 +58,10 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
     if (response.status === 400) return { ok: false, failure: 'code' };
     if (response.status === 409) return { ok: false, failure: 'conflict' };
     if (response.status === 401) return { ok: false, failure: 'session' };
-    if (response.status === 503) return { ok: false, failure: 'busy' };
+    // Only the BUSY answer means nothing happened; any other 503 is an unknown outcome.
+    if (response.status === 503) {
+      return { ok: false, failure: (await isBusyResponse(response)) ? 'busy' : 'unknown' };
+    }
     return { ok: false, failure: 'unknown' };
   } catch {
     return { ok: false, failure: 'network' };

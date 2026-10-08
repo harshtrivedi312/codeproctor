@@ -523,7 +523,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     ).toBeInTheDocument();
   });
 
-  it('FR-102: a server 400 on the code shows the field message and a 503 says to try again, neither signs out', async () => {
+  it('FR-102: a server 400 on the code shows the field message and a 503 without code BUSY is an unknown outcome, neither signs out', async () => {
     server.use(
       http.post(`${base}/2fa/disable`, () => HttpResponse.json({ status: 400 }, { status: 400 }), {
         once: true,
@@ -542,9 +542,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     await u.type(passwordField(), MOCK_USERS.recruiter.password);
     await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Turn off 2FA' }));
-    expect(
-      await within(dialog()).findByText('Verification is temporarily unavailable'),
-    ).toBeInTheDocument();
+    expect(await within(dialog()).findByText('Something went wrong')).toBeInTheDocument();
     expect(getAccessToken()).not.toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
   });
@@ -949,23 +947,42 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
 
   it.each([
     ['500', () => new HttpResponse(null, { status: 500 })],
+    ['a 503 without code BUSY', () => HttpResponse.json({ status: 503 }, { status: 503 })],
     ['a network error', () => HttpResponse.error()],
   ])(
-    'FR-102: an unknown outcome of set-up confirm (%s) signs out to sign-in with a notice that does not claim 2FA is on',
+    'FR-102: an unknown outcome of set-up confirm (%s) signs out for real (one logout call) to sign-in with a notice that does not claim 2FA is on',
     async (_n, answer) => {
       server.use(http.post(`${base}/2fa/setup/confirm`, answer));
+      const calls = watchSessionCalls();
       const u = await pageAs(MOCK_USERS.recruiter);
       await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
       await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
       await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
       await waitFor(() => expect(router.replace).toHaveBeenCalledWith(UNCONFIRMED_LOGIN));
       expect(getAccessToken()).toBeNull();
+      expect(calls.logout).toBe(1);
+      expect(isSignOutPending()).toBe(false);
     },
   );
 
-  it('FR-102: a failing refresh while the one-time codes show does not unmount them', async () => {
+  it('FR-102 FR-104: if the logout after an unknown set-up outcome also fails, the pending marker stays so a reload cannot restore the session', async () => {
+    server.use(
+      http.post(`${base}/2fa/setup/confirm`, () => new HttpResponse(null, { status: 500 })),
+      http.post(`${base}/logout`, () => new HttpResponse(null, { status: 500 })),
+    );
     const u = await pageAs(MOCK_USERS.recruiter);
-    server.use(http.post(`${base}/refresh`, () => new HttpResponse(null, { status: 500 })));
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(UNCONFIRMED_LOGIN));
+    expect(getAccessToken()).toBeNull();
+    expect(isSignOutPending()).toBe(true);
+  });
+
+  it('FR-102: nothing refreshes while the one-time codes show, so they stay up', async () => {
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.recruiter);
+    const before = calls.refresh;
     await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
     await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
@@ -973,6 +990,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByTestId('recovery-codes')).toBeInTheDocument();
     expect(getAccessToken()).not.toBeNull();
+    expect(calls.refresh).toBe(before);
   });
 
   it('FR-102: regenerating makes no refresh call (totpEnabled does not change)', async () => {

@@ -43,11 +43,11 @@ export const TWO_FACTOR_ON_LOGIN_PATH = '/admin/login?reason=two-factor-on';
 /** Set-up confirm had an unknown outcome: the notice does not claim whether 2FA is on. */
 export const TWO_FACTOR_UNCONFIRMED_LOGIN_PATH = '/admin/login?reason=two-factor-unconfirmed';
 
-export type SessionRevokedReason = 'off' | 'on' | 'unconfirmed';
+/** The server already ended every session (a confirmed answer), so no logout call is made. */
+export type SessionRevokedReason = 'off' | 'on';
 const REVOKED_PATHS: Record<SessionRevokedReason, string> = {
   off: TWO_FACTOR_OFF_LOGIN_PATH,
   on: TWO_FACTOR_ON_LOGIN_PATH,
-  unconfirmed: TWO_FACTOR_UNCONFIRMED_LOGIN_PATH,
 };
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
@@ -71,7 +71,13 @@ interface AuthContextValue {
    * confirm sign-out" warning and no logout retry. The sign-out marker is set briefly as a
    * cross-tab broadcast (other tabs sign out) and cleared last.
    */
-  signOutRevoked: (reason?: SessionRevokedReason) => Promise<void>;
+  signOutRevoked: (reason: SessionRevokedReason) => Promise<void>;
+  /**
+   * Set-up confirm had an unknown outcome: the server may or may not have revoked the session.
+   * Runs the normal sign-out (logout call; a failed one keeps the pending marker and the login
+   * page offers Retry, FR-104), then goes to the unconfirmed notice on the sign-in page.
+   */
+  signOutAfterUnknownSetup: () => Promise<void>;
   /** The silent refresh got 503 BUSY and gave up: nobody was signed out; offer a manual retry. */
   refreshBusy: boolean;
   retryRefresh: () => void;
@@ -235,36 +241,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     [queryClient],
   );
 
-  const signOut = React.useCallback(async () => {
-    setSignedOutByUser(true);
-    setLoginPath(LOGIN_PATH);
-    // Blocks new refreshes at once and forgets the session at once: a refresh already running
-    // may take seconds, and until it settles the old token must not be used. Logout works from
-    // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
-    // late 401 cannot start a refresh.
-    const settled = beginSignOut();
-    publishSession(null);
-    await settled;
-    try {
-      // The session listener also cancels and clears on the user change; this is explicit so the
-      // cache is empty even if the user id did not change.
-      await queryClient.cancelQueries();
-      queryClient.clear();
-      setPending(null);
-    } catch {
-      // Nothing to do: the logout call below must still run.
-    }
-    try {
-      await confirmLogout();
-    } finally {
-      // Whatever the server said, this browser has forgotten the session. If the server did not
-      // confirm, the pending marker stays set so a reload does not restore it (FR-104).
-      router.replace('/admin/login');
-    }
-  }, [router, confirmLogout, queryClient]);
+  const runSignOut = React.useCallback(
+    async (target: string) => {
+      setSignedOutByUser(true);
+      setLoginPath(target === LOGIN_PATH ? LOGIN_PATH : target);
+      // Blocks new refreshes at once and forgets the session at once: a refresh already running
+      // may take seconds, and until it settles the old token must not be used. Logout works from
+      // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
+      // late 401 cannot start a refresh.
+      const settled = beginSignOut();
+      publishSession(null);
+      await settled;
+      try {
+        // The session listener also cancels and clears on the user change; this is explicit so the
+        // cache is empty even if the user id did not change.
+        await queryClient.cancelQueries();
+        queryClient.clear();
+        setPending(null);
+      } catch {
+        // Nothing to do: the logout call below must still run.
+      }
+      try {
+        await confirmLogout();
+      } finally {
+        // Whatever the server said, this browser has forgotten the session. If the server did not
+        // confirm, the pending marker stays set so a reload does not restore it (FR-104).
+        router.replace(target);
+      }
+    },
+    [router, confirmLogout, queryClient],
+  );
+
+  const signOut = React.useCallback(() => runSignOut('/admin/login'), [runSignOut]);
+  const signOutAfterUnknownSetup = React.useCallback(
+    () => runSignOut(TWO_FACTOR_UNCONFIRMED_LOGIN_PATH),
+    [runSignOut],
+  );
 
   const signOutRevoked = React.useCallback(
-    async (reason: SessionRevokedReason = 'off') => {
+    async (reason: SessionRevokedReason) => {
       const target = REVOKED_PATHS[reason];
       setSignedOutByUser(true);
       setLoginPath(target);
@@ -297,6 +312,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       retrySignOut,
       loginPath,
       signOutRevoked,
+      signOutAfterUnknownSetup,
       refreshBusy,
       retryRefresh,
       setPending,
@@ -312,6 +328,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       retrySignOut,
       loginPath,
       signOutRevoked,
+      signOutAfterUnknownSetup,
       refreshBusy,
       retryRefresh,
       signIn,

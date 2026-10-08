@@ -100,7 +100,7 @@ export function ActionDialog({
   onClose: () => void;
   onDone: (result: SecurityResult) => void;
 }): React.JSX.Element {
-  const { user, signOutRevoked } = useAuth();
+  const { user, signOutRevoked, signOutAfterUnknownSetup } = useAuth();
   // Who this dialog was opened by: sign-out and the re-read below only run for that same session.
   const [stamp] = React.useState(captureSessionStamp);
   const [stage, setStage] = React.useState<Stage>({ kind: 'password', passwordWrong: false });
@@ -134,7 +134,7 @@ export function ActionDialog({
         return 'ok';
       }
       // The server revoked every session of this user, this one included: no refresh, no logout.
-      await signOutRevoked();
+      await signOutRevoked('off');
       return 'ok';
     }
     const out = await regenerateRecoveryCodes(values.currentPassword);
@@ -150,7 +150,8 @@ export function ActionDialog({
    * sign-in: no refresh (it would 401) and no logout call. Never for another user's session.
    */
   async function finishSetup(): Promise<void> {
-    if (stamp.generation !== getGeneration() || stamp.userId !== getSessionUserId()) {
+    // Only another person's session is not ours to end; the same user in a newer generation is.
+    if (stamp.userId !== getSessionUserId()) {
       onDone('enabled');
       return;
     }
@@ -181,12 +182,16 @@ export function ActionDialog({
     }
     if (out.failure === 'code') return 'wrongCode';
     if (out.failure === 'network' || out.failure === 'unknown') {
-      // The outcome is unknown: 2FA may be on and every session revoked. Sign out to be safe.
+      // The outcome is unknown: 2FA may be on and every session revoked, or nothing happened and
+      // the cookie is still valid. Sign out for real (logout call, pending marker if it fails).
       setPassword('');
-      if (stamp.generation === getGeneration() && stamp.userId === getSessionUserId()) {
-        await signOutRevoked('unconfirmed');
+      if (stamp.userId === getSessionUserId()) {
+        await signOutAfterUnknownSetup();
         return 'failed';
       }
+      // Another person's session now: do not end it. Hint to reload and check the current state.
+      setFailure('conflict');
+      return 'failed';
     }
     setFailure(out.failure);
     return 'failed';
