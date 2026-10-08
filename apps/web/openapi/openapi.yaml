@@ -2601,7 +2601,6 @@ components:
       enum:
         [
           REAUTH_FAILED,
-          TWO_FACTOR_REQUIRED_FOR_ROLE,
           SETTINGS_CONFLICT,
           VARIANT_HAS_AI_REFERENCES,
           BUSY,
