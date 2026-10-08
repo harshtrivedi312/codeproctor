@@ -489,9 +489,23 @@ and when a column of the schema is none of the five (a new column breaks the bui
   the aggregates, walked to a depth of 64) with a foreign prototype, an own `__proto__` or an inherited key; and
   a `data` row (each row of a `createMany`) and one level below a column with an own `__proto__` or an inherited
   key. Json contents are not walked, so an ingest path pays O(columns). Dates, byte arrays, Decimals, the Json
-  null sentinels and field references are values, not structure. **So is the operand of a Json filter** (re-review of #185, S1): on a Json column (`JSON_COLUMNS`, the schema's twelve, compared with the generated client by a spec) the operand of `equals`, `not`, `in`, `notIn`, `array_*` and `string_*` is a stored document, which may be nested past the limit or hold an own `__proto__`, and Prisma never reads it as structure; the compare-and-set of retention, the org settings and the device-info fence passes it. The `where` and `having` of a call are walked model by model (AND, OR, NOT and relation filters follow the model), the filter object itself, a `path` and everything else are still walked, and a `where` nested in a `select` or `include` is walked whole. (Prisma 7.10 drops an own `__proto__` key from such an operand, so a compare-and-set against a document that raw SQL stored with one matches nothing: FU-DB-222.) A class instance with no enumerable inherited
-  key (a DTO) passes as a `data` row. The checks themselves read `select`, `omit`, `where`, `data` and the rest
-  through `ownValue` and an own-key copy of the args, so a key that is not the caller's own is never seen.
+  null sentinels and field references are values, not structure. **So is the operand of a Json filter** (re-review of #185, S1): on a Json column (`JSON_COLUMNS`, the schema's twelve, compared with the generated client by a spec) the operand of `equals`, `not`, `in`, `notIn`, `array_*` and `string_*` is a stored document, which may be nested past the limit or hold an own `__proto__`, and Prisma never reads it as structure; the compare-and-set of retention, the org settings and the device-info fence passes it. The `where` and `having` of a call are walked model by model (AND, OR, NOT and relation filters follow the model), the filter object itself, a `path` and everything else are still walked, and a `where` nested in a `select` or `include` is walked whole. (Prisma 7.10 drops an own `__proto__` key from such an operand, so a compare-and-set against a document that raw SQL stored with one matches nothing: FU-DB-222.) The checks themselves read `select`, `omit`, `where`,
+  `data` and the rest through `ownValue` and an own-key copy of the args, so a key that is not the caller's own is
+  never seen.
+- **Hidden keys are refused too, in every scope** (FU-DB-281, the #261 delta review S1; `plain-args.ts`, "Hidden
+  keys"). The walks see own enumerable keys and read a getter once; Prisma reads a relation's args with
+  `Wt({ select, include, ...rest })`, a [[Get]] that finds a non-enumerable `select` or `include` and calls a getter
+  again. Its clone normally drops those, but it passes an object **by reference** when
+  `value[Symbol.for('prisma.objectEnumValue')] === true` (the registered brand of its null sentinels). Confirmed
+  against Postgres before the fix: a branded `_count` with a non-enumerable `select` counted the relation in system
+  scope, and a branded relation args object with a getter `include` got past the `omit` check in STAFF scope. So
+  every object and array the walk visits (the args, structure, where, a Json column's filter object, a data row and
+  one level below a column) is refused when it is a Proxy, has a prototype other than `Object.prototype` or `null`
+  (an array: other than `Array.prototype`; a data row too, since the hook only ever sees Prisma's plain clone of a
+  DTO), or has an own symbol key, an own non-enumerable key, an own getter or setter, or (an array) an own key that
+  is not an index. A Date, a byte array, a Decimal, a field reference and the Json null sentinels are skipped only
+  when real (exact prototype and own keys, not a Proxy); a look-alike is walked and refused. An array one level
+  below a column is a value: its prototype, a Proxy and a symbol key are checked, not its elements.
 
 **Writes are CS-4.4's "Write" column as an allowlist** (`CANDIDATE_MODELS` in `session-scope-map.ts`): a
 create and an update carry only the columns listed for the model, anything else throws, an update on a
@@ -650,7 +664,9 @@ reaches only a test question that one of this session's questions points to
 ### Tests
 
 `org-context-session.spec.ts` (actors, nesting, detach, facts, reflection, lower-casing; no database),
-`plain-args.spec.ts` (the plain-arguments guard through the real client in every scope, no database) and
+`plain-args.spec.ts` (the plain-arguments guard through the real client in every scope, no database),
+`hidden-keys.spec.ts` (FU-DB-281 against Postgres: what Prisma's clone hands the hook, and a branded carrier
+refused before any statement in each scope) and
 `call-sites.spec.ts` (the call-site allowlist),
 `database-boot.spec.ts` (the facts setter is claimed when `DatabaseModule` loads),
 `session-scope-args.spec.ts` and `candidate-interim.spec.ts` (every model and operation on the rewritten
