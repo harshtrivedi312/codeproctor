@@ -424,7 +424,12 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       ],
       [
         'windowEnd equals windowStart',
-        () => ({ windowStart: iso(Date.now() + HOUR), windowEnd: iso(Date.now() + HOUR) }),
+        () => {
+          // One clock read: two Date.now() calls can differ by a millisecond, and then the window
+          // is not empty (the test passed or failed by timing).
+          const at = iso(Date.now() + HOUR);
+          return { windowStart: at, windowEnd: at };
+        },
       ],
       [
         'window over 7 days',
