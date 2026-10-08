@@ -25,7 +25,7 @@ import type { SessionChain, TenantFixture } from './testing/tenant-fixtures';
 /** Prisma's brand of its null sentinels: its argument clone passes an object that carries it by reference. */
 const BRAND = Symbol.for('prisma.objectEnumValue');
 const HIDDEN_KEY =
-  /a non-enumerable key|an accessor|a symbol key|a Proxy|where a query object is expected/;
+  /a non-enumerable key|an accessor|a symbol key|a Proxy|where a query object is expected|__prismaRawParameters__|a function value/;
 
 /** A branded object with `key` held as a non-enumerable own value. */
 const branded = (key: string, value: unknown): object =>
@@ -52,6 +52,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
   let client: ReturnType<typeof createOrgScopedClient>;
   const orgContext = new OrgContextService();
   let T: TenantFixture;
+  let T2: TenantFixture;
 
   const statementCount = async (): Promise<number> =>
     (await db.statements.read()).reduce((sum, s) => sum + s.calls, 0);
@@ -90,6 +91,7 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
     appUser = createPrismaClient(db.appUserUrl);
     client = createOrgScopedClient(appUser, orgContext);
     T = await createTenant(owner, 'hidk');
+    T2 = await createTenant(owner, 'hidk2');
   });
 
   afterAll(async () => {
@@ -267,6 +269,64 @@ describe('hidden keys are refused, against Postgres, in every scope (FU-DB-281; 
     });
     await expectRefusedBeforeAnyStatement(/where a query object is expected/, () =>
       asStaff(() => client.invitation.findFirst({ select } as never)),
+    );
+  });
+
+  it('TC-008 B1: a raw-parameter marker in a where (Prisma would send `values` raw, dropping the org filter) is refused before any statement, and the scoped read still sees only its own org', async () => {
+    await expectRefusedBeforeAnyStatement(/__prismaRawParameters__/, () =>
+      orgContext.runInOrg(T.orgId, () =>
+        client.invitation.findMany({
+          where: { __prismaRawParameters__: true, values: {} },
+        } as never),
+      ),
+    );
+    const mine = await orgContext.runInOrg(T.orgId, () =>
+      client.invitation.findMany({ select: { id: true, orgId: true } }),
+    );
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((row) => row.orgId === T.orgId)).toBe(true);
+    expect(mine.some((row) => row.id === T2.chain.invitationId)).toBe(false);
+  });
+
+  it('TC-008 B1: a raw-parameter marker in update data (it would carry a foreign orgId past the tenancy check) is refused before any statement, and the row stays in its org', async () => {
+    await expectRefusedBeforeAnyStatement(/__prismaRawParameters__/, () =>
+      orgContext.runInOrg(T.orgId, () =>
+        client.invitation.updateMany({
+          where: { id: T.chain.invitationId },
+          data: { __prismaRawParameters__: true, values: { orgId: T2.orgId } },
+        } as never),
+      ),
+    );
+    const row = await owner.invitation.findUniqueOrThrow({
+      where: { id: T.chain.invitationId },
+      select: { orgId: true },
+    });
+    expect(row.orgId).toBe(T.orgId);
+  });
+
+  it('TC-008 B1: an own toJSON function in a data row (Prisma would serialize its return in place) is refused before any statement', async () => {
+    await expectRefusedBeforeAnyStatement(/a function value/, () =>
+      asStaff(() =>
+        client.session.update({
+          where: { id: T.chain.sessionId },
+          data: Object.assign(Object.create(Object.prototype) as object, {
+            lastHeartbeat: new Date(),
+            toJSON: () => ({ status: 'ERASED' }),
+          }),
+          select: { id: true },
+        } as never),
+      ),
+    );
+  });
+
+  it('TC-008 S1: a value object as the value of a select relation field is refused (plain-args, before omit-args), STAFF scope', async () => {
+    await expectRefusedBeforeAnyStatement(/where a query object is expected/, () =>
+      asStaff(() =>
+        client.sessionQuestion.findFirst({
+          where: { id: T.chain.sessionQuestionId },
+          select: { id: true, session: new Date() },
+        } as never),
+      ),
     );
   });
 

@@ -564,11 +564,19 @@ describe('plain-args: hidden keys, anywhere in the tree (FU-DB-281; #261 delta r
       ];
       for (const [kind, value] of VALUES) {
         for (const [place, put] of QUERY_OBJECT) {
-          expect({ kind, place, refused: !passes(() => plain(put(value))) }).toEqual({
-            kind,
-            place,
-            refused: true,
-          });
+          let reason = '';
+          try {
+            plain(put(value));
+          } catch (error) {
+            reason = (error as Error).message;
+          }
+          expect({ kind, place, matched: /where a query object is expected/.test(reason) }).toEqual(
+            {
+              kind,
+              place,
+              matched: true,
+            },
+          );
         }
         expect(() => plain({ where: value })).toThrow(/where a query object is expected/);
       }
@@ -605,10 +613,149 @@ describe('plain-args: hidden keys, anywhere in the tree (FU-DB-281; #261 delta r
       void client.$disconnect();
     }
   });
+});
 
-  it('TC-008 Prisma.skip is not exported by this client (no strictUndefinedChecks preview): a Skip instance is walked and refused; enabling the preview must add Prisma.skip to isValueObject by identity', () => {
+describe('plain-args: the Prisma serializer markers and value positions (FU-DB-281 review B1, S1; NFR-04, TC-008)', () => {
+  const plain = (args: unknown): void => assertPlainArgs('Session', 'findMany', args);
+
+  it('TC-008 B1: an own __prismaRawParameters__ key (Prisma sends `values` raw, dropping the org filter) is refused everywhere the walk visits', () => {
+    const marker = (): Record<string, unknown> => ({ __prismaRawParameters__: true, values: {} });
+    const PLACES: Array<[string, (bad: object) => unknown]> = [
+      ['the arguments', (bad) => bad],
+      ['where', (bad) => ({ where: bad })],
+      ['where, under AND', (bad) => ({ where: { AND: [bad] } })],
+      ['where, a relation filter body', (bad) => ({ where: { invitation: { is: bad } } })],
+      ['a scalar filter operand', (bad) => ({ where: { id: { equals: bad } } })],
+      ['data, the row', (bad) => ({ data: bad })],
+      ['data, one level below a column', (bad) => ({ data: { deviceInfo: bad } })],
+      ['a createMany row', (bad) => ({ data: [{ orgId: 'x' }, bad] })],
+      ['an upsert update', (bad) => ({ where: { id: 'x' }, create: {}, update: bad })],
+      ['select, a relation args', (bad) => ({ select: { id: true, invitation: bad } })],
+    ];
+    for (const [place, put] of PLACES) {
+      expect({ place, refused: !passes(() => plain(put(marker()))) }).toEqual({
+        place,
+        refused: true,
+      });
+    }
+    expect(() => plain({ where: marker() })).toThrow(/__prismaRawParameters__/);
+  });
+
+  it("TC-008 B1: an own function value (Prisma serializes toJSON() in the object's place) is refused; the message names no value", () => {
+    const withToJson = (): Record<string, unknown> => ({ toJSON: () => ({ orgId: 'other' }) });
+    for (const put of [
+      (b: object) => ({ where: b }),
+      (b: object) => ({ data: b }),
+      (b: object) => ({ where: { id: { equals: b } } }),
+      (b: object) => ({ select: { id: true, invitation: b } }),
+    ]) {
+      expect(passes(() => plain(put(withToJson())))).toBe(false);
+    }
+    let message = '';
+    try {
+      plain({ data: { onlyIf: () => 'secret' } });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/a function value in data is refused/);
+    expect(message).not.toMatch(/secret|onlyIf/);
+  });
+
+  it('TC-008 S1: a value object or a hidden-key carrier as the value of a select or include relation field is refused in plain-args itself (not only omit-args)', () => {
+    const client = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    try {
+      const ref = (client as unknown as { session: { fields: Record<string, object> } }).session
+        .fields.deadlineAt as object;
+      const VALUES: Array<[string, object]> = [
+        ['a Date', new Date()],
+        ['a Buffer', Buffer.from('x')],
+        ['a Decimal', new Prisma.Decimal('1.5')],
+        ['a field reference', ref],
+        ['Prisma.DbNull', Prisma.DbNull],
+        [
+          'a non-enumerable select carrier',
+          Object.defineProperty({}, 'select', { value: { tokenHash: true } }),
+        ],
+      ];
+      for (const [kind, value] of VALUES) {
+        for (const put of [
+          (v: object) => ({ select: { id: true, invitation: v } }),
+          (v: object) => ({ include: { invitation: v } }),
+          (v: object) => ({ select: { _count: { select: { sessions: v } } } }),
+          (v: object) => ({ select: { invitation: { include: { candidate: v } } } }),
+        ]) {
+          expect({ kind, refused: !passes(() => plain(put(value))) }).toEqual({
+            kind,
+            refused: true,
+          });
+        }
+      }
+      // A relation field that is true/false or a real args object still passes.
+      expect(() =>
+        plain({ select: { id: true, invitation: true, candidate: false } }),
+      ).not.toThrow();
+      expect(() =>
+        plain({
+          select: {
+            invitation: { select: { id: true }, where: { createdAt: { gte: new Date() } } },
+          },
+        }),
+      ).not.toThrow();
+    } finally {
+      void client.$disconnect();
+    }
+  });
+
+  it('TC-008 N1: a real Skip instance from the runtime (exported even with the preview off, so Prisma.skip is not) is walked and refused, fail closed', async () => {
+    const runtime = (await import('@prisma/client/runtime/client')) as { skip: unknown };
+    const skip = runtime.skip as object;
+    expect(isPlainPrototype(Object.getPrototypeOf(skip))).toBe(false);
+    // Prisma.skip is not exported by this client (no strictUndefinedChecks preview).
     expect(Object.hasOwn(Prisma, 'skip')).toBe(false);
-    expect('skip' in Prisma).toBe(false);
+    // The Skip singleton reaches the hook by reference, and is refused wherever a query object is expected.
+    for (const put of [
+      (v: object) => ({ where: v }),
+      (v: object) => ({ data: v }),
+      (v: object) => ({ select: v }),
+    ]) {
+      expect(passes(() => plain(put(skip)))).toBe(false);
+    }
+    // A Skip as a filter operand is a non-plain-prototype object, refused by checkObject.
+    expect(passes(() => plain({ where: { status: skip } }))).toBe(false);
+  });
+
+  it('TC-008 N3: no schema column is named like a query-object key, a logical key or a relation-filter key (so the position rules never refuse a real column)', async () => {
+    const metas = await readModelMetas();
+    const reserved = new Set([
+      'select',
+      'include',
+      'omit',
+      'where',
+      'orderBy',
+      'cursor',
+      'having',
+      '_count',
+      '_avg',
+      '_sum',
+      '_min',
+      '_max',
+      'AND',
+      'OR',
+      'NOT',
+      'some',
+      'every',
+      'none',
+      'is',
+      'isNot',
+      '__prismaRawParameters__',
+    ]);
+    const clashes: string[] = [];
+    for (const [model, meta] of Object.entries(metas)) {
+      for (const field of meta.fields) {
+        if (reserved.has(field.name)) clashes.push(`${model}.${field.name}`);
+      }
+    }
+    expect(clashes).toEqual([]);
   });
 });
 
