@@ -1,6 +1,6 @@
 # Consent document: proctored coding assessment
 
-Status: **DRAFT v0.3 for owner approval** (owner fill-ins, C-17..C-19 and C-26..C-33 applied 2026-10-05) (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
+Status: **DRAFT v0.4 for owner approval** (owner fill-ins, C-17..C-19 and C-26..C-33 applied 2026-10-05; v0.4, 2026-10-08: section 6 no longer promises reviewer two-factor sign-in, after the owner's D-70) (C-09, with C-02, C-04, C-05, C-07, C-08, C-13, C-14). Drafted 2026-10-05 by the Delivery Lead. Approver: Harsh Trivedi. This text has not had professional legal review (C-15).
 
 The placeholder guard stays: pilot and production refuse to run until the owner approves a final version, and that version is loaded with its own version number (C-09, FR-401). Items in [square brackets] are filled in per organisation or before approval. The drafting notes at the end are not shown to candidates.
 
@@ -78,7 +78,7 @@ Your code is also run against test cases to calculate a score. Your score, the r
 
 Only these people and companies can see your data:
 - **Our staff with the Recruiter role** for this role see your invitation, status, scores and the final decision.
-- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Reviewers sign in with two-factor authentication.
+- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Every Reviewer signs in to their own account, two-factor sign-in is strongly recommended to them, and every time anyone opens your recordings or images it is logged.
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
 - **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage, plus Amazon Simple Email Service for sending your invitation, one-time codes and a copy of this document, and Amazon CloudWatch for system logs, which never contain your recordings, images, codes or passwords), and Cloudflare (delivering the web pages). They may not use your data for their own purposes.
 
