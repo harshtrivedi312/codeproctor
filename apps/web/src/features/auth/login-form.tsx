@@ -66,7 +66,7 @@ export function LoginForm(): React.JSX.Element {
       if (data.status === 'authenticated' && data.session) {
         signIn(data.session);
         router.replace(next);
-      } else if (data.challengeToken) {
+      } else if (data.status === 'two_factor_required' && data.challengeToken) {
         setPending({ kind: 'verify', challengeToken: data.challengeToken });
         router.push(`/admin/2fa?next=${encodeURIComponent(next)}`);
       } else {

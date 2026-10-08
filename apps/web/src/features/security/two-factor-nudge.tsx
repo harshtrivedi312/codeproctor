@@ -1,6 +1,7 @@
 'use client';
 import { X } from 'lucide-react';
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/features/auth/auth-provider';
@@ -13,8 +14,11 @@ import { useAuth } from '@/features/auth/auth-provider';
  */
 export function TwoFactorNudge(): React.JSX.Element | null {
   const { user } = useAuth();
+  const pathname = usePathname();
   const [dismissed, setDismissed] = React.useState(false);
-  if (!user || user.twoFactorRecommended !== true || dismissed) return null;
+  // The flag is always sent; fall back to totpEnabled === false if an older session lacks it.
+  const recommended = user?.twoFactorRecommended ?? user?.totpEnabled === false;
+  if (!user || !recommended || dismissed || pathname === '/admin/security') return null;
   return (
     <div
       role="region"

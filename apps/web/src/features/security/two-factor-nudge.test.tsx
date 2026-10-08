@@ -29,7 +29,7 @@ function Who() {
 
 describe('two-factor recommendation (FR-102, optional for every role)', () => {
   it.each(Object.values(MOCK_USERS).filter((u) => !('totp' in u && u.totp)))(
-    'FR-102 TC-003: $role without TOTP signs in with a password alone and sees the nudge',
+    'FR-102 (TC pending): $role without TOTP signs in with a password alone and sees the nudge',
     async (user) => {
       renderWithAuth(
         <>

@@ -89,7 +89,7 @@ test.describe('FR-101 login', () => {
 });
 
 test.describe('FR-102 optional two-factor sign-in', () => {
-  test('TC-003: a reviewer without TOTP signs in with a password alone, sees the recommendation and can dismiss it', async ({
+  test('FR-102 (TC pending): a reviewer without TOTP signs in with a password alone, sees the recommendation and can dismiss it', async ({
     page,
   }) => {
     await login(page, REVIEWER);
@@ -102,7 +102,7 @@ test.describe('FR-102 optional two-factor sign-in', () => {
     await expect(nudge).toBeHidden();
   });
 
-  test('TC-003: set-up from the nudge can be skipped, or finished so the nudge goes away', async ({
+  test('FR-102 (TC pending): set-up from the nudge can be skipped, or finished so the nudge goes away', async ({
     page,
   }) => {
     await login(page, REVIEWER);

@@ -63,7 +63,7 @@ function ShellFrame({ children }: { children: React.ReactNode }): React.JSX.Elem
           </div>
         </header>
         <BusyNotice />
-        <TwoFactorNudge />
+        <TwoFactorNudge key={user?.id} />
         <main id="main" className="p-4">
           <Breadcrumbs />
           {children}
