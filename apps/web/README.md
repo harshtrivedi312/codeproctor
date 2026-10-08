@@ -99,7 +99,7 @@ How it works:
   retries a staff request once after a 401 and a refresh; if the refresh fails the user is sent to
   `/admin/login?reason=expired&next=...`.
 - The 2FA challenge token is held in `AuthProvider` state only; a reload goes back to login. Two-factor
-  sign-in is optional for every role (owner decision, ID pending via the Delivery Lead): a user without it signs in with the password alone and
+  sign-in is optional for every role (D-70): a user without it signs in with the password alone and
   sees a dismissible recommendation until it is turned on (`user.twoFactorRecommended`).
 - Reset and invite links should carry the token in the fragment (`#token=...`) so it never reaches a
   server log; a `?token=` query is accepted and both are removed from the address bar on load. The
@@ -178,7 +178,7 @@ How it works:
   retries a staff request once after a 401 and a refresh; if the refresh fails the user is sent to
   `/admin/login?reason=expired&next=...`.
 - The 2FA challenge token is held in `AuthProvider` state only; a reload goes back to login. Two-factor
-  sign-in is optional for every role (owner decision, ID pending via the Delivery Lead): a user without it signs in with the password alone and
+  sign-in is optional for every role (D-70): a user without it signs in with the password alone and
   sees a dismissible recommendation until it is turned on (`user.twoFactorRecommended`).
 - Reset and invite links should carry the token in the fragment (`#token=...`) so it never reaches a
   server log; a `?token=` query is accepted and both are removed from the address bar on load. The

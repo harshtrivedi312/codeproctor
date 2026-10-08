@@ -6,6 +6,7 @@ import { useAuth } from '@/features/auth/auth-provider';
 import { MOCK_TOTP_CODE, MOCK_USERS, seedMockTwoFactor } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
+import { router } from '@/test/nav-mock';
 import { LoginForm } from '@/features/auth/login-form';
 import { SecurityPage } from './security-page';
 import { TwoFactorNudge } from './two-factor-nudge';
@@ -29,7 +30,7 @@ function Who() {
 
 describe('two-factor recommendation (FR-102, optional for every role)', () => {
   it.each(Object.values(MOCK_USERS).filter((u) => !('totp' in u && u.totp)))(
-    'FR-102 (TC pending): $role without TOTP signs in with a password alone and sees the nudge',
+    'FR-102 TC-003 (D-70): $role without TOTP signs in with a password alone and sees the nudge',
     async (user) => {
       renderWithAuth(
         <>
@@ -71,7 +72,7 @@ describe('two-factor recommendation (FR-102, optional for every role)', () => {
     expect(screen.queryByTestId('two-factor-nudge')).not.toBeInTheDocument();
   });
 
-  it('FR-102: the nudge disappears after set-up completes, without a reload', async () => {
+  it('FR-102: the nudge is gone after set-up completes: the user is signed out and signs in again', async () => {
     renderAsStaff(
       <main>
         <TwoFactorNudge />
@@ -89,7 +90,10 @@ describe('two-factor recommendation (FR-102, optional for every role)', () => {
     await u.click(within(dialog).getByRole('button', { name: 'Confirm and turn on' }));
     await u.click(await within(dialog).findByLabelText(/I have saved these recovery codes/));
     await u.click(within(dialog).getByRole('button', { name: 'Done' }));
+    // The server ended every session: the user is sent to sign-in, so the nudge is gone.
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=two-factor-on'),
+    );
     await waitFor(() => expect(screen.queryByTestId('two-factor-nudge')).not.toBeInTheDocument());
-    expect(screen.getByTestId('two-factor-status')).toHaveTextContent('is on');
   });
 });

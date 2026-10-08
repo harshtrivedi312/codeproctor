@@ -46,6 +46,8 @@ beforeEach(() => resetAuthTestState());
 
 const base = `${apiBaseUrl}/v1/auth`;
 const DISABLED_LOGIN = '/admin/login?reason=two-factor-off';
+const ENABLED_LOGIN = '/admin/login?reason=two-factor-on';
+const UNCONFIRMED_LOGIN = '/admin/login?reason=two-factor-unconfirmed';
 
 /** Counts the calls that would sign a user out or restore a session. */
 function watchSessionCalls() {
@@ -171,7 +173,7 @@ describe('Security page: wrong password (FR-102, FU-BE-39)', () => {
 });
 
 describe('Security page: set up, disable, regenerate (FR-102)', () => {
-  it('FR-102: a recruiter sets up 2FA, sees the recovery codes once, and then Disable appears; disabling turns it off again', async () => {
+  it('FR-102: a recruiter sets up 2FA, sees the recovery codes once, and is then signed out to sign in with a code', async () => {
     const u = await pageAs(MOCK_USERS.recruiter);
     expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
     expect(
@@ -196,12 +198,7 @@ describe('Security page: set up, disable, regenerate (FR-102)', () => {
     await u.click(within(dialog()).getByRole('checkbox'));
     await u.click(done);
 
-    expect(await screen.findByRole('button', { name: 'Disable 2FA' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Set up 2FA' })).not.toBeInTheDocument();
-
-    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(ENABLED_LOGIN));
     expect(getAccessToken()).toBeNull();
   });
 
@@ -930,7 +927,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(unload()).toBe(false);
   });
 
-  it('FR-102: the session user (totpEnabled) is re-read when set-up is acknowledged (Done), not while the codes show', async () => {
+  it('FR-102: Done after set-up signs out without a refresh or a logout call (the server revoked every session); the codes stay up until then', async () => {
     const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter);
     const before = calls.refresh;
@@ -938,12 +935,33 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
     await within(dialog()).findByTestId('recovery-codes');
-    expect(calls.refresh).toBe(before);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(getAccessToken()).not.toBeNull();
     await u.click(within(dialog()).getByRole('checkbox'));
     await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
-    expect(await screen.findByRole('button', { name: 'Disable 2FA' })).toBeVisible();
-    expect(calls.refresh).toBe(before + 1);
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(ENABLED_LOGIN));
+    expect(getAccessToken()).toBeNull();
+    expect(isSignOutPending()).toBe(false);
+    expect(calls.refresh).toBe(before);
+    expect(calls.logout).toBe(0);
   });
+
+  it.each([
+    ['500', () => new HttpResponse(null, { status: 500 })],
+    ['a network error', () => HttpResponse.error()],
+  ])(
+    'FR-102: an unknown outcome of set-up confirm (%s) signs out to sign-in with a notice that does not claim 2FA is on',
+    async (_n, answer) => {
+      server.use(http.post(`${base}/2fa/setup/confirm`, answer));
+      const u = await pageAs(MOCK_USERS.recruiter);
+      await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+      await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+      await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith(UNCONFIRMED_LOGIN));
+      expect(getAccessToken()).toBeNull();
+    },
+  );
 
   it('FR-102: a failing refresh while the one-time codes show does not unmount them', async () => {
     const u = await pageAs(MOCK_USERS.recruiter);

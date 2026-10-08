@@ -8,12 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/features/auth/auth-provider';
-import {
-  captureSessionStamp,
-  getGeneration,
-  getSessionUserId,
-  refreshForReplay,
-} from '@/lib/auth-session';
+import { captureSessionStamp, getGeneration, getSessionUserId } from '@/lib/auth-session';
 import { RecoveryCodesPanel } from '@/features/auth/recovery-codes-panel';
 import {
   confirmSetup,
@@ -150,12 +145,16 @@ export function ActionDialog({
   }
 
   /**
-   * Set-up turned 2FA on: re-read the session user (it carries `totpEnabled`) through the shared
-   * silent-refresh guard. Only runs after the recovery codes were acknowledged (Done): a failing
-   * refresh signs the user out and would unmount the one-time codes. Never runs for another user.
+   * Set-up turned 2FA on, and the server revoked every refresh family of this user, this one
+   * included. After the recovery codes were acknowledged (Done), forget the session here and go to
+   * sign-in: no refresh (it would 401) and no logout call. Never for another user's session.
    */
-  function refreshStatus(): void {
-    void refreshForReplay(stamp);
+  async function finishSetup(): Promise<void> {
+    if (stamp.generation !== getGeneration() || stamp.userId !== getSessionUserId()) {
+      onDone('enabled');
+      return;
+    }
+    await signOutRevoked('on');
   }
 
   function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {
@@ -181,6 +180,14 @@ export function ActionDialog({
       return 'failed';
     }
     if (out.failure === 'code') return 'wrongCode';
+    if (out.failure === 'network' || out.failure === 'unknown') {
+      // The outcome is unknown: 2FA may be on and every session revoked. Sign out to be safe.
+      setPassword('');
+      if (stamp.generation === getGeneration() && stamp.userId === getSessionUserId()) {
+        await signOutRevoked('unconfirmed');
+        return 'failed';
+      }
+    }
     setFailure(out.failure);
     return 'failed';
   }
@@ -248,8 +255,8 @@ export function ActionDialog({
               email={user?.email ?? ''}
               codes={stage.codes}
               onDone={() => {
-                if (action === 'setup') refreshStatus();
-                onDone(action === 'setup' ? 'enabled' : 'regenerated');
+                if (action === 'setup') void finishSetup();
+                else onDone('regenerated');
               }}
             />
           </>

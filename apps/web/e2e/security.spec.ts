@@ -72,6 +72,12 @@ test.describe('FR-102 Security page', () => {
     await expectNoAxeViolations(page);
     await dialog.getByRole('checkbox').check();
     await dialog.getByRole('button', { name: 'Done' }).click();
+    // Turning 2FA on ends every session: sign in again, now with a code.
+    await expect(page).toHaveURL(/\/admin\/login\?reason=two-factor-on/);
+    await login(page, RECRUITER);
+    await page.getByLabel(/Authenticator code/).fill(TOTP);
+    await page.getByRole('button', { name: 'Verify and sign in' }).click();
+    await openSecurity(page);
     await expect(page.getByRole('button', { name: 'Disable 2FA' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Regenerate recovery codes' }).click();

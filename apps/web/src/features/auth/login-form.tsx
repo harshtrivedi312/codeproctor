@@ -88,6 +88,8 @@ export function LoginForm(): React.JSX.Element {
   const expired = params.get('reason') === 'expired';
   const reset = params.get('reset') === 'done';
   const twoFactorOff = params.get('reason') === 'two-factor-off';
+  const twoFactorOn = params.get('reason') === 'two-factor-on';
+  const twoFactorUnconfirmed = params.get('reason') === 'two-factor-unconfirmed';
 
   return (
     <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} noValidate className="space-y-4">
@@ -100,6 +102,17 @@ export function LoginForm(): React.JSX.Element {
       {twoFactorOff && !banner ? (
         <Alert tone="info" role="status">
           Two-factor sign-in is turned off and you were signed out on all devices. Sign in again.
+        </Alert>
+      ) : null}
+      {twoFactorOn && !banner ? (
+        <Alert tone="info" role="status">
+          Two-factor sign-in is on. Sign in again with your authenticator code.
+        </Alert>
+      ) : null}
+      {twoFactorUnconfirmed && !banner ? (
+        <Alert tone="info" role="status" title="We could not confirm the set-up">
+          You were signed out to be safe. Sign in again. If you are asked for a code from your
+          authenticator app, two-factor sign-in is on. If not, set it up again from Security.
         </Alert>
       ) : null}
       {signOutUnconfirmed ? (

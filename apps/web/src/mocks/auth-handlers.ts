@@ -400,6 +400,8 @@ export function createAuthHandlers() {
       }
       state.totpOn.push(user.email);
       state.totpOff = state.totpOff.filter((email) => email !== user.email);
+      // The server revokes every refresh family, the caller's included (D-70): a refresh now 401s.
+      state.refreshFor = null;
       const gen = (state.recoveryGen[user.email] ?? 0) + 1;
       state.recoveryGen[user.email] = gen;
       save(state);

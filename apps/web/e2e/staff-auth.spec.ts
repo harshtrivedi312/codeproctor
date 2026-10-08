@@ -89,7 +89,7 @@ test.describe('FR-101 login', () => {
 });
 
 test.describe('FR-102 optional two-factor sign-in', () => {
-  test('FR-102 (TC pending): a reviewer without TOTP signs in with a password alone, sees the recommendation and can dismiss it', async ({
+  test('FR-102 TC-003 (D-70): a reviewer without TOTP signs in with a password alone, sees the recommendation and can dismiss it', async ({
     page,
   }) => {
     await login(page, REVIEWER);
@@ -102,7 +102,7 @@ test.describe('FR-102 optional two-factor sign-in', () => {
     await expect(nudge).toBeHidden();
   });
 
-  test('FR-102 (TC pending): set-up from the nudge can be skipped, or finished so the nudge goes away', async ({
+  test('FR-102 TC-003 (D-70): set-up from the nudge can be skipped, or finished so the nudge goes away', async ({
     page,
   }) => {
     await login(page, REVIEWER);
@@ -125,8 +125,17 @@ test.describe('FR-102 optional two-factor sign-in', () => {
     expect(download.suggestedFilename()).toBe('codeproctor-recovery-codes.txt');
     await page.getByLabel(/I have saved these recovery codes/).check();
     await page.getByRole('button', { name: 'Done' }).click();
+    // The server ended every session: the user signs in again, now with an authenticator code.
+    await expect(page).toHaveURL(/\/admin\/login\?reason=two-factor-on/);
+    await expect(
+      page.getByText('Two-factor sign-in is on. Sign in again with your authenticator code.'),
+    ).toBeVisible();
+    await expectNoAxeViolations(page);
+    await login(page, REVIEWER);
+    await page.getByLabel(/Authenticator code/).fill(TOTP);
+    await page.getByRole('button', { name: 'Verify and sign in' }).click();
+    await expect(page).toHaveURL(/\/admin$/);
     await expect(page.getByTestId('two-factor-nudge')).toBeHidden();
-    await expect(page.getByTestId('two-factor-status')).toContainText('is on');
   });
 });
 

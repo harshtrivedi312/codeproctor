@@ -48,7 +48,7 @@ describe('LoginForm', () => {
     ['recruiter', MOCK_USERS.recruiter],
     ['author', MOCK_USERS.author],
   ])(
-    'FR-102 (TC pending): a %s without TOTP signs in with a password alone, no enrolment step',
+    'FR-102 TC-003 (D-70): a %s without TOTP signs in with a password alone, no enrolment step',
     async (_name, user) => {
       renderWithAuth(<LoginForm />);
       await signIn(user.email, user.password);
