@@ -84,6 +84,9 @@ const aiRefSupersede = {
 const userManage = { roles: SUPER_ADMIN, permission: 'user:manage' } as const;
 const orgSettingsManage = { roles: SUPER_ADMIN, permission: 'org_settings:manage' } as const;
 const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
+const REVIEW_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'REVIEWER'];
+const reviewQueueRead = { roles: REVIEW_STAFF, permission: 'review_queue:read' } as const;
+const reviewSessionRead = { roles: REVIEW_STAFF, permission: 'review_session:read' } as const;
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   // Operations
@@ -110,6 +113,27 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_consent:decline',
   },
+  // Answers and finish (BE-11, FR-502, FR-506, ADR 0013 section 5.11).
+  'POST /candidate/answers/:questionId/run': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:run',
+  },
+  'POST /candidate/answers/:questionId/submit': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:submit',
+  },
+  'POST /candidate/session/finish': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:finish',
+  },
+  'PUT /candidate/answers/:questionId/draft': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:draft',
+  },
+  'POST /candidate/session/section/finish': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_section:finish',
+  },
   'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
   'POST /candidate/session/test/start': {
     principal: 'CANDIDATE',
@@ -118,6 +142,14 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /candidate/session/heartbeat': {
     principal: 'CANDIDATE',
     permission: 'candidate_session:heartbeat',
+  },
+  'POST /candidate/session/events': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_events:write',
+  },
+  'POST /candidate/session/keystrokes': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_keystrokes:write',
   },
   'POST /candidate/session/proctor-key': {
     principal: 'CANDIDATE',
@@ -148,6 +180,31 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'PATCH /admin/users/:userId': userManage,
   'POST /admin/users/:userId/unlock': userManage,
 
+  // Candidate media (FR-701, FR-702; BE-09). Behind CandidateSessionGuard; no audit rows (ADR 0013).
+  'POST /candidate/session/media/presign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_media:presign',
+  },
+  'POST /candidate/session/media/confirm': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_media:presign',
+  },
+
+  // Candidate identity check (FR-403; BE-08b). The status read reuses the upload permission: the
+  // shared contract has no candidate_identity:read yet (hub question, design notes section 7).
+  'POST /candidate/session/identity/presign': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+  'POST /candidate/session/identity': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+  'GET /candidate/session/identity': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_identity:upload',
+  },
+
   // Organization settings (FR-103, ADR 0010 org_settings:manage; SUPER_ADMIN only, own org only).
   // The PATCH needs the admin's currentPassword (step-up) and writes its audit row (ORG_SETTINGS_UPDATED) in the same transaction as the update.
   'GET /admin/org-settings': orgSettingsManage,
@@ -159,6 +216,15 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /tests': { roles: RECRUITER_ADMIN, permission: 'test:create' },
   'GET /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:read' },
   'PATCH /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:update' },
+  // Reviewer read API (FR-901, FR-703, FR-105): REVIEWER and SUPER_ADMIN. All three read candidate
+  // data, so all three are audited (the row is written before the response leaves).
+  'GET /review/queue': { ...reviewQueueRead, audited: true, candidateData: true },
+  'GET /review/sessions/:id': { ...reviewSessionRead, audited: true, candidateData: true },
+  'GET /review/sessions/:id/recordings/:recordingId/playback': {
+    ...reviewSessionRead,
+    audited: true,
+    candidateData: true,
+  },
   // Question bank (FR-201..FR-205). Reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN,
   // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
   'GET /questions': questionRead,

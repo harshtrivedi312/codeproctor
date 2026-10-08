@@ -7,15 +7,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
+import { consentPdfObjectKey } from '../media/storage-keys';
 import { CandidateMailPort } from './candidate-mail.port';
 import { renderConsentPdf } from './consent-pdf.renderer';
 import { ObjectStoragePort } from './object-storage.port';
 import { newUlid } from './ulid';
-
-/** Object key of a signed consent PDF (ADR 0013 section 5.7). UUIDs and a ULID only. */
-export function consentPdfKey(orgId: string, sessionId: string, ulid: string): string {
-  return `orgs/${orgId}/consents/${sessionId}/${ulid}.pdf`;
-}
 
 @Injectable()
 export class ConsentPdfService {
@@ -76,7 +72,7 @@ export class ConsentPdfService {
       });
 
       if (consent.pdfKey === null) {
-        const key = consentPdfKey(orgId, sessionId, newUlid(now));
+        const key = consentPdfObjectKey({ orgId, sessionId }, newUlid(now));
         await this.storage.putObject(key, pdf, 'application/pdf');
         const claimed = await this.prisma.client.consent.updateMany({
           where: { id: consent.id, pdfKey: null },

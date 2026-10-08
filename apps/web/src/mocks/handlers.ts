@@ -3,10 +3,12 @@ import { apiBaseUrl } from '@/lib/env';
 import type { Schemas } from '@/lib/api/client';
 import { createAdminHandlers } from './admin-handlers';
 import { createAuthHandlers } from './auth-handlers';
+import { createFaultHandlers } from './fault-handlers';
 import { createCandidateHandlers } from './candidate/handlers';
 import { createQuestionHandlers } from './question-handlers';
 import { createInvitationHandlers } from './invitation-handlers';
 import { createTestHandlers } from './test-handlers';
+import { createReviewHandlers } from './review-handlers';
 import { mockSession } from './data';
 
 export interface MockOptions {
@@ -78,11 +80,15 @@ export function createHandlers(options: Partial<MockOptions> = {}) {
   let lastRunAt = 0;
 
   return [
+    // Faults first, so a test or the demo can make any staff route answer BUSY or a fixed 500.
+    ...createFaultHandlers(),
     ...createAuthHandlers(),
     ...createAdminHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createQuestionHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createTestHandlers({ latencyMs: opts.adminLatencyMs }),
     ...createInvitationHandlers({ latencyMs: opts.adminLatencyMs }),
+    // Review workspace (FR-901, FR-902): mirrors the reviewer read API (apps/api/src/review).
+    ...createReviewHandlers({ latencyMs: opts.adminLatencyMs }),
     // The candidate flow (FE-09, FE-09b): provisional mocks owned by Frontend B in ./candidate.
     ...createCandidateHandlers(),
     http.get(`${base}/v1/health`, () => HttpResponse.json({ status: 'ok' as const })),

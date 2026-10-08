@@ -30,6 +30,12 @@ export const GUARDED_NAMES = [
   'claimCandidateFactsSetter',
   'setCandidateFacts',
   'detachForSessionJob',
+  // The per-session write locks (database/session-locks.ts, ADR 0013 section 5.7, ADR 0015 section 6): the
+  // lock core. Only SessionStateService wraps them (hub ruling, ADR PR #205), so its file is the one entry
+  // outside the defining file; the import guard pins the importers of the module the same way.
+  'guardLive',
+  'lockForAccommodation',
+  'lockAnySession',
   // The cross-organisation read of scheduled_windows (ADR 0017 section 4.7, C-53): `runSystem('SCHEDULE_CAPACITY',
   // ...)` is a string that is exactly the name, so a file that enters the reason needs an entry. None outside
   // database/ today: the schedule code (backend track) adds its one file in its own reviewed PR.
@@ -39,7 +45,7 @@ export type GuardedName = (typeof GUARDED_NAMES)[number];
 
 /** One file that may use some of the names. */
 export interface CallSiteEntry {
-  /** The names the file may use. Anything else of the four is a violation in this file. */
+  /** The names the file may use. Anything else of the seven is a violation in this file. */
   readonly names: readonly GuardedName[];
   /** Why this file may (shown when the guard fails and read by the reviewer). */
   readonly why: string;

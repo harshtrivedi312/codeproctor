@@ -12,6 +12,7 @@ import type { Env } from './config/env';
 import { applyHttpTimeouts } from './common/http-timeouts';
 import { createScopedJsonParser, useDefaultBodyParsers } from './common/body-parsers';
 import { ProblemFilter } from './common/problem.filter';
+import { holdBatchBody } from './proctor-events/batch-body';
 
 export const API_PREFIX = 'api/v1';
 /** JSON body limit for the question bank only (FR-201): the largest valid body is a few hundred KB. */
@@ -47,6 +48,8 @@ export function configureApp(app: INestApplication): void {
       callback(null, origin === undefined || origin === webOrigin ? webOrigin : false);
     },
     credentials: true,
+    // A cross-origin client can only read these response headers (DL-37: lock contention 503).
+    exposedHeaders: ['Retry-After'],
   });
   // Public client-error route (C-32): streaming 16 KB cap, no inflation, parsed before the
   // global body parser (which then skips it).
@@ -61,6 +64,10 @@ export function configureApp(app: INestApplication): void {
   // the mount path case-insensitively, like the routes themselves. /client-errors is parsed
   // before all of this by its own 16 KB middleware and is unaffected.
   app.use(`/${API_PREFIX}/questions`, createScopedJsonParser(app, QUESTIONS_JSON_BODY_LIMIT));
+  // Signed proctor batches (BE-10, ADR 0013 section 2): the handler reads the raw bytes itself, after
+  // the candidate guard and the state check, so the global parsers must not touch these two routes.
+  app.use(`/${API_PREFIX}/candidate/session/events`, holdBatchBody());
+  app.use(`/${API_PREFIX}/candidate/session/keystrokes`, holdBatchBody());
   // Global parsers at the default 100 KB, with body-parser failures mapped to fixed problem details.
   useDefaultBodyParsers(app);
   app.useGlobalFilters(new ProblemFilter());

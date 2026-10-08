@@ -76,3 +76,13 @@ export const REPORTS_SUBPREFIX = 'reports/';
 /** The re-run waits for the fence time + this + the storage sweep margin, so in-flight uploads have landed (ADR 0004 9.5 step 7). */
 export const ERASURE_RERUN_BASE_SECONDS = 60;
 export const STORAGE_SWEEP_MARGIN_SECONDS = 30;
+
+/**
+ * A requested fence is looked at again soon (the job normally finishes in seconds): after 15 s while the
+ * request is under 5 minutes old, after 5 minutes while it is under an hour old. After that the daily
+ * sweep is the only retry, so a fence that never lands cannot start an endless chain of polls.
+ */
+export const FENCE_POLL_FAST_SECONDS = 15;
+export const FENCE_POLL_FAST_WINDOW_SECONDS = 300;
+export const FENCE_POLL_SLOW_SECONDS = 300;
+export const FENCE_POLL_WINDOW_SECONDS = 3600;

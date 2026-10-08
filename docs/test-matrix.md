@@ -1,6 +1,6 @@
 # Test matrix
 
-Owner: qa-engineer. Source: /docs/test-cases.md (87 test cases: 64 P1, 19 P2, 4 P3). Rebuilt 2026-10-02 (QA-01), updated 2026-10-05 (QA-02: staff auth, audit, seed, SDK, worker), 2026-10-06 (QA-07: BE-04 slice 4a).
+Owner: qa-engineer. Source: /docs/test-cases.md (90 test cases: 64 P1, 22 P2, 4 P3). Rebuilt 2026-10-02 (QA-01), updated 2026-10-05 (QA-02: staff auth, audit, seed, SDK, worker), 2026-10-06 (QA-07: BE-04 slice 4a).
 
 How to read this file:
 
@@ -117,6 +117,9 @@ Integration tests run the real API as `app_user` (the least-privileged role) aga
 | TC-094 | NFR-05   | Deletion on request                              | S    | integration | db-engineer          | DB-06, BE-03 | `apps/web/e2e/staff-shell.spec.ts`                                                                                                  | Partial pass: admin UI against mocks              | UI waits on an open appeal and says so. Deletion itself, retention and the 30 day rule need DB-06, BE-03. Still to write: `apps/api/test/integration/tc-094.int.test.ts`.                                                           |
 | TC-104 | NFR-05 | Daily maintenance wake (added 2026-10-06, ADR 0017 4.5, C-47) | R | manual | backend-engineer | DEP-03 | Planned: runbook step on the provisioned pilot | Planned, needs the pilot | Includes the missed-wake alarm. |
 | TC-111 | FR-307 | Schedule view and review windows (added 2026-10-06, ADR 0017 4.1) | F | integration | backend-engineer | BE-06, schedule table (ADR 0017 4.7, no task id yet) | `apps/api/test/integration/tc-111.int.test.ts` (planned) | Planned, blocked on the schedule table | Org scope: other organisations appear only as busy capacity. |
+| TC-115 | FR-402 | No-microphone path (added 2026-10-07, P-44) | F | e2e | frontend-engineer | FE-05 | `apps/web/e2e/tc-115.spec.ts` (planned) | Planned, blocked on the accommodations ADR amendment | Recruiter turns off audio detectors; never blocked at the check. |
+| TC-116 | FR-305 | Extra time over 100% and the assistive input label (added 2026-10-07, P-44) | F | integration | backend-engineer | BE-06 | `apps/api/test/integration/tc-116.int.test.ts` (planned) | Planned, blocked on the accommodations ADR amendment | Per-session ceiling and slot length; label leaves detection unchanged. |
+| TC-117 | FR-403 | Camera alternatives (added 2026-10-07, P-44) | S | e2e | frontend-engineer | FE-05 | `apps/web/e2e/tc-117.spec.ts` (planned) | Planned, blocked on the accommodations ADR amendment | EXIF stripped, source shown to the reviewer, room-scan alternative via the recruiter. |
 
 ## P3
 
@@ -132,8 +135,8 @@ Integration tests run the real API as `app_user` (the least-privileged role) aga
 | Level       | P1  | P2  | P3  | Total |
 | ----------- | --- | --- | --- | ----- |
 | unit        | 2   | 0   | 0   | 2     |
-| integration | 27  | 7   | 4   | 38    |
-| e2e         | 16  | 5   | 0   | 21    |
+| integration | 27  | 8   | 4   | 39    |
+| e2e         | 16  | 7   | 0   | 23    |
 | a11y        | 1   | 0   | 0   | 1     |
 | load        | 2   | 1   | 0   | 3     |
 | security    | 2   | 0   | 0   | 2     |

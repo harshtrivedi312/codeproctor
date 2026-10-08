@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
 const SRC = resolve(__dirname, '..');
-const DIRS = ['candidate', 'session'];
+const DIRS = ['candidate', 'session', 'identity'];
 
 function files(dir: string): Array<{ path: string; text: string }> {
   return readdirSync(dir).flatMap((name) => {
@@ -193,6 +193,12 @@ describe('ADR 0013 CS-4 interim: nothing a client sends picks a row', () => {
       'candidate/candidate-scope.ts',
       'candidate/consent-pdf.service.ts',
       'candidate/session-jobs.service.ts',
+      // BE-08b interim (FU-INB-29, before pilot B-05): the identity jobs and the purge enter an org scope and
+      // re-read the waiver and the erasure fence inside it; they move onto SessionJobProcessor when it lands.
+      // The candidate routes (identity.service.ts) use asCandidate/asOrg like the media routes.
+      'identity/face-match.service.ts',
+      'identity/identity-jobs.service.ts',
+      'identity/identity-purge.service.ts',
     ]);
   });
 });

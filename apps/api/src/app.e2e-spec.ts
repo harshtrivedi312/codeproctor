@@ -118,6 +118,8 @@ describe('API foundation (NFR-04, NFR-09)', () => {
       .set('Origin', 'http://localhost:3000');
     expect(ok.headers['x-content-type-options']).toBe('nosniff');
     expect(ok.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+    // DL-37: the web client must be able to read Retry-After on a 503.
+    expect(ok.headers['access-control-expose-headers']).toContain('Retry-After');
     const other = await request(app.getHttpServer())
       .get('/api/v1/health')
       .set('Origin', 'https://evil.example');
@@ -180,6 +182,9 @@ describe('API foundation in production (NFR-04)', () => {
       // Pilot and production require SES (C-31); nothing is sent in this suite.
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@test.invalid',
+      // Object storage (BE-09) is required in production too.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-test-media',
     });
     app = await createApp();
   });

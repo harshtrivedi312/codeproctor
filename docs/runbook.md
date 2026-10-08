@@ -6,17 +6,16 @@ need them run in GitHub Actions or on the server.
 
 ## Database backups and restore
 
-Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`,
-the nightly workflow (below). Tests: `infra/scripts/verify-backup.test.mjs`.
+Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`.
+No scheduled workflow: staging is not backed up (C-63); the pilot backup runs on the pilot host (DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
 
 ### What runs
 
 | Piece | What it does |
 | --- | --- |
-| `infra/backup/backup.sh` | `pg_dump` (custom format, compressed) to a file. It checks that the dump is readable and that every table has a data entry, then uploads it as one object whose **metadata** carries the checksum (`sha256`), the dump time (`dumped-at`) and the row counts (`counts`), so they can never belong to another object. It checks the stored size and checksum. `BACKUP_MODE=versioned` (default, pilot and production) writes the fixed key `<prefix>dump/latest.dump` in a versioned bucket and **never deletes anything**; the bucket's lifecycle rotates the versions. `BACKUP_MODE=timestamped` (staging, Cloudflare R2 has no versioning) writes `<prefix>dumps/codeproctor-<UTC stamp>.dump`, keeps the newest 3 whatever their age, deletes the others after 14 days, and prunes erasure-list entries that no remaining backup needs (C-55). |
+| `infra/backup/backup.sh` | `pg_dump` (custom format, compressed) to a file. It checks that the dump is readable and that every table has a data entry, then uploads it as one object whose **metadata** carries the checksum (`sha256`), the dump time (`dumped-at`) and the row counts (`counts`), so they can never belong to another object. It checks the stored size and checksum. `BACKUP_MODE=versioned` (default, pilot and production) writes the fixed key `<prefix>dump/latest.dump` in a versioned bucket and **never deletes anything**; the bucket's lifecycle rotates the versions. `BACKUP_MODE=timestamped` (local drills and the tests only; a store without versioning, such as R2, needs it) writes `<prefix>dumps/codeproctor-<UTC stamp>.dump`, keeps the newest 3 whatever their age, deletes the others after 14 days, and prunes erasure-list entries that no remaining backup needs (C-55). |
 | `infra/backup/restore.sh` | Downloads a backup (the latest, or an object version id in versioned mode, or a dump file name in timestamped mode), verifies the checksum from its metadata, restores into a **new** database, compares row counts with the counts taken at backup time, then re-applies the erasure list. Never restores over an existing database and never drops one. |
 | `infra/backup/erasure-list.sh` | The erased-candidate list kept outside the database and its backups (see below). |
-| Nightly workflow (`.github/workflows/backup-nightly.yml`) | 02:17 UTC every night: backs up staging (`BACKUP_MODE=timestamped`) with the `staging` environment's secrets, then restores the new backup into a throwaway Postgres 16 service container and compares counts. It first fails with the names of any missing secret. |
 
 Settings (names match `.env.example`): `PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE`,
 `S3_BACKUP_BUCKET S3_ENDPOINT S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_FORCE_PATH_STYLE`,
@@ -24,7 +23,7 @@ and optionally `BACKUP_PREFIX` (default `db/`), `BACKUP_RETENTION_DAYS` (default
 `BACKUP_SSE` (for example `AES256` on AWS S3), `PG_BIN_DIR`. Timestamped mode must have `BACKUP_MODE=timestamped` set in the environment of every script that touches the bucket (`backup.sh`, `restore.sh`, `erasure-list.sh`). The scripts take no secrets as
 arguments, so nothing shows up in `ps`, and they never print a URL, key or password.
 
-Environments: staging writes to Cloudflare R2 (synthetic data only). Pilot and production write
+Environments: staging is not backed up (C-63). Pilot and production write
 to AWS S3 in the same region as the data, so candidate data stays in AWS; only configuration
 differs. Backups of pilot and production run on the server or in a pilot workflow that DEP-03
 adds. Turn on bucket default encryption and Block Public Access on the backup bucket (ARC-05).
@@ -34,13 +33,15 @@ the current one) and expires older noncurrent versions (`NoncurrentDays` 1), no 
 Object Lock in governance mode, and a backup role that cannot delete. Never keep a backup beyond the
 30-day erasure window (C-06) without the owner's explicit decision; the owner is alarmed after 2 days
 without a new backup (a bucket alarm, not a script feature). If backups stall, the newest 3 stay until
-they resume. Staging (R2) has no versioning and uses `BACKUP_MODE=timestamped`, where the script keeps
+they resume. A store without versioning (used for local drills only) runs `BACKUP_MODE=timestamped`, where the script keeps
 the newest 3 and deletes the rest after 14 days.
 
 The `pg_dump` client must have the same major version as the server (16). A newer client writes
 settings that a 16 server rejects at restore time; `backup.sh` and `restore.sh` refuse a mismatch.
 
 ### The erasure list (ADR 0004 R-7)
+
+Entries are written with `aws s3api put-object --if-none-match '*'` (the pilot backup role can create objects but not overwrite or delete them, ADR 0017 5.3). That needs an **AWS CLI that supports conditional writes (a late-2024 release or newer)**; an older CLI fails with "Unknown options" and no erasure is recorded, so check `aws s3api put-object help | grep if-none-match` when you install it. A 412 means the entry already exists (success); a 409 is retried up to 5 times; anything else stops the caller. Erasure entries carry `BACKUP_SSE` when it is set, like the dumps. A 409 is not retried by the AWS CLI itself, so the 5-try bound in the script holds in production.
 
 A restore brings back rows that were erased after the backup was taken. To undo that, the ids of
 erased candidates are kept in the backup bucket under `<prefix>erasure-list/`, outside the
@@ -84,8 +85,7 @@ docker run -d --rm --name restore-drill -e POSTGRES_PASSWORD=drill -p 127.0.0.1:
 ```
 
 Run the restore with the drill server's settings and the backup store settings of the environment
-you are testing. For staging that means GitHub Actions; the nightly workflow does exactly this on
-every run. For a local check without any bucket, run the automated drill instead, which uses an
+you are testing (the pilot: on the server, by the owner, never from a developer machine). For a local check without any bucket, run the automated drill instead, which uses an
 in-memory S3 server and a throwaway Postgres container:
 
 ```bash
@@ -98,7 +98,7 @@ Run on the server or in a manually triggered workflow in the affected environmen
 1. Pick the backup. Versioned mode (pilot, production): list the versions of the one key,
    `aws s3api list-object-versions --bucket "$S3_BACKUP_BUCKET" --prefix <prefix>dump/latest.dump --query 'Versions[].[VersionId,LastModified]' --output text`,
    then read the dump time of the candidates with `aws s3api head-object --bucket "$S3_BACKUP_BUCKET" --key <prefix>dump/latest.dump --version-id <id> --query 'Metadata."dumped-at"'`
-   and prefer the newest one taken before the incident (the owner runs this). Timestamped mode (staging): list `<prefix>dumps/`.
+   and prefer the newest one taken before the incident (the owner runs this). Timestamped mode (local drills): list `<prefix>dumps/`.
 2. `RESTORE_ALLOW_REMOTE=1 sh infra/backup/restore.sh --target-db <new name> --backup <version id or file name>`
    (leave `--backup` out or use `latest` for the newest)
    with `PG*` pointing at the server, as the **migration owner role** (`--no-owner` makes the restoring
@@ -114,38 +114,28 @@ Run on the server or in a manually triggered workflow in the affected environmen
 5. The retention jobs are anchored and idempotent (ADR 0004 9.7): the next daily run deletes again
    anything the restore brought back that is past its limit.
 
-### Preconditions for the nightly staging workflow
-
-The workflow handles staging database and bucket credentials. Before the owner creates the secrets:
-the `staging` environment must allow deployment from the `main` branch only (otherwise any pushed branch
-can edit `backup.sh`, dispatch the workflow and read the secrets), must have no required reviewers
-(they would stall the schedule), and the database connection must use `PGSSLMODE=verify-full` with a
-trusted root certificate. See FU-DBB-04.
-
 ### Known limits
 
 - Row counts are taken in a separate read-only snapshot just before `pg_dump`. On a busy database
-  they can differ by the rows written in between; the nightly job runs when traffic is lowest.
-- The staging workflow assumes the staging database host accepts connections from GitHub-hosted
-  runners (or a tunnel set up in the workflow). That is a staging deployment question (DEP-01).
+  they can differ by the rows written in between; run the backup when traffic is lowest.
 
 ## Staging database setup (DEP-01)
 
 Owner: Database B (ops) track, for DEP-01. Serves ADR 0006 sections 7.3 to 7.5 and 8.8, ADR 0009 and
-NFR-03. Staging holds synthetic data only (Cloudflare R2, no real candidates). Staging credentials
+NFR-03. Staging holds synthetic data only (no real candidates) and is not backed up (C-63). Staging credentials
 live only in GitHub Actions secrets (environment `staging`) and on the staging server (D-38); no
 step below is run from a developer machine or an agent session.
 
-The steps run in this order. A person does steps 0, 1, 2, 4 and 6 and the quarterly drill in step 7 (they handle credentials); the deploy
-job does 3 and 5.
+The steps run in this order. A person does steps 0, 1, 2 and 4 (they handle credentials); the deploy job does 3 and 5. Steps 6 and 7 are the
+backup note (C-63) and the pilot restore drill.
 
 ### 0. Lock the `staging` environment first (a person, before any secret exists)
 
 In GitHub, create the `staging` environment and allow deployments from the `main` branch only, with no
 required reviewers (they would stall the schedule). Only then create secrets. Until this is done, a
 branch pushed by any session could run a workflow that names the environment and read its secrets.
-Every workflow job that uses a staging secret must also guard on `github.ref == 'refs/heads/main'`, as the
-nightly backup does; the restriction on the environment is what stops a different workflow file.
+Every workflow job that uses a staging secret must also guard on `github.ref == 'refs/heads/main'` (for
+example, the deploy job); the restriction on the environment is what stops a different workflow file.
 
 ### 1. The database and its owner role (a person, once)
 
@@ -170,7 +160,7 @@ nightly backup does; the restriction on the environment is what stops a differen
 
 Every connection must use TLS **with certificate verification**, for each client separately:
 `PGSSLMODE=verify-full` with a trusted root certificate (`PGSSLROOTCERT=system` or a CA from a secret)
-for psql and `pg_dump` (the backup and the drill), and the equivalent parameters in the two database URLs
+for psql (manual sessions), and the equivalent parameters in the two database URLs
 for Prisma's migration engine (`STAGING_MIGRATION_DATABASE_URL`) and the API's node-postgres driver
 (`STAGING_DATABASE_URL`). `PGSSLMODE` does not reach those two clients, and `sslmode=require` encrypts
 without checking the server, so a man-in-the-middle could capture the owner or `app_user` login. The
@@ -219,37 +209,25 @@ SELECT has_table_privilege('app_user', '_prisma_migrations', 'SELECT');        -
 SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f (the app_user_no_temp migration)
 ```
 
-### 6. Backups on (a person creates the secrets once; then the workflow does the rest)
+### 6. Backups (none on staging)
 
-1. Create a private bucket on Cloudflare R2 for backups. No public access, and **no object versioning**
-   (a noncurrent copy would outlive the retention rule, C-55).
-   (Stricter than the general rule above, which allows versioning with a short noncurrent-version
-   lifecycle rule: on R2 we simply do not turn it on.)
-2. Create an R2 token limited to that bucket. Create the backup's database role as a person: `LOGIN`
-   with `pg_read_all_data`, not `app_user` and not the owner (a read-only role cannot dump a table it
-   cannot read, so check the first run). Set its password as in step 4 (`\password`, never on a
-   command line) and connect it with the same certificate-verifying TLS settings as step 2.
-3. Create the nine secrets in the `staging` environment (names in FU-DBB-04): the bucket and endpoint,
-   the access key id and secret, and the database host, port, user, password and name. The environment
-   was locked to `main` in step 0; check that still holds.
-4. Run the nightly workflow once by hand (`workflow_dispatch` on `main`). A green run means: a dump with
-   its metadata (`sha256`, `dumped-at`, `counts`) is in `staging/dumps/` in the bucket, and the restore drill step restored
-   it into the throwaway Postgres service with matching row counts.
-   (A staging bucket used by the earlier design may still hold `.dump.gz`, `.sha256` and `.counts.tsv` files; they are never pruned and cannot be restored: delete them once by hand.)
-5. Check the bucket now holds one dump. After 14 days it should hold about 15 (today plus 14 days), plus any manual runs, and never fewer than the newest 3 (C-55).
-   `staging/erasure-list/` and `staging/erasure-completed/` hold only `<stamp>-<candidate uuid>.json`
-   objects (an id and a time, no names or emails).
+Owner decision C-63: staging is synthetic and rebuilt from seed and migrations, so there is no scheduled
+staging backup, no backup workflow and no backup secrets. Pilot backups and restores are the section
+"Database backups and restore" above (`BACKUP_MODE=versioned`, run on the pilot host, DEP-03). The
+`timestamped` mode of `backup.sh` stays for local drills and the tests (`verify-backup.test.mjs`) only.
+The `staging` GitHub environment is the owner's to keep or delete. If backup secrets were already created
+(the earlier plan asked for them), the owner deletes them: any `STAGING_S3_BACKUP_*`, `STAGING_S3_ENDPOINT` and
+`STAGING_BACKUP_PG*` secrets in the `staging` environment, the R2 backup token, the read-only backup database
+role, and the staging backup bucket (synthetic data only).
 
-### 7. The restore drill
+### 7. The restore drill (pilot)
 
-The nightly workflow restores each new backup into a throwaway server and fails the job when the row
-counts differ (exit code 2) or anything else goes wrong (exit code 1). Treat a red run as an incident:
-until a restore works, there is no backup. Once a quarter, and before the pilot, also prove that an **older** backup restores: run `restore.sh
---backup <older dump file>` into a throwaway server (a person, on the staging server or in a manually dispatched workflow on `main`: never on a developer machine, because the R2 keys must stay off it). The
-nightly workflow only restores the newest backup and takes no input; a workflow input for this is a
-proposal for the hub (FU-DBB-24).
-For a real restore, follow "Restoring for real (an incident)" above; it runs as the migration owner role
-and re-applies erasures.
+Once a quarter, and before the pilot goes live, the owner proves a restore works: take a backup on the
+pilot host, restore the newest version, then an **older** version (`restore.sh --backup <version id>`, see
+"Restoring for real") into a throwaway server, and check that the row counts match (exit code 0; exit
+code 2 means the counts differ, any other failure is exit code 1). Treat a failed drill as an incident:
+until a restore works, there is no backup. Never run it from a developer machine, because the pilot
+bucket credentials must stay off it.
 
 ### Open items
 

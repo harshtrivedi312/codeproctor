@@ -19,13 +19,18 @@ jobs:
   verify:
     name: Install, build, lint, typecheck, test
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # The API refuses to boot without APP_ENV (DL-55). The test harness sets it too; this makes it explicit.
+      APP_ENV: test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history: the migration guard (infra/scripts/verify-migration-guard.mjs) needs a merge
+          # base with origin/main, and a shallow checkout lost it when main moved during a run.
+          fetch-depth: 0
 
       # Node version comes from .nvmrc. Node 24 bundles corepack.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

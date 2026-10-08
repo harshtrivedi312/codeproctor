@@ -1,6 +1,8 @@
 import { validateEnv } from './env';
 
 const valid = {
+  // APP_ENV has no default (DL-55, FU-BE-224): every fixture sets it.
+  APP_ENV: 'development',
   DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
   REDIS_URL: 'redis://127.0.0.1:6379',
   WEB_ORIGIN: 'http://localhost:3000',
@@ -15,6 +17,9 @@ const judge0 = {
   WEB_ORIGIN: 'https://app.example.com',
   TRUST_PROXY_HOPS: '1',
   JUDGE0_URL: 'https://judge0.example.com',
+  // Object storage (BE-09) is required in pilot and production too.
+  S3_REGION: 'eu-west-2',
+  S3_MEDIA_BUCKET: 'cp-pilot-media',
   JUDGE0_AUTH_TOKEN: 't'.repeat(32),
   JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
 };

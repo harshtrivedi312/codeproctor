@@ -53,11 +53,10 @@ Environment variables, defaults in brackets. They map to the owner's open questi
 | `RETENTION_VERSIONING_CHECK` [enforce]      | skip only on staging (R2, synthetic data)            |
 | `RETENTION_BATCH_SIZE` [200]                | sessions per tier per run                            |
 
-## Not wired yet
+## Wiring
 
-`RetentionModule` is not imported by `AppModule`. Wire it with `RetentionModule.forRoot({ objectStore:
-MediaModule })`: BE-09's module exports `ObjectStorePort` (its `S3ObjectStore` adapter); the port is
-never bound inside this folder. A scheduler (the BullMQ module) calls `RetentionService.runDaily()`
+`AppModule` imports `RetentionModule.forRoot({ objectStore: MediaModule })`: BE-09's module exports `ObjectStorePort` (its `S3ObjectStore` adapter); the port is
+never bound inside this folder. Still missing: a scheduler (the BullMQ module) that calls `RetentionService.runDaily()`
 through a single-flight job. Tests use `../test/retention/in-memory-object-store.ts` (the retention test helpers live in `apps/api/src/test/retention`, which the build and the import guard leave out).
 
 ## Reserved audit actions
@@ -74,8 +73,11 @@ through a single-flight job. Tests use `../test/retention/in-memory-object-store
    and the candidate is told once (`ERASURE_DELAY_NOTIFIED`). With the switch off the fence closes the
    open appeal (`CLOSED_ERASED`).
    1b. Before anything is fenced or deleted, `ErasureListPort.append` records the candidate on the erasure list that survives restores (a failure stops the run); `complete` follows when every session is settled and the candidate is anonymised, and a failure is retried by the sweep.
-2. Fence each other session through `SessionFencePort` (BE-07 implements it; retention never writes
-   `sessions.status`), then schedule a re-run after fence + 60 s + the storage sweep margin.
+2. Request the fence for each other session through `SessionFencePort.requestFence` (a SERVICE session job
+   that Backend B builds; it decides under the session lock, so a session that turned held stays as it is;
+   retention never writes `sessions.status`), and schedule a short look-again (not a fence time; bounded by the request's age, then the daily sweep retries). The fence job id carries the request time, so a finished job never blocks a later request. The service reads the status
+   back: it records the fence time the first time it reads a session as ERASED and schedules the re-run after
+   fence + 60 s + the storage sweep margin.
 3. For each ERASED session: delete the whole prefix with verification, then one transaction (candidate
    lock first) applies R-6: delete events, batches, keystrokes, media chunks and identity checks;
    blank submissions, answers, scoring notes, review notes and appeal text; clear device info and the
