@@ -78,7 +78,7 @@ Your code is also run against test cases to calculate a score. Your score, the r
 
 Only these people and companies can see your data:
 - **Our staff with the Recruiter role** for this role see your invitation, status, scores and the final decision.
-- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Every Reviewer signs in to their own account, two-factor sign-in is strongly recommended to them, and every time anyone opens your recordings or images it is logged.
+- **Our staff with the Reviewer role** see the recordings, images, flags and your code, so they can review the assessment. Every Reviewer signs in to their own account, two-factor sign-in is recommended to them, and every time anyone opens your recordings or images it is logged.
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
 - **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage, plus Amazon Simple Email Service for sending your invitation, one-time codes and a copy of this document, and Amazon CloudWatch for system logs, which never contain your recordings, images, codes or passwords), and Cloudflare (delivering the web pages). They may not use your data for their own purposes.
 
