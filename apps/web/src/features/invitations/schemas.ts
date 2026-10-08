@@ -69,6 +69,45 @@ export const parseTools = (text: string): string[] => {
   return out;
 };
 
+/** A `datetime-local` value (the browser's local time) for a date. */
+export const toLocalInput = (d: Date): string => {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+/** The API refuses a windowStart more than 5 minutes in the past; refresh before 4 (FR-303). */
+export const START_STALE_MS = 4 * 60_000;
+
+/**
+ * The window to send, worked out at SUBMIT time, not when the dialog opened (a dialog left open
+ * for 10 minutes would otherwise send a start the API refuses with 400, FR-303):
+ *  - a start the user did not touch becomes "now" (to the minute) and, if the end was not touched
+ *    either, the end keeps the same length as the default window;
+ *  - a start the user chose but that is now more than 4 minutes in the past is clamped to "now"
+ *    (reported as `clamped`, so the screen can say so); the end moves with it only if untouched.
+ * A start the user chose that is in the future (or recent) is kept as typed.
+ */
+export function windowAtSubmit(
+  current: { windowStart: string; windowEnd: string },
+  touched: { start: boolean; end: boolean },
+  initial: { windowStart: string; windowEnd: string },
+  now: Date,
+): { windowStart: string; windowEnd: string; clamped: boolean } {
+  const nowMinute = new Date(now.getTime());
+  nowMinute.setSeconds(0, 0);
+  const chosen = new Date(current.windowStart);
+  const stale = !touched.start || chosen.getTime() < now.getTime() - START_STALE_MS;
+  if (!stale || Number.isNaN(nowMinute.getTime())) {
+    return { ...current, clamped: false };
+  }
+  const lengthMs = new Date(initial.windowEnd).getTime() - new Date(initial.windowStart).getTime();
+  const windowEnd =
+    touched.end || Number.isNaN(lengthMs)
+      ? current.windowEnd
+      : toLocalInput(new Date(nowMinute.getTime() + lengthMs));
+  return { windowStart: toLocalInput(nowMinute), windowEnd, clamped: touched.start };
+}
+
 export const toIso = (local: string): string => new Date(local).toISOString();
 
 /** `now` is passed in so the rules are testable. */
