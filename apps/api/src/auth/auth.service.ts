@@ -673,7 +673,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * (shared reserve and lockout, 403 REAUTH_FAILED), then 409 when 2FA is off, then the TOTP code
    * on its own reservation (same lockout, replay-protected; a wrong or replayed code is the same
    * 403 REAUTH_FAILED body as a wrong password; a Redis outage is a 503 with the reservation
-   * given back), and only then the role refusal. Every refusal on this route (wrong password,
+   * given back). Every refusal on this route (wrong password,
    * wrong or replayed code, locked account, password changed meanwhile) carries one fixed detail,
    * 'The password or code is incorrect.' (FU-BE-58), so nothing says which factor was wrong and
    * the user is not sent to retype a correct password. A code that already signed the user in
@@ -681,7 +681,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * password passed skips verifyTotp and registerFailure (only someone who already proved the
    * password can reach it). The 409 before the code check tells someone who
    * already holds the password only that 2FA is off, which the signed-in user can see anyway.
-   * Roles that must use 2FA are refused (FR-102). One transaction clears secret, flag and
+   * Every role may turn 2FA off (FR-102: optional for all roles). One transaction clears secret, flag and
    * recovery hashes (users row first), then revokes every refresh-token family of the user,
    * including the caller's own (users before refresh_tokens, the lock order every other path
    * uses), and audits. A refresh or a 2FA login racing this either waits on the users row lock
@@ -1381,7 +1381,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   }
 
   /**
-   * revokeFamily for the refresh paths (reuse, inactive user, role needing 2FA, changed password).
+   * revokeFamily for the refresh paths (reuse, inactive user, changed password).
    * It runs outside the rotation transaction, so contention before commit is a clean failure and
    * is retried a bounded number of times. Every error is retried except OrgScopeError (a
    * programming error that cannot succeed on a retry); the choice is fail-closed on purpose,
@@ -1467,9 +1467,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // and inserts nothing; a reset arriving later waits for this commit, so its revoke-all sees
     // the token. A family can never outlive a reset (FR-104, FR-107).
     // `?? ''` is deliberate: an empty hash can never equal a stored hash, so it inserts nothing.
-    // The role read at sign-in is bound too: a promotion to a 2FA-required role in between inserts
-    // nothing, so no family exists that skipped 2FA (the guard refuses the old-role access token,
-    // but a refresh would re-read the new role).
+    // The role read at sign-in is bound too: a role change in between inserts nothing, so no
+    // family exists for a role the user no longer has (the guard refuses the old-role access
+    // token, but a refresh would re-read the new role).
     // A 2FA completion also binds the TOTP secret it checked: an admin reset of the user's 2FA
     // that lands in between clears it, so no session is opened from the old second factor.
     const totpBound =
