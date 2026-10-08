@@ -98,6 +98,12 @@ export class AuthUserDto {
     description: "Whether the caller's own two-factor authentication is on.",
   })
   totpEnabled!: boolean;
+  @ApiProperty({
+    readOnly: true,
+    description:
+      'Always present: true when two-factor is off (it is optional for every role but recommended), false when on. Equal to !totpEnabled.',
+  })
+  twoFactorRecommended!: boolean;
 }
 
 export class AuthSessionDto {
@@ -107,8 +113,8 @@ export class AuthSessionDto {
 }
 
 export class LoginResultDto {
-  @ApiProperty({ enum: ['authenticated', 'two_factor_required', 'two_factor_enrollment_required'] })
-  status!: 'authenticated' | 'two_factor_required' | 'two_factor_enrollment_required';
+  @ApiProperty({ enum: ['authenticated', 'two_factor_required'] })
+  status!: 'authenticated' | 'two_factor_required';
   @ApiProperty({ required: false, type: AuthSessionDto }) session?: AuthSessionDto;
   @ApiProperty({ required: false, description: 'Only finishes 2FA; 5 minutes.' })
   challengeToken?: string;

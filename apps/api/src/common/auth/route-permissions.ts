@@ -158,8 +158,6 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
 
   // Authentication (FR-101, FR-102, FR-104, FR-107). Public: the credential is in the body.
   'POST /auth/login': 'public',
-  'POST /auth/2fa/enroll/start': 'public',
-  'POST /auth/2fa/enroll/confirm': 'public',
   'POST /auth/2fa/verify': 'public',
   'POST /auth/refresh': 'public',
   'POST /auth/logout': 'public',
