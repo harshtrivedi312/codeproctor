@@ -67,6 +67,7 @@ import type { ScopeSource } from './org-context';
 import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-scope-args';
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
+import { assertOmitValues } from './omit-args';
 import { assertPlainArgs } from './plain-args';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import {
@@ -202,6 +203,9 @@ export function orgScopeExtension(
         // below do not see, so a foreign prototype or an inherited key is refused before anything else
         // reads the arguments, in EVERY scope, system and staff included (plain-args.ts).
         if (model !== undefined) assertPlainArgs(model, operation, args);
+        // `omit` takes only `true`, in every scope: Prisma turns any other value into a selection of that key,
+        // a relation or `_count` included, which would bypass the relation checks below (omit-args.ts).
+        if (model !== undefined) assertOmitValues(model, operation, args);
 
         // Raw queries and any other operation that is not tied to a model.
         if (model === undefined) {
