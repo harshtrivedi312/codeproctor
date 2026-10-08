@@ -62,7 +62,10 @@
 //     both before it reads the rest of the object: it sends `values` to the engine raw for the first, and
 //     serialises `toJSON()` in the object's place for the second. Either would drop the org filter the scope
 //     spreads in as sibling keys, or carry a field reference past the CANDIDATE refusal (FU-DB-281 review B1).
-//     `__prismaRawParameters__` can come from a request body; a function needs in-process code. No column is
+//     Both are JSON-constructible (unlike a symbol, a getter or a Proxy), so a request body could carry
+//     `__prismaRawParameters__` IF a route ever forwarded a raw where/data object; no route on main does today
+//     (every where/data node is built with fixed literal keys, and the global ValidationPipe is whitelist +
+//     forbidNonWhitelisted), so, like the rest of FU-DB-281, only in-repo code reaches it now. No column is
 //     named `__prismaRawParameters__`, and a function is never a valid query argument.
 // A Date, a byte array, a Decimal, a field reference and the Json null sentinels are values and are skipped
 // only when they are the real thing (the right prototype, no foreign own key, not a Proxy; a byte array's own

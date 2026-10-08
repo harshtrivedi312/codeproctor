@@ -514,8 +514,10 @@ and when a column of the schema is none of the five (a new column breaks the bui
   a spec pins that and the refusal). **And the two keys Prisma's value serializer acts on before the rest of an
   object** are refused anywhere the walk visits: an own `__prismaRawParameters__` (it sends `values` raw) and an own
   function value (`toJSON` is serialised in place). Either would drop the org filter the scope spreads in, or carry a
-  field reference past the CANDIDATE refusal (FU-DB-281 review B1); `__prismaRawParameters__` can come from a request
-  body.
+  field reference past the CANDIDATE refusal (FU-DB-281 review B1). Both keys are JSON-constructible (unlike a symbol,
+  a getter or a Proxy), so a request body could carry `__prismaRawParameters__` if a route ever forwarded a raw
+  where/data object; no route on main does today (where/data nodes are built with fixed literal keys, and the global
+  ValidationPipe is whitelist + forbidNonWhitelisted), so only in-repo code reaches it now.
 
 **Writes are CS-4.4's "Write" column as an allowlist** (`CANDIDATE_MODELS` in `session-scope-map.ts`): a
 create and an update carry only the columns listed for the model, anything else throws, an update on a
