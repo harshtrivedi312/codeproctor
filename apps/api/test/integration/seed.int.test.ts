@@ -140,6 +140,37 @@ describe('DB-04 seed (supports TC-001, TC-003; seeded data for FR-201, FR-804)',
       expect(org.currentConsentTextId).toBe(demoId);
     });
 
+    it('D-69/M1: a version bump repoints a DB that still points at a superseded demo text (FU-DB-285)', async () => {
+      const priorId = ID.supersededDemoConsentTexts[0] ?? '';
+      expect(priorId).not.toBe('');
+      // Simulate an already-seeded demo DB on the prior demo version, current.
+      await appClient.consentText.upsert({
+        where: { id: priorId },
+        create: {
+          id: priorId,
+          orgId: ID.org,
+          version: '0.2-local-demo',
+          bodyMd:
+            'Prior demo consent (synthetic data, development only). Superseded by a later version.',
+          legalApprovedAt: new Date('2026-01-01T00:00:00.000Z'),
+          legalApprovedBy: 'local-demo (synthetic data, development only)',
+          createdById: ID.user('super-admin'),
+        },
+        update: {},
+      });
+      await appClient.organization.update({
+        where: { id: ID.org },
+        data: { currentConsentTextId: priorId },
+      });
+      const result = await applyApprovedDemoConsent(appClient, DEV);
+      expect(result.madeCurrent).toBe(true);
+      const org = await appClient.organization.findUniqueOrThrow({
+        where: { id: ID.org },
+        select: { currentConsentTextId: true },
+      });
+      expect(org.currentConsentTextId).toBe(demoId);
+    });
+
     it.each([
       ['staging', { APP_ENV: 'staging' }],
       ['pilot', { APP_ENV: 'pilot' }],
