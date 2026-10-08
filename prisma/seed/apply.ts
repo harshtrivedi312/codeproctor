@@ -337,6 +337,8 @@ export async function applyApprovedDemoConsent(
   const before = await client.consentText.count({
     where: { orgId: row.orgId, version: DEMO_APPROVED_CONSENT_VERSION },
   });
+  // update: {} keeps the re-run idempotent (the version is the natural key). So an edit to the body, title
+  // or approval marker only reaches an already-seeded local DB when DEMO_APPROVED_CONSENT_VERSION is bumped.
   await client.consentText.upsert({
     where: { orgId_version: { orgId: row.orgId, version: DEMO_APPROVED_CONSENT_VERSION } },
     create: row,
