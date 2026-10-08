@@ -107,7 +107,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 6. Decide whether a DPO is required (Art. 37). It is probably not, because monitoring is not the company's core activity (*verify*).
 7. Publish a privacy notice covering everything in the consent document (some of this can be shared with it).
 8. Before production: an independent legal review of this DPIA, the consent text and the retention schedule (C-15).
-9. Before the first real candidate (D-78, status.md R-23): either staff reach CodeProctor through the host application's sign-in with a second factor, or the compensating measures in R1 are live and counsel has said whether prior consultation under Art. 36 is needed. Two-factor stays optional inside CodeProctor (D-78).
+9. Before the first real candidate (D-78, status.md R-23): either staff reach CodeProctor through the host application's sign-in with a second factor, and CodeProctor's own password sign-in is disabled or unreachable for staff in that environment, or the compensating measures in R1 are live and counsel has said whether prior consultation under Art. 36 is needed. Two-factor stays optional inside CodeProctor (D-78).
 
 ## 7. Automated-decision and AI laws (C-14)
 
