@@ -1,6 +1,6 @@
 # Data protection impact assessment: CodeProctor pilot
 
-Status: **DRAFT v0.3 for owner approval** (C-03a, C-14; v0.3, 2026-10-08: staff two-factor sign-in is optional and recommended for every role after the owner's D-70, so R1 is re-rated). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-33). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
+Status: **DRAFT v0.3 for owner approval** (C-03a, C-14; v0.3, 2026-10-08: staff two-factor sign-in is optional and recommended for every role after the owner's D-70, so R1 is re-rated; compliance review fixes K1 and F2 applied, and D-78 recorded). Drafted 2026-10-05 by the Delivery Lead from the project documents (BRD, FSD, architecture, accepted ADRs 0001 to 0010, proposed ADRs 0011 to 0013, compliance decisions C-01 to C-33). Approver: Harsh Trivedi. **This DPIA has not had professional legal review (C-15, R-17).** Statements about laws are a first-pass reading for planning and need verification, especially the items marked *verify*.
 
 Approval of this DPIA is a pilot entry blocker for EU/UK candidates (C-03a; status.md B-05 item 5).
 
@@ -81,7 +81,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 
 | # | Risk | Likelihood / severity | Measures | Residual |
 | --- | --- | --- | --- | --- |
-| R1 | Unauthorised access to recordings or ID images (a breach, or misuse by insiders) | Possible / severe | Encryption at rest; private buckets; 15-minute playback URLs; two-factor recommended to reviewers but optional (D-70); org scoping; audit log of every access; least-privilege roles; incident response plan (DEP-02). With two-factor optional, a stolen reviewer or admin password alone opens recordings and ID images. Candidate compensating measures, not yet decided: an email to the account holder when two-factor is turned on, off or reset; requiring two-factor again before the pilot | Medium to high (raised from Medium by D-70; accepted by the owner, D-73) |
+| R1 | Unauthorised access to recordings or ID images (a breach, or misuse by insiders) | Possible / severe | Encryption at rest; private buckets; 15-minute playback URLs; org scoping; audit log of every access; least-privilege roles; lockout; incident response plan (DEP-02). **Two-factor sign-in is optional for every staff role, permanently (D-70, D-78), so a stolen or reused reviewer or admin password alone opens recordings and ID images.** The owner's reason (D-78): CodeProctor will be part of a host application that already uses two-factor sign-in through Azure Authenticator, so the second factor is expected to come from the host application's sign-in once that integration exists; it is not built today. Planned, not yet in place: an email to the account holder when two-factor is turned on, off or reset (D-76, #329); alerts on unusual access; a password re-check before issuing playback of ID images; breached-password checking | **High** for EU/UK and Illinois candidates (raised from Medium by D-70) until the host application's sign-in with a second factor, or an equivalent control, is in place; accepted by the owner (D-73, D-78) |
 | R2 | A false face mismatch, more often for some groups (lighting, skin tone, eye conditions, disability) | Likely / significant | Never auto-reject; manual comparison by a person; threshold tuned on a diverse volunteer set with a per-group breakdown (C-11, C-12); pilot exit review of error rates by group (D-05); fairness monitoring (C-13) | Medium |
 | R3 | False integrity flags (gaze, voice, pastes, AI-likeness), with disabled or neurodivergent candidates possibly affected more | Likely / significant | Flags are evidence only; trained reviewers; accommodations that turn detectors off; appeal; configurable thresholds and weights | Medium |
 | R4 | Recording of bystanders and the private home (household members, room contents, notifications on screen) | Likely / moderate | Tell candidates in advance to use a private space and close other apps; the room scan is the candidate's own action; access limited to reviewers; deletion after [N] days (default 90) | Medium |
@@ -107,6 +107,7 @@ Likelihood and severity are before the measures. Residual risk is after them.
 6. Decide whether a DPO is required (Art. 37). It is probably not, because monitoring is not the company's core activity (*verify*).
 7. Publish a privacy notice covering everything in the consent document (some of this can be shared with it).
 8. Before production: an independent legal review of this DPIA, the consent text and the retention schedule (C-15).
+9. Before the first real candidate (D-78, status.md R-23): either staff reach CodeProctor through the host application's sign-in with a second factor, or the compensating measures in R1 are live and counsel has said whether prior consultation under Art. 36 is needed. Two-factor stays optional inside CodeProctor (D-78).
 
 ## 7. Automated-decision and AI laws (C-14)
 
@@ -170,8 +171,8 @@ Art. 22 covers decisions based **solely** on automated processing. Because a per
 
 | Item | Value |
 | --- | --- |
-| Overall residual risk | Medium, acceptable for a pilot **if** OQ-9 and OQ-10 are decided, the processor agreements are in place, and the human-review evidence (R10) is collected |
-| Prior consultation with a supervisory authority (Art. 36) | Not needed if the residual risks above are accepted as medium or low. Revisit if R5 or R2 cannot be brought down |
+| Overall residual risk | Medium for the pilot **only if** OQ-9 and OQ-10 are decided, the processor agreements are in place, the human-review evidence (R10) is collected, **and R1 is brought down (the host application's sign-in with a second factor, or the compensating measures in R1, are live)**. While R1 is High, the overall residual risk is High for EU/UK candidates |
+| Prior consultation with a supervisory authority (Art. 36) | Not needed if the residual risks are accepted as medium or low. **While R1 is High and unmitigated, consider it before the first EU/UK candidate** (*verify* with counsel). Revisit if R5 or R2 cannot be brought down |
 | Review date | At the pilot exit review, and before production |
 | Approved by | Harsh Trivedi, product owner: ____________ date: ________ |
 
