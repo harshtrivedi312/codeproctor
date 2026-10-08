@@ -43,7 +43,7 @@ test.describe('FR-102 Security page', () => {
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(dialog.getByTestId('manual-key')).toBeVisible();
     await expect(dialog.getByAltText(/QR code/)).toBeVisible();
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await dialog.getByRole('button', { name: 'Skip for now' }).click();
     await expect(dialog).toBeHidden();
 
     // Still signed in after the failure: a reload restores the session and the page.
