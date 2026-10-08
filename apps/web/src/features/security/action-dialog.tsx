@@ -100,7 +100,7 @@ export function ActionDialog({
   onClose: () => void;
   onDone: (result: SecurityResult) => void;
 }): React.JSX.Element {
-  const { user, signOutRevoked, signOutAfterUnknownSetup } = useAuth();
+  const { user, signOutRevoked } = useAuth();
   // Who this dialog was opened by: sign-out and the re-read below only run for that same session.
   const [stamp] = React.useState(captureSessionStamp);
   const [stage, setStage] = React.useState<Stage>({ kind: 'password', passwordWrong: false });
@@ -133,7 +133,8 @@ export function ActionDialog({
         onClose();
         return 'ok';
       }
-      // The server revoked every session of this user, this one included: no refresh, no logout.
+      // The server revoked every session of this user, this one included: sign out normally (the
+      // logout call normally answers 401, which counts as confirmed), no refresh.
       await signOutRevoked('off');
       return 'ok';
     }
@@ -147,7 +148,7 @@ export function ActionDialog({
   /**
    * Set-up turned 2FA on, and the server revoked every refresh family of this user, this one
    * included. After the recovery codes were acknowledged (Done), forget the session here and go to
-   * sign-in: no refresh (it would 401) and no logout call. Never for another user's session.
+   * sign-in through the normal sign-out (one logout call, normally 401 = confirmed), no refresh. Never for another user's session.
    */
   async function finishSetup(): Promise<void> {
     // Only another person's session is not ours to end; the same user in a newer generation is.
@@ -186,7 +187,7 @@ export function ActionDialog({
       // the cookie is still valid. Sign out for real (logout call, pending marker if it fails).
       setPassword('');
       if (stamp.userId === getSessionUserId()) {
-        await signOutAfterUnknownSetup();
+        await signOutRevoked('unconfirmed');
         return 'failed';
       }
       // Another person's session now: do not end it. Hint to reload and check the current state.

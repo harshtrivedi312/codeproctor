@@ -426,7 +426,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
       body: JSON.stringify(body),
     });
 
-  it('FR-102: a successful disable signs out locally with no refresh and no logout call, clears the cache and the marker, and goes to login with the notice', async () => {
+  it('FR-102: a successful disable signs out with no refresh and one logout call, clears the cache and the marker, and goes to login with the notice', async () => {
     const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter, { twoFactorOn: true });
     const refreshBefore = calls.refresh;
@@ -434,7 +434,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
     expect(getAccessToken()).toBeNull();
     expect(getSessionUserId()).toBeNull();
-    expect(calls.logout).toBe(0);
+    expect(calls.logout).toBe(1);
     expect(calls.refresh).toBe(refreshBefore);
     // No stuck "could not confirm sign-out" state: nothing is pending, so no retry loop.
     expect(isSignOutPending()).toBe(false);
@@ -631,7 +631,7 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
     expect(tokens.length).toBeGreaterThan(0);
     expect(tokens.every((t) => t === null)).toBe(true);
     expect(calls.refresh).toBe(refreshBefore);
-    expect(calls.logout).toBe(0);
+    expect(calls.logout).toBe(1);
     // One staff call per cancelQueries call, each sent without a token.
     expect(usersCalls).toBe(tokens.length);
   });
@@ -925,7 +925,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(unload()).toBe(false);
   });
 
-  it('FR-102: Done after set-up signs out without a refresh or a logout call (the server revoked every session); the codes stay up until then', async () => {
+  it('FR-102: Done after set-up signs out with one logout call and no refresh (the server revoked every session); the codes stay up until then', async () => {
     const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter);
     const before = calls.refresh;
@@ -942,7 +942,29 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(getAccessToken()).toBeNull();
     expect(isSignOutPending()).toBe(false);
     expect(calls.refresh).toBe(before);
-    expect(calls.logout).toBe(0);
+    expect(calls.logout).toBe(1);
+  });
+
+  it('FR-102 FR-104: the logout after a confirmed set-up answers 401 (the family is already revoked): counted as confirmed, marker cleared, no retry offered', async () => {
+    let logouts = 0;
+    server.use(
+      http.post(`${base}/logout`, () => {
+        logouts += 1;
+        return HttpResponse.json({ status: 401 }, { status: 401 });
+      }),
+    );
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    await within(dialog()).findByTestId('recovery-codes');
+    await u.click(within(dialog()).getByRole('checkbox'));
+    await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(ENABLED_LOGIN));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(logouts).toBe(1);
+    expect(isSignOutPending()).toBe(false);
+    expect(getAccessToken()).toBeNull();
   });
 
   it.each([
