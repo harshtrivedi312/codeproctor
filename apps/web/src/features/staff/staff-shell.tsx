@@ -6,6 +6,7 @@ import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/features/auth/auth-provider';
 import { RequireRole } from '@/features/auth/require-role';
+import { TwoFactorNudge } from '@/features/security/two-factor-nudge';
 import { Breadcrumbs } from './breadcrumbs';
 import { Sidebar } from './sidebar';
 import { UserMenu } from './user-menu';
@@ -62,6 +63,7 @@ function ShellFrame({ children }: { children: React.ReactNode }): React.JSX.Elem
           </div>
         </header>
         <BusyNotice />
+        <TwoFactorNudge />
         <main id="main" className="p-4">
           <Breadcrumbs />
           {children}

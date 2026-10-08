@@ -39,7 +39,7 @@ const COPY: Record<SecurityAction, { title: string; description: string; submit:
   setup: {
     title: 'Set up two-factor sign-in',
     description:
-      'Enter your current password to continue. We ask again so that nobody else can change your sign-in on a computer you left unlocked.',
+      'This is optional, and we recommend it. Enter your current password to continue. We ask again so that nobody else can change your sign-in on a computer you left unlocked.',
     submit: 'Continue',
   },
   disable: {
@@ -63,10 +63,6 @@ const FAILURE_HINT: Record<
   busy: {
     title: 'Verification is temporarily unavailable',
     hint: 'The service is busy. Nothing was changed. Wait a few seconds, then submit again.',
-  },
-  role: {
-    title: 'Two-factor sign-in is required for your role',
-    hint: 'Super Admins and Reviewers cannot turn it off. If you lost your phone, use a recovery code or ask a Super Admin.',
   },
   conflict: {
     title: 'This changed in the meantime',
@@ -217,6 +213,7 @@ export function ActionDialog({
               failure={failure}
               onSubmit={onPassword}
               onCancel={onClose}
+              cancelLabel={action === 'setup' ? 'Skip for now' : 'Cancel'}
             />
           </>
         ) : null}
@@ -233,6 +230,7 @@ export function ActionDialog({
               failure={failure}
               onSubmit={onCode}
               onCancel={onClose}
+              cancelLabel={action === 'setup' ? 'Skip for now' : 'Cancel'}
             />
           </>
         ) : null}
@@ -279,6 +277,7 @@ function PasswordStep({
   failure,
   onSubmit,
   onCancel,
+  cancelLabel = 'Cancel',
 }: {
   submitLabel: string;
   destructive: boolean;
@@ -288,6 +287,7 @@ function PasswordStep({
   failure: Failure | null;
   onSubmit: (values: PasswordFormValues) => Promise<'wrong' | 'invalid' | 'failed' | 'ok'>;
   onCancel: () => void;
+  cancelLabel?: string;
 }): React.JSX.Element {
   const {
     register,
@@ -359,7 +359,7 @@ function PasswordStep({
       ) : null}
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button
           type="submit"
@@ -383,12 +383,14 @@ function ConfirmStep({
   failure,
   onSubmit,
   onCancel,
+  cancelLabel = 'Cancel',
 }: {
   manualKey: string;
   qr: string;
   failure: Failure | null;
   onSubmit: (values: CodeFormValues) => Promise<'ok' | 'wrongCode' | 'failed'>;
   onCancel: () => void;
+  cancelLabel?: string;
 }): React.JSX.Element {
   const [wrongCode, setWrongCode] = React.useState(false);
   const {
@@ -441,7 +443,7 @@ function ConfirmStep({
       </Field>
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button type="submit" disabled={isSubmitting}>
           {isSubmitting ? 'Checking…' : 'Confirm and turn on'}

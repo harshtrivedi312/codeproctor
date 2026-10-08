@@ -36,14 +36,19 @@ describe('LoginForm', () => {
     await waitFor(() => expect(router.push).toHaveBeenCalledWith('/admin/2fa?next=%2Fadmin'));
   });
 
-  it('TC-003 FR-102: reviewer without TOTP is sent to enrollment before any page', async () => {
-    renderWithAuth(<LoginForm />);
-    await signIn(MOCK_USERS.reviewer.email, MOCK_USERS.reviewer.password);
-    await waitFor(() =>
-      expect(router.push).toHaveBeenCalledWith('/admin/2fa/enroll?next=%2Fadmin'),
-    );
-    expect(router.replace).not.toHaveBeenCalledWith('/admin');
-  });
+  it.each([
+    ['reviewer', MOCK_USERS.reviewer],
+    ['recruiter', MOCK_USERS.recruiter],
+    ['author', MOCK_USERS.author],
+  ])(
+    'TC-003 FR-102: a %s without TOTP signs in with a password alone, no enrolment step',
+    async (_name, user) => {
+      renderWithAuth(<LoginForm />);
+      await signIn(user.email, user.password);
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/admin'));
+      expect(router.push).not.toHaveBeenCalled();
+    },
+  );
 
   it('FR-101: wrong password shows the neutral failed-sign-in message and stays on the page', async () => {
     renderWithAuth(<LoginForm />);

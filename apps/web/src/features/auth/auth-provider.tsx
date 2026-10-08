@@ -31,7 +31,7 @@ export type StaffRole = Schemas['StaffRole'];
 
 /** Second login step waiting for a code. Held in memory only; a page reload starts again at login. */
 export interface PendingChallenge {
-  kind: 'verify' | 'enroll';
+  kind: 'verify';
   challengeToken: string;
 }
 
@@ -64,14 +64,8 @@ interface AuthContextValue {
   /** The silent refresh got 503 BUSY and gave up: nobody was signed out; offer a manual retry. */
   refreshBusy: boolean;
   retryRefresh: () => void;
-  /**
-   * The server just set this user's refresh cookie but the session is not published yet (forced
-   * enrollment: the recovery codes are still on screen). Clears the sign-out marker and tells
-   * other tabs now, so no tab retries a logout with the new cookie. Does not sign in.
-   */
-  announceSession: (userId: string) => void;
   setPending: (pending: PendingChallenge | null) => void;
-  /** Called after a successful login, 2FA verify or enrollment. */
+  /** Called after a successful login or 2FA verify. */
   signIn: (session: AuthSession) => void;
   signOut: () => Promise<void>;
 }
@@ -258,12 +252,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     }
   }, [router, confirmLogout, queryClient]);
 
-  const announceSession = React.useCallback((userId: string) => {
-    unconfirmedGen.current = null;
-    setSignOutUnconfirmed(false);
-    beginSession(userId);
-  }, []);
-
   const signOutRevoked = React.useCallback(async () => {
     setSignedOutByUser(true);
     setLoginPath(TWO_FACTOR_OFF_LOGIN_PATH);
@@ -296,7 +284,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       signOutRevoked,
       refreshBusy,
       retryRefresh,
-      announceSession,
       setPending,
       signIn,
       signOut,
@@ -312,7 +299,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       signOutRevoked,
       refreshBusy,
       retryRefresh,
-      announceSession,
       signIn,
       signOut,
     ],

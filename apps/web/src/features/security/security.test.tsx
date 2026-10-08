@@ -6,7 +6,6 @@ import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '@/features/auth/auth-provider';
 import { LoginForm } from '@/features/auth/login-form';
-import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
 import { UserMenu } from '@/features/staff/user-menu';
 import { api } from '@/lib/api/client';
 import {
@@ -29,7 +28,7 @@ import { server } from '@/mocks/server';
 import { renderAsStaff, renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
 import { SecurityPage } from './security-page';
-import { isTwoFactorMandatory, reauthBodySchema, setupConfirmBodySchema } from './schemas';
+import { reauthBodySchema, setupConfirmBodySchema } from './schemas';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 vi.mock('qrcode', () => ({
@@ -100,10 +99,6 @@ describe('web-local schemas (FR-102)', () => {
     expect(setupConfirmBodySchema.safeParse({ currentPassword: 'x', code: '123456' }).success).toBe(
       true,
     );
-    expect(isTwoFactorMandatory('SUPER_ADMIN')).toBe(true);
-    expect(isTwoFactorMandatory('REVIEWER')).toBe(true);
-    expect(isTwoFactorMandatory('RECRUITER')).toBe(false);
-    expect(isTwoFactorMandatory('AUTHOR')).toBe(false);
   });
 });
 
@@ -143,7 +138,7 @@ describe('Security page: wrong password (FR-102, FU-BE-39)', () => {
     const u = await pageAs(MOCK_USERS.recruiter);
     await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
     await u.type(passwordField(), 'half-typed-secret');
-    await u.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+    await u.click(within(dialog()).getByRole('button', { name: 'Skip for now' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
     expect(passwordField()).toHaveValue('');
@@ -220,13 +215,23 @@ describe('Security page: set up, disable, regenerate (FR-102)', () => {
   it.each([
     ['SUPER_ADMIN', MOCK_USERS.admin],
     ['REVIEWER', MOCK_USERS.reviewer],
-  ])('FR-102: Disable 2FA is hidden for %s and the page explains why', async (_role, user) => {
-    await pageAs(user, { twoFactorOn: true });
-    expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
-    expect(screen.getByTestId('two-factor-required')).toHaveTextContent(
-      'Two-factor sign-in is required for your role',
-    );
+  ])(
+    'FR-102: Disable 2FA is offered to %s, and turning it off signs out everywhere',
+    async (_role, user) => {
+      const u = await pageAs(user, { twoFactorOn: true });
+      expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Disable 2FA' })).toBeVisible();
+      expect(screen.queryByTestId('two-factor-required')).not.toBeInTheDocument();
+      await openAndSubmit(u, 'Disable 2FA', user.password);
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+      expect(getAccessToken()).toBeNull();
+    },
+  );
+
+  it('FR-102: the Security page recommends turning 2FA on while it is off, for any role', async () => {
+    await pageAs(MOCK_USERS.reviewer);
+    expect(screen.getByTestId('two-factor-status')).toHaveTextContent('we recommend it');
+    expect(screen.getByRole('button', { name: 'Set up 2FA' })).toBeVisible();
   });
 
   it('FR-102: regenerating shows new codes once and the old codes stop working', async () => {
@@ -365,7 +370,7 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     ).toBe(403);
   });
 
-  it('FR-102: disable as SUPER_ADMIN or REVIEWER with the right password is 403 TWO_FACTOR_REQUIRED_FOR_ROLE; a wrong password is REAUTH_FAILED first', async () => {
+  it('FR-102: disable as SUPER_ADMIN or REVIEWER with the right password and code is 204; a wrong password is REAUTH_FAILED first', async () => {
     for (const user of [MOCK_USERS.admin, MOCK_USERS.reviewer]) {
       resetAuthTestState();
       await pageAs(user, { twoFactorOn: true });
@@ -375,11 +380,7 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
         currentPassword: user.password,
         totpCode: '123456',
       });
-      expect(right.status).toBe(403);
-      expect(await right.json()).toMatchObject({
-        detail: 'Two-factor authentication is required for your role.',
-        code: 'TWO_FACTOR_REQUIRED_FOR_ROLE',
-      });
+      expect(right.status).toBe(204);
       document.body.innerHTML = '';
     }
   });
@@ -391,26 +392,6 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     expect((await post('2fa/recovery-codes/regenerate', pw)).status).toBe(409);
   });
 
-  it('FR-102: the dialog shows a clear role message for 403 TWO_FACTOR_REQUIRED_FOR_ROLE and stays signed in', async () => {
-    const calls = watchSessionCalls();
-    server.use(
-      http.post(`${base}/2fa/disable`, () =>
-        HttpResponse.json(
-          { status: 403, detail: 'x', code: 'TWO_FACTOR_REQUIRED_FOR_ROLE' },
-          { status: 403 },
-        ),
-      ),
-    );
-    const u = await pageAs(MOCK_USERS.author, { twoFactorOn: true });
-    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.author.password);
-    expect(
-      await within(dialog()).findByText('Two-factor sign-in is required for your role'),
-    ).toBeInTheDocument();
-    expect(within(dialog()).queryByText('Password incorrect')).not.toBeInTheDocument();
-    expect(calls.logout).toBe(0);
-    expect(getAccessToken()).not.toBeNull();
-  });
-
   it('FR-102: a 400 on the password step shows a field message, a 409 a state-conflict message', async () => {
     server.use(
       http.post(`${base}/2fa/setup/start`, () =>
@@ -420,7 +401,7 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     const u = await pageAs(MOCK_USERS.recruiter);
     await openAndSubmit(u, 'Set up 2FA', 'anything');
     expect(await within(dialog()).findByText('Enter your current password.')).toBeInTheDocument();
-    await u.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+    await u.click(within(dialog()).getByRole('button', { name: 'Skip for now' }));
 
     server.use(
       http.post(`${base}/2fa/setup/start`, () =>
@@ -571,7 +552,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     expect(router.replace).not.toHaveBeenCalled();
   });
 
-  it('FR-102: the mock checks in order password, 409 if off, code, role; a replayed code is REAUTH_FAILED', async () => {
+  it('FR-102: the mock checks in order password, 409 if off, code; a replayed code is REAUTH_FAILED', async () => {
     await pageAs(MOCK_USERS.admin, { twoFactorOn: true });
     const pw = MOCK_USERS.admin.password;
     // Wrong password first, even with a valid code.
@@ -582,7 +563,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
         }
       ).code,
     ).toBe('REAUTH_FAILED');
-    // Wrong code before the role refusal.
+    // Wrong code is refused.
     expect(
       (
         (await (await disable({ currentPassword: pw, totpCode: '000000' })).json()) as {
@@ -590,14 +571,10 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
         }
       ).code,
     ).toBe('REAUTH_FAILED');
-    // Right password and code: now the role refusal.
-    const role = await disable({ currentPassword: pw, totpCode: ' 123456 ' });
-    expect(role.status).toBe(403);
-    expect(((await role.json()) as { code: string }).code).toBe('TWO_FACTOR_REQUIRED_FOR_ROLE');
-    // The same code again is a replay.
-    const replay = await disable({ currentPassword: pw, totpCode: '123456' });
-    expect(replay.status).toBe(403);
-    expect(((await replay.json()) as { code: string }).code).toBe('REAUTH_FAILED');
+    // Right password and code: allowed for every role (2FA is optional).
+    expect((await disable({ currentPassword: pw, totpCode: ' 123456 ' })).status).toBe(204);
+    // 2FA is off now: a second call is a 409.
+    expect((await disable({ currentPassword: pw, totpCode: '123456' })).status).toBe(409);
   });
 
   it('FR-102: wrong codes and wrong passwords share one lockout with login', async () => {
@@ -694,6 +671,7 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
             role: 'AUTHOR',
             orgName: 'x',
             totpEnabled: false,
+            twoFactorRecommended: true,
           },
         });
         return new HttpResponse(null, { status: 204 });
@@ -1093,7 +1071,7 @@ describe('Security page: 401 replay is for the same user only (FR-102, FR-103, T
   });
 });
 
-describe('Security page: entry point, forced enrollment, accessibility', () => {
+describe('Security page: entry point, optional set-up, accessibility', () => {
   it.each(Object.values(MOCK_USERS))(
     'FR-102: the user menu links every staff role ($role) to /admin/security',
     async (user) => {
@@ -1107,33 +1085,14 @@ describe('Security page: entry point, forced enrollment, accessibility', () => {
     },
   );
 
-  it('FR-102: forced enrollment is unchanged and asks for no password', async () => {
-    const bodies: string[] = [];
-    server.events.on('request:start', ({ request }) => {
-      if (new URL(request.url).pathname.includes('/2fa/enroll/')) {
-        void request
-          .clone()
-          .text()
-          .then((t) => bodies.push(t));
-      }
-    });
-    renderWithAuth(
-      <>
-        <LoginForm />
-        <TwoFactorEnroll />
-      </>,
-    );
-    const u = userEvent.setup();
-    await u.type(screen.getAllByLabelText('Work email')[0]!, MOCK_USERS.reviewer.email);
-    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
-    await u.click(screen.getByRole('button', { name: 'Sign in' }));
-    await screen.findByTestId('manual-key');
-    expect(screen.queryByLabelText('Current password')).not.toBeInTheDocument();
-    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    expect(await screen.findByTestId('recovery-codes')).toBeInTheDocument();
-    await waitFor(() => expect(bodies.length).toBeGreaterThanOrEqual(2));
-    expect(bodies.join('')).not.toContain('currentPassword');
+  it('FR-102: the Skip for now button on the set-up screen closes it and returns to the page', async () => {
+    const u = await pageAs(MOCK_USERS.reviewer);
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    expect(within(dialog()).queryByText(/Your role requires/)).not.toBeInTheDocument();
+    await u.click(within(dialog()).getByRole('button', { name: 'Skip for now' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set up 2FA' })).toBeVisible();
+    expect(getAccessToken()).not.toBeNull();
   });
 
   it('FR-102: axe finds no violations on the page or on the open dialog', async () => {

@@ -123,40 +123,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/auth/2fa/enroll/start': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Begin forced TOTP enrollment (FR-102). Needs the challenge token from login. */
-    post: operations['startTwoFactorEnrollment'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/enroll/confirm': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Confirm enrollment with a first code; returns the one-time recovery codes (ADR 0003 section 1) */
-    post: operations['confirmTwoFactorEnrollment'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/auth/2fa/setup/start': {
     parameters: {
       query?: never;
@@ -965,6 +931,7 @@ export interface components {
       role: components['schemas']['StaffRole'];
       orgName: string;
       totpEnabled: boolean;
+      twoFactorRecommended: boolean;
     };
     AuthSession: {
       accessToken: string;
@@ -975,7 +942,7 @@ export interface components {
     };
     LoginResult: {
       /** @enum {string} */
-      status: 'authenticated' | 'two_factor_required' | 'two_factor_enrollment_required';
+      status: 'authenticated' | 'two_factor_required';
       session?: components['schemas']['AuthSession'];
       challengeToken?: string;
     };
@@ -2107,90 +2074,6 @@ export interface operations {
         };
       };
       /** @description Sign-in failed. One generic answer for a wrong password, an unknown email and a locked account (15 minutes after 5 failed attempts, FR-101); the API never reveals which. */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  startTwoFactorEnrollment: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['ChallengeRequest'];
-      };
-    };
-    responses: {
-      /** @description Secret and otpauth URI for the QR code */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            manualKey: string;
-            otpauthUri: string;
-          };
-        };
-      };
-      /** @description The challenge is stale or unknown. detail is "Your sign-in has expired. Sign in again." */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  confirmTwoFactorEnrollment: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          challengeToken: string;
-          code: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Enrolled and signed in */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            session: components['schemas']['AuthSession'];
-            recoveryCodes: string[];
-          };
-        };
-      };
-      /** @description Wrong code */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      /** @description Challenge expired, sign in again */
       401: {
         headers: {
           [name: string]: unknown;

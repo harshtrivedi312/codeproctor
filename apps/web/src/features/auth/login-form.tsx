@@ -23,7 +23,7 @@ type Banner = { kind: 'failed' } | { kind: 'network' } | { kind: 'busy' } | null
 export const SIGN_IN_FAILED_MESSAGE =
   'Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator.';
 
-/** FR-101 login form. TOTP (FR-102) and enrollment are separate screens reached from the result. */
+/** FR-101 login form. TOTP (FR-102) is a separate screen reached from the result. */
 export function LoginForm(): React.JSX.Element {
   const router = useRouter();
   const params = useSearchParams();
@@ -67,11 +67,8 @@ export function LoginForm(): React.JSX.Element {
         signIn(data.session);
         router.replace(next);
       } else if (data.challengeToken) {
-        const kind = data.status === 'two_factor_enrollment_required' ? 'enroll' : 'verify';
-        setPending({ kind, challengeToken: data.challengeToken });
-        router.push(
-          `${kind === 'enroll' ? '/admin/2fa/enroll' : '/admin/2fa'}?next=${encodeURIComponent(next)}`,
-        );
+        setPending({ kind: 'verify', challengeToken: data.challengeToken });
+        router.push(`/admin/2fa?next=${encodeURIComponent(next)}`);
       } else {
         setBanner({ kind: 'network' });
       }
