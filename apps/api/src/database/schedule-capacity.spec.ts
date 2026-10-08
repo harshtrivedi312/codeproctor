@@ -1,5 +1,6 @@
 import { OrgScopeViolationError } from './errors';
 import { SYSTEM_SCOPE_REASONS } from './org-context';
+import { NESTED_WRITE_ALLOWLIST } from './org-scope-nested';
 import { FK_CLASSES } from './org-scope-relations';
 import {
   SCHEDULE_BACK_RELATIONS,
@@ -350,6 +351,30 @@ describe('the SCHEDULE_CAPACITY system read of scheduled_windows (ADR 0017 4.7, 
       let tooDeep: Record<string, unknown> = { id: true };
       for (let hop = 0; hop < 120; hop += 1) tooDeep = { select: { invitation: tooDeep } };
       expect(check('findMany', tooDeep, 'BACKGROUND_JOB', 'Invitation')).toThrow(/nested too deep/);
+    });
+
+    it.each([
+      ['an empty select', { select: { _count: { select: {} } } }],
+      ['only false', { select: { _count: { select: { sessions: false } } } }],
+      ['a $-prefixed key', { select: { _count: { select: { $scalars: true } } } }],
+      ['a select that is an array', { select: { _count: { select: [] } } }],
+    ])(
+      'TC-008 S1 (round 3): a _count with %s does not name its relations and is refused',
+      (_what, args) => {
+        expect(check('findMany', args, 'BACKGROUND_JOB', 'Invitation')).toThrow(
+          /counts every relation/,
+        );
+      },
+    );
+
+    it('TC-008 N1 (round 3): no foreign key points INTO scheduled_windows today; a new one must extend the pinned set', () => {
+      expect(FK_CLASSES.filter((key) => key.target === 'ScheduledWindow')).toEqual([]);
+    });
+
+    it('TC-008 N5 (round 3): the nested-write allowlist names none of the relations to scheduled_windows (the write payloads are not walked)', () => {
+      for (const allowance of NESTED_WRITE_ALLOWLIST) {
+        expect(SCHEDULE_BACK_RELATIONS).not.toContain(allowance.field);
+      }
     });
 
     it('TC-008 S-a the set holds every relation of a foreign key from or into scheduled_windows', () => {

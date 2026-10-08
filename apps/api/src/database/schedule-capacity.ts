@@ -17,7 +17,7 @@
 import { OrgScopeViolationError } from './errors';
 import { deepFreeze } from './deep-freeze';
 import { FK_CLASSES } from './org-scope-relations';
-import { isFieldRef, isPlainPrototype } from './plain-args';
+import { isFieldRef, isPlainPrototype, ownValue } from './plain-args';
 
 /** The only columns a SCHEDULE_CAPACITY read may name (ADR 0017 section 4.7). */
 export const SCHEDULE_CAPACITY_COLUMNS: readonly string[] = deepFreeze([
@@ -179,6 +179,23 @@ const COUNT_ALL =
   '_count without an explicit select (it counts every relation, scheduled_windows included)';
 
 /**
+ * A `_count` that names its relations (S1 of the #261 round-3 review): a plain object whose own `select` is a plain
+ * object with at least one relation set to `true` or to plain-object args, and no `$`-prefixed key. `{ select: {} }`,
+ * `{ select: { x: false } }` and `{ select: { $scalars: true } }` end in a Prisma error today, which is a Prisma detail
+ * and not a promise (as #185 S2 found for `select`), so they are refused here as counting every relation.
+ */
+function isExplicitCount(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const select = ownValue(value, 'select');
+  if (!isObject(select)) return false;
+  const entries = Object.entries(select);
+  if (entries.some(([key]) => key.startsWith('$'))) return false;
+  return entries.some(
+    ([, v]) => v === true || (isObject(v) && isPlainPrototype(Object.getPrototypeOf(v))),
+  );
+}
+
+/**
  * The first relation to scheduled_windows that `value` reaches, anywhere in it (objects and arrays): a key named like
  * one, or a `_count` under a select or include that has no explicit `select` object (`_count: true`, `{}`,
  * `{ select: null }`), which counts every list relation of its model. Past RELATION_WALK_DEPTH it throws.
@@ -206,13 +223,7 @@ function findRelationKey(
     if (depth === 0 && WRITE_PAYLOADS.has(key)) continue;
     if (SCHEDULE_BACK_RELATIONS.includes(key)) return key;
     if (key === '_count' && (parentKey === 'select' || parentKey === 'include')) {
-      const explicit =
-        typeof inner === 'object' &&
-        inner !== null &&
-        !Array.isArray(inner) &&
-        typeof (inner as { select?: unknown }).select === 'object' &&
-        (inner as { select?: unknown }).select !== null;
-      if (!explicit) return COUNT_ALL;
+      if (!isExplicitCount(inner)) return COUNT_ALL;
     }
     const found = findRelationKey(operation, inner, depth + 1, key);
     if (found !== undefined) return found;

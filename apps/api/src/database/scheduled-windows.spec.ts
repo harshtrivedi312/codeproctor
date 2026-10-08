@@ -419,7 +419,7 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
   });
 
   it('TC-008 B1 (#261 review): no system query reaches scheduled_windows through a relation, before any statement', async () => {
-    const routes: Array<[string, () => Promise<unknown>]> = [
+    const routes: Array<[string, () => Promise<unknown>, RegExp?]> = [
       [
         'an include from Invitation (BACKGROUND_JOB)',
         () =>
@@ -470,6 +470,7 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
           orgContext.runSystem('BACKGROUND_JOB', () =>
             client.organization.findMany({ select: { id: true, _count: true } }),
           ),
+        /counts every relation/,
       ],
       [
         'select _count: true from User (AUTH_BOOTSTRAP, B1a)',
@@ -477,6 +478,7 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
           orgContext.runSystem('AUTH_BOOTSTRAP', () =>
             client.user.findMany({ select: { id: true, orgId: true, _count: true } }),
           ),
+        /counts every relation/,
       ],
       [
         'include _count: true two levels down from Session (RETENTION_ERASURE, B1a)',
@@ -484,19 +486,34 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
           orgContext.runSystem('RETENTION_ERASURE', () =>
             client.session.findMany({ include: { invitation: { include: { _count: true } } } }),
           ),
+        /counts every relation/,
+      ],
+      [
+        'omit _count false from Organization (BACKGROUND_JOB; closed for every scope by #314)',
+        () =>
+          orgContext.runSystem('BACKGROUND_JOB', () =>
+            client.organization.findMany({ omit: { _count: false } } as never),
+          ),
+        /omit may not name _count/,
       ],
     ];
-    for (const [what, run] of routes) {
+    for (const [what, run, expected = /leads to scheduled_windows/] of routes) {
       const before = await statementCount();
       const error = await failure(run());
       expect({
         what,
-        refused:
-          error instanceof OrgScopeViolationError &&
-          /leads to scheduled_windows|counts every relation/.test(error.message),
+        refused: error instanceof OrgScopeViolationError && expected.test(error.message),
       }).toEqual({ what, refused: true });
       expect({ what, statements: await statementCount() }).toEqual({ what, statements: before });
     }
+  });
+
+  it('TC-008 N3 (round 3): an explicit _count of another relation still runs in system scope, and counts only that relation', async () => {
+    const rows = await orgContext.runSystem('BACKGROUND_JOB', () =>
+      client.invitation.findMany({ select: { _count: { select: { sessions: true } } } }),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(Object.keys(row._count)).toEqual(['sessions']);
   });
 
   it('TC-008 S1 (#261 review): raw SQL is refused under SCHEDULE_CAPACITY, even inside runRawSql', async () => {
