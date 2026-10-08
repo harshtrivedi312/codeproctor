@@ -57,15 +57,23 @@
 //   - has a prototype other than Object.prototype or null (an array: other than Array.prototype), the
 //     data rows included: Prisma hands the hook its own clone, so a DTO arrives here as a plain object;
 //   - has an own symbol key (the brand among them), an own non-enumerable key, an own accessor (a getter
-//     or a setter), or (an array) an own key that is not an index.
+//     or a setter), or (an array) an own key that is not an index;
+//   - has an own `__prismaRawParameters__` key or an own function value. Prisma's value serializer acts on
+//     both before it reads the rest of the object: it sends `values` to the engine raw for the first, and
+//     serialises `toJSON()` in the object's place for the second. Either would drop the org filter the scope
+//     spreads in as sibling keys, or carry a field reference past the CANDIDATE refusal (FU-DB-281 review B1).
+//     `__prismaRawParameters__` can come from a request body; a function needs in-process code. No column is
+//     named `__prismaRawParameters__`, and a function is never a valid query argument.
 // A Date, a byte array, a Decimal, a field reference and the Json null sentinels are values and are skipped
-// only when they are the real thing (an exact shape and prototype, no extra own key, not a Proxy); anything
-// else that looks like one is walked as structure, so it is refused. A value goes only where a value goes (a
-// filter operand, a cursor value, a column value): one where a query object is expected (the value of any
-// argument key, a where under AND, OR, NOT or a relation filter, a data row, the select, include, omit, where,
-// orderBy, cursor, having or an aggregate of a relation's args) is refused, so its own keys never become
-// structure. The arrays one level below a column (a scalar list, a Json array) get the prototype, Proxy and
-// symbol checks; their elements are values.
+// only when they are the real thing (the right prototype, no foreign own key, not a Proxy; a byte array's own
+// string indices are not listed, an O(length) cost, so the walk, not this skip, is what stops a hostile own
+// `slice`); anything else that looks like one is walked as structure, so it is refused. A value goes only where
+// a value goes (a filter operand, a cursor value, a column value): one where a query object is expected is
+// refused, so its own keys never become structure. That is the value of any argument key, a where (under AND,
+// OR, NOT or a relation filter), a data row, a key that holds a query object (QUERY_OBJECT_KEYS), and every
+// entry in the body of a select, include or omit (a relation field is true/false or nested args). The arrays
+// one level below a column (a scalar list, a Json array) get the prototype, Proxy and symbol checks; their
+// elements are values.
 import { types } from 'node:util';
 import { Prisma } from '../generated/prisma/client.js';
 import { deepFreeze } from './deep-freeze';
@@ -320,6 +328,16 @@ const QUERY_OBJECT_KEYS: ReadonlySet<string> = new Set([
 const VALUE_WHERE_OBJECT =
   'a value (a Date, bytes, a Decimal, a field reference or a Json null) where a query object is expected';
 
+/** Prisma's serializer sends `values` to the engine raw when an own property of this name is `true` (`$c`/`us`). */
+const RAW_PARAMETERS_KEY = '__prismaRawParameters__';
+
+/**
+ * The keys whose value is the BODY of a selection: `{ relationField: true | <args> }`. Inside one, no entry's value is
+ * ever a value object (a relation field is `true`, `false` or a nested args object), so one there is refused. A
+ * relation's own args (its `where`, `cursor`, ...) are walked with this off again, so their value operands pass.
+ */
+const SELECTION_BODY_KEYS: ReadonlySet<string> = new Set(['select', 'include', 'omit']);
+
 /** A canonical array index ('0', '1', ... but not '01' or '-1'), below 2^32 - 1. */
 function isArrayIndex(key: string): boolean {
   if (!/^(?:0|[1-9]\d*)$/.test(key)) return false;
@@ -355,8 +373,27 @@ function checkOwnKeys(
     if (descriptor.enumerable !== true) {
       throw refusal(model, operation, place, 'a non-enumerable key');
     }
-    if (array && !isArrayIndex(key)) {
-      throw refusal(model, operation, place, 'an array with a key that is not an index');
+    if (array) {
+      if (!isArrayIndex(key)) {
+        throw refusal(model, operation, place, 'an array with a key that is not an index');
+      }
+      continue;
+    }
+    // Prisma's value serializer acts on two own keys before it reads the rest of the object: `__prismaRawParameters__`
+    // (`$c`), for which it sends `values` to the engine raw, and any `toJSON` (`Lc`), whose return it serializes in the
+    // object's place. Either would drop the org filter the scope spreads in as sibling keys (org-scope-args.ts), or
+    // carry a field reference past the CANDIDATE refusal. A function value is never a legitimate query argument (Prisma
+    // rejects one anyway), and no column is named `__prismaRawParameters__`.
+    if (key === RAW_PARAMETERS_KEY) {
+      throw refusal(
+        model,
+        operation,
+        place,
+        `an own "${RAW_PARAMETERS_KEY}" key (a Prisma raw-parameter marker)`,
+      );
+    }
+    if (typeof descriptor.value === 'function') {
+      throw refusal(model, operation, place, 'a function value');
     }
   }
 }
@@ -410,6 +447,7 @@ function walkStructure(
   value: unknown,
   place: string,
   depth: number,
+  selectionBody: boolean,
 ): void {
   if (typeof value !== 'object' || value === null || isValueObject(value)) return;
   if (depth > MAX_STRUCTURE_DEPTH) {
@@ -422,20 +460,19 @@ function walkStructure(
   }
   if (Array.isArray(value)) {
     checkArray(model, operation, value, place, true);
-    for (const item of value) walkStructure(model, operation, item, place, depth + 1);
+    for (const item of value) walkStructure(model, operation, item, place, depth + 1, false);
     return;
   }
   checkObject(model, operation, value, place);
   for (const [key, inner] of Object.entries(value) as Array<[string, unknown]>) {
-    if (
-      QUERY_OBJECT_KEYS.has(key) &&
-      typeof inner === 'object' &&
-      inner !== null &&
-      isValueObject(inner)
-    ) {
-      throw refusal(model, operation, place, VALUE_WHERE_OBJECT);
+    if (typeof inner === 'object' && inner !== null && isValueObject(inner)) {
+      // A value object goes only where a value goes. At a key that holds a query object, and anywhere in the body of a
+      // select or include (a relation field is true/false or nested args), it is refused rather than skipped.
+      if (selectionBody || QUERY_OBJECT_KEYS.has(key)) {
+        throw refusal(model, operation, place, VALUE_WHERE_OBJECT);
+      }
     }
-    walkStructure(model, operation, inner, place, depth + 1);
+    walkStructure(model, operation, inner, place, depth + 1, SELECTION_BODY_KEYS.has(key));
   }
 }
 
@@ -449,13 +486,13 @@ function walkJsonFilter(
 ): void {
   if (typeof filter !== 'object' || filter === null || isValueObject(filter)) return;
   if (Array.isArray(filter)) {
-    walkStructure(model, operation, filter, place, depth);
+    walkStructure(model, operation, filter, place, depth, false);
     return;
   }
   checkObject(model, operation, filter, place);
   for (const [operator, operand] of Object.entries(filter)) {
     if (JSON_VALUE_OPERATORS.has(operator)) continue; // a JSON document (or a field reference): a value
-    walkStructure(model, operation, operand, place, depth + 1);
+    walkStructure(model, operation, operand, place, depth + 1, false);
   }
 }
 
@@ -496,7 +533,7 @@ function walkWhere(
     } else if (owner !== undefined && relationOf(owner, key) !== undefined) {
       walkWhere(model, operation, inner, place, depth + 1, relationOf(owner, key)?.target);
     } else {
-      walkStructure(model, operation, inner, place, depth + 1);
+      walkStructure(model, operation, inner, place, depth + 1, false);
     }
   }
 }
@@ -537,6 +574,6 @@ export function assertPlainArgs(model: string, operation: string, args: unknown)
     }
     if ((WRITE_KEYS as readonly string[]).includes(key)) walkData(model, operation, value, key);
     else if (key === 'where' || key === 'having') walkWhere(model, operation, value, key, 0, owner);
-    else walkStructure(model, operation, value, key, 0);
+    else walkStructure(model, operation, value, key, 0, SELECTION_BODY_KEYS.has(key));
   }
 }
