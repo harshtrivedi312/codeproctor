@@ -16,13 +16,12 @@ import { Prisma } from '../generated/prisma/client.js';
 import { isIP } from 'node:net';
 import { CodedHttpException } from '../common/coded.exception';
 import type { CandidateProblemCode } from '../common/coded.exception';
-import { isSharedEnv } from '../config/env';
 import type { Env } from '../config/env';
 import { PrismaService } from '../database/prisma.service';
 import { CandidateScope } from './candidate-scope';
 import { SessionStateService } from '../session/session-state.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
-import { isDemoConsentText } from './demo-consent';
+import { isDemoTextRefused } from './demo-consent';
 import { declineContactOf } from './candidate-auth.service';
 import type { RequestInfo } from './candidate-auth.service';
 import type { CandidateContext } from './candidate.types';
@@ -85,11 +84,8 @@ export class ConsentService {
    * same fixed answer as an unapproved text, with no hint of why.
    */
   private refuseDemoInSharedEnv(text: { version: string; legalApprovedBy: string | null }): void {
-    const shared = isSharedEnv({
-      APP_ENV: this.config.get('APP_ENV', { infer: true }),
-      NODE_ENV: this.config.get('NODE_ENV', { infer: true }),
-    });
-    if (shared && isDemoConsentText(text)) {
+    if (isDemoTextRefused(this.config, text)) {
+      this.logger.warn('Demo consent text refused in a shared environment');
       throw coded(
         HttpStatus.CONFLICT,
         'The consent document has not been approved yet.',

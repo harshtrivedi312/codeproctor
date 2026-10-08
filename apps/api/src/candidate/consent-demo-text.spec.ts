@@ -41,7 +41,7 @@ const REAL: TextRow = {
 function service(
   appEnv: string,
   row: TextRow,
-  options: { signedAt?: Date | null; nodeEnv?: string } = {},
+  options: { signedAt?: Date | null; nodeEnv?: string; requireApproval?: boolean } = {},
 ): ConsentService {
   const prisma = {
     client: {
@@ -62,7 +62,7 @@ function service(
   const values: Record<string, unknown> = {
     APP_ENV: appEnv,
     NODE_ENV: options.nodeEnv ?? 'production',
-    REQUIRE_LEGAL_APPROVED_CONSENT: false,
+    REQUIRE_LEGAL_APPROVED_CONSENT: options.requireApproval ?? false,
   };
   const config = { get: (k: string) => values[k] } as unknown as ConfigService<Env, true>;
   return new ConsentService(
@@ -96,7 +96,7 @@ const sign = (svc: ConsentService, textId: string): Promise<unknown> =>
   );
 
 describe('Demo consent text in shared environments (FR-401, C-07, compliance K2/F6)', () => {
-  it('FR-401: the marker is the version suffix -local-demo or an approver starting local-demo', () => {
+  it('FR-401, K2/F6: the marker is the version suffix -local-demo or an approver starting local-demo', () => {
     expect(isDemoConsentText({ version: '0.2-local-demo', legalApprovedBy: null })).toBe(true);
     expect(isDemoConsentText({ version: '1.0', legalApprovedBy: 'local-demo (x)' })).toBe(true);
     expect(isDemoConsentText({ version: '1.0', legalApprovedBy: 'Counsel, Example LLP' })).toBe(
@@ -126,11 +126,22 @@ describe('Demo consent text in shared environments (FR-401, C-07, compliance K2/
     },
   );
 
-  it('FR-401, C-07: an unset or misspelled APP_ENV counts as shared (allowlist), NODE_ENV production always does', async () => {
+  it('FR-401, C-07, K2/F6: a misspelled APP_ENV counts as shared (allowlist), and NODE_ENV production always does', async () => {
     expect(await codeOf(service('prod', DEMO).get(ctx))).toBe('CONSENT_NOT_APPROVED');
     expect(await codeOf(service('development', DEMO, { nodeEnv: 'production' }).get(ctx))).toBe(
       'CONSENT_NOT_APPROVED',
     );
+  });
+
+  it('FR-401, C-07, K2/F6: with approval required (pilot and production) the demo marker, not the approval gate, refuses an approved demo text', async () => {
+    expect(await codeOf(service('pilot', DEMO, { requireApproval: true }).get(ctx))).toBe(
+      'CONSENT_NOT_APPROVED',
+    );
+  });
+
+  it('FR-401, K2/F6: the marker ignores case and surrounding spaces', () => {
+    expect(isDemoConsentText({ version: '0.2-LOCAL-DEMO ', legalApprovedBy: null })).toBe(true);
+    expect(isDemoConsentText({ version: '1.0', legalApprovedBy: ' Local-Demo (x)' })).toBe(true);
   });
 
   it.each(['development', 'test'])(
