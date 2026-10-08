@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Accepted 2026-10-05 (C-21, D-49): the owner's decision (currentPassword on setup, disable and recovery-code regeneration; 403 `REAUTH_FAILED`; forced enrolment unchanged) and the six answers recorded in `docs/api-contract.md`. |
+| Status | Accepted 2026-10-05 (C-21, D-49); amended 2026-10-08 by D-70 (see the last section: forced enrolment and the role refusal on disable are retired): the owner's decision (currentPassword on setup, disable and recovery-code regeneration; 403 `REAUTH_FAILED`; forced enrolment unchanged) and the six answers recorded in `docs/api-contract.md`. |
 | Author | architecture hub |
 | Serves | FR-101, FR-102, FR-104; NFR-04; TC-002, TC-003 |
 | Builds on | ADR 0003 (credential storage), ADR 0001 TB-1 |
@@ -31,3 +31,7 @@ Setup, disable and recovery-code regeneration require `currentPassword` in the b
 - A `reauth` body schema in packages/shared is wanted (ARC-02 part 2).
 - QA assigns new TC IDs for re-auth; TC-002 and TC-003 are not reused for it.
 - fsd.md §4 rows for these routes are added in ARC-02 part 2.
+
+## Amendment 2026-10-08 (D-70): TOTP is optional for every role
+
+The owner decided that two-factor sign-in is optional and recommended for every staff role (FR-102). This ADR's re-authentication rules stand unchanged: `currentPassword` on setup, disable and recovery-code regeneration, a wrong password answering 403 `REAUTH_FAILED`, and disable also requiring a current code. Two parts that assumed role-mandatory 2FA are retired: forced enrolment at login ("forced enrolment unchanged" in the Status row) and the refusal of `disable` for Super Admin and Reviewer (403 `TWO_FACTOR_REQUIRED_FOR_ROLE`). The mapping of the retirement to routes, codes and checks is in docs/api-contract.md. Risk accepted by the owner: accounts without TOTP, including Reviewer and Super Admin, are more exposed to password takeover; recommended to revisit before the pilot (FR-102).

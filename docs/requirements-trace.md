@@ -56,7 +56,7 @@ Notes:
 | FR | Mod | Requirement (short) | Build task(s) | TC(s) | Status | Note |
 | --- | --- | --- | --- | --- | --- | --- |
 | FR-101 | M1 | Staff login, Argon2id, lock 15 min after 5 failures | BE-02, FE-02 | TC-001, TC-002 | Not started | |
-| FR-102 | M1 | TOTP mandatory for Super Admin and Reviewer | BE-02, FE-02 | TC-003 | Not started | Recovery codes: `users.recovery_code_hashes` (ADR 0003, Q-03 resolved) |
+| FR-102 | M1 | TOTP optional and recommended for every staff role (D-70, 2026-10-08; was mandatory for Super Admin and Reviewer); enrolled users must give their code | BE-02, FE-02 | TC-003 | In progress | Recovery codes: `users.recovery_code_hashes` (ADR 0003, Q-03 resolved) |
 | FR-103 | M1 | RBAC on every route | ARC-02, BE-03, FE-03 | TC-004 | Not started | |
 | FR-104 | M1 | Access 15 min, refresh 7 days, rotated, revocable | BE-02, FE-02 | TC-005 | Not started | `refresh_tokens.family_id` (ADR 0003, Q-05 resolved) |
 | FR-105 | M1 | Audit entry on every staff read or change of candidate data | DB-03, BE-03, BE-13, DB-06 | TC-006 | Not started | Partial: only routes marked @Audited are covered; results and candidate list endpoints undefined (Q-18) |
