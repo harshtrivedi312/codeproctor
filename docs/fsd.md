@@ -23,12 +23,12 @@ This tab turns each business requirement into testable functional requirements (
 ### M1 Identity & Access
 
 - **FR-101** Staff log in with email + password (Argon2id hashed); lock account for 15 minutes after 5 failed attempts.
-- **FR-102** TOTP two-factor authentication is mandatory for Super Admin and Reviewer, optional for others.
+- **FR-102** TOTP two-factor authentication is optional and recommended for every staff role (D-70, the owner's decision of 2026-10-08, replacing the earlier rule that it was mandatory for Super Admin and Reviewer). A user without it signs in with the password only, and the app nudges them after sign-in to set it up (a dismissible prompt; the wording is the frontend's). A user who has TOTP enrolled is always asked for the code at sign-in, and no path (password reset, token refresh, recovery) signs them in without the second factor. Turning it off still needs the current password and a current code (ADR 0011). **Risk accepted by the owner (D-70):** an account without TOTP is exposed to takeover by a guessed or stolen password; for a Reviewer or Super Admin, who see candidate media, identity images and verdicts, that is a higher exposure than before. It is recommended that the owner revisit this before the pilot opens to real candidates.
 - **FR-103** Role-based access control with roles SUPER\_ADMIN, RECRUITER, AUTHOR, REVIEWER. Permissions are checked on every API route.
 - **FR-104** Access token lifetime 15 minutes, refresh token 7 days, rotated on use and revocable.
 - **FR-105** Every read or change of candidate data by staff writes an audit log entry (who, what, when, IP).
 - **FR-106** Candidates do not have passwords; they authenticate with a one-time invitation token plus an email OTP. Before the test starts, 5 wrong OTPs block the link for 30 minutes and notify the recruiter. Once the test is in progress there is no lockout: a wrong OTP (for example when resuming on a new device) logs an event, alerts the proctor and allows a retry after a short cooldown (updated 2026-10-01, D-21).
-- **FR-107** Staff can reset a forgotten password through an emailed single-use link with a short expiry. The response never reveals whether an account exists, a reset revokes all of the user's refresh tokens, and TOTP is still required at the next login for roles that have it (added 2026-10-01, D-22).
+- **FR-107** Staff can reset a forgotten password through an emailed single-use link with a short expiry. The response never reveals whether an account exists, a reset revokes all of the user's refresh tokens, and TOTP is still required at the next login for users who have it enrolled (added 2026-10-01, D-22; reworded for D-70).
 
 ### M2 Question Bank
 
