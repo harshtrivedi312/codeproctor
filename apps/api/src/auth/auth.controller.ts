@@ -159,6 +159,10 @@ export class AuthController {
   })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
+  @ApiServiceUnavailableResponse({
+    description:
+      'Code verification or the session-ending marker is temporarily unavailable; nothing changed, the same code may be retried',
+  })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
   @ApiForbiddenResponse({
     description:

@@ -506,7 +506,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // retry with the same code). After the callback returned, anything that is not a rollback
       // may have committed: the mark stays (OutcomeUnknownError is not retryable), and the client
       // learns nothing about whether 2FA is on and gets no recovery codes.
-      const clean = isCleanRollback(phase, e);
+      const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
       const unknownOutcome = phase.started && phase.finished && !clean;
       if (clean) await releaseMark(mark);
       // FU-BE-220: a reservation is given back only when nothing could have committed. After an

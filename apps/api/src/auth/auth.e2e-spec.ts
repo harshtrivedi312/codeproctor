@@ -2529,6 +2529,15 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         );
         // The attempt is given back (the password was right): not counted toward lockout.
         expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+        // No oracle: the same body as a wrong password (the trace id is per request).
+        const wrongBody = (await login(u.email, 'wrong-password-1').expect(401)).body as Record<
+          string,
+          unknown
+        >;
+        const lostBody = { ...(res.body as Record<string, unknown>) };
+        delete lostBody.traceId;
+        delete wrongBody.traceId;
+        expect(lostBody).toEqual(wrongBody);
         expect(((await login(u.email).expect(200)).body as Body).status).toBe(
           'two_factor_required',
         );
@@ -3235,9 +3244,17 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         expect(
           await prisma.auditLog.count({ where: { actorId: s.id, action: 'AUTH_TOTP_ENABLED' } }),
         ).toBe(0);
+        // Valid tokens: a 409 (2FA is off) is past the guard; setup/start would replace the secret.
         for (const t of s.tokens) {
-          await post('2fa/setup/start', t, { currentPassword: PASSWORD }).expect(200);
+          await post('2fa/recovery-codes/regenerate', t, { currentPassword: PASSWORD }).expect(409);
         }
+        // DL-37: the outage was not a guess. The replay mark was released, so the SAME code works.
+        expect(row.failedLogins).toBe(0);
+        await post('2fa/setup/confirm', s.tokens[1] ?? '', {
+          currentPassword: PASSWORD,
+          code: authenticator.generate(s.key),
+        }).expect(200);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: s.id } })).failedLogins).toBe(0);
       });
     });
 
