@@ -116,6 +116,10 @@ export function TestScreen({
   const [advancing, setAdvancing] = React.useState(false);
   const [advanceNote, setAdvanceNote] = React.useState<string | null>(null);
 
+  // The server closed the session while the candidate's last-section close was still pending: it
+  // is submitted. Show the submitted page (which runs the finish) instead of waiting for a click.
+  const serverClosed = proctor?.state.serverClosed ?? false;
+
   const finishedNow =
     finishedSection !== null && finishedSection.sectionId === session.data?.section.id;
   React.useEffect(
@@ -150,7 +154,9 @@ export function TestScreen({
     );
   }
   const current = session.data;
-  if (finishedSection?.submitted) return <SubmittedPanel onShown={onSubmitted} />;
+  if (finishedSection?.submitted || (serverClosed && finishedSection?.pending)) {
+    return <SubmittedPanel onShown={onSubmitted} />;
+  }
   const finishedHere = finishedSection?.sectionId === current.section.id ? finishedSection : null;
 
   const advance = async () => {
@@ -462,6 +468,8 @@ function TestScreenInner({
       pending = false,
     ) => {
       finishedOk = true;
+      // Another section opened: this was not the end of the test after all.
+      if (isLastSection && !submitted && !pending) proctor?.setSubmitting(false);
       onFinished({
         sectionId: section.id,
         title: section.title,
