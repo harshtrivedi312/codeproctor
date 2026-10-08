@@ -445,7 +445,7 @@ describe('FR-304: upload robustness', () => {
     function SignOut() {
       const { signOutRevoked } = useAuth();
       return (
-        <button type="button" onClick={() => void signOutRevoked()}>
+        <button type="button" onClick={() => void signOutRevoked('off')}>
           Force sign out
         </button>
       );

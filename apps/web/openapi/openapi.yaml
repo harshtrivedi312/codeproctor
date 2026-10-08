@@ -151,75 +151,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /v1/auth/2fa/enroll/start:
-    post:
-      operationId: startTwoFactorEnrollment
-      summary: Begin forced TOTP enrollment (FR-102). Needs the challenge token from
-        login.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ChallengeRequest'
-      responses:
-        '200':
-          description: Secret and otpauth URI for the QR code
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [manualKey, otpauthUri]
-                properties:
-                  manualKey: { type: string }
-                  otpauthUri: { type: string }
-        '401':
-          description: The challenge is stale or unknown. detail is "Your sign-in has
-            expired. Sign in again."
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProblemDetails'
-  /v1/auth/2fa/enroll/confirm:
-    post:
-      operationId: confirmTwoFactorEnrollment
-      summary: Confirm enrollment with a first code; returns the one-time recovery
-        codes (ADR 0003 section 1)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [challengeToken, code]
-              properties:
-                challengeToken: { type: string }
-                code: { type: string, maxLength: 6 }
-      responses:
-        '200':
-          description: Enrolled and signed in
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [session, recoveryCodes]
-                properties:
-                  session: { $ref: '#/components/schemas/AuthSession' }
-                  recoveryCodes:
-                    type: array
-                    items: { type: string }
-        '400':
-          description: Wrong code
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-        '401':
-          description: Challenge expired, sign in again
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
   /v1/auth/2fa/setup/start:
     post:
       operationId: startTwoFactorSetup
@@ -321,7 +252,7 @@ paths:
     post:
       operationId: disableTwoFactor
       summary: Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens
-        and clears the cookie (backend PR #51). Not for Super Admin and Reviewer.
+        and clears the cookie (backend PR #51). Allowed for every role (two-factor is optional).
       requestBody:
         required: true
         content:
@@ -357,9 +288,7 @@ paths:
         '403':
           description: REAUTH_FAILED for a wrong or locked password or a wrong or replayed
             code (one identical body with the fixed detail "The password or code
-            is incorrect.", so it never says which factor failed), otherwise
-            TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked
-            last)
+            is incorrect.", so it never says which factor failed)
           content:
             application/json:
               schema:
@@ -2210,15 +2139,18 @@ components:
       enum: [SUPER_ADMIN, RECRUITER, AUTHOR, REVIEWER]
     AuthUser:
       type: object
-      required: [id, email, name, role, orgName, totpEnabled]
+      required: [id, email, name, role, orgName, totpEnabled, twoFactorRecommended]
       properties:
         id: { type: string }
         email: { type: string }
         name: { type: string }
         role: { $ref: '#/components/schemas/StaffRole' }
         orgName: { type: string }
-        # Backend adds this to AuthUserDto (login, 2fa/verify, enroll-confirm, refresh).
+        # On every user object the API returns (login, 2fa/verify, refresh, /me).
         totpEnabled: { type: boolean }
+        # Always present, equal to !totpEnabled. Two-factor sign-in is optional for every role
+        # and recommended: the staff shell shows a dismissible nudge while this is true.
+        twoFactorRecommended: { type: boolean }
     AuthSession:
       type: object
       required: [accessToken, user]
@@ -2234,11 +2166,7 @@ components:
       type: object
       required: [status]
       properties:
-        status:
-          {
-            type: string,
-            enum: [authenticated, two_factor_required, two_factor_enrollment_required],
-          }
+        status: { type: string, enum: [authenticated, two_factor_required] }
         session: { $ref: '#/components/schemas/AuthSession' }
         challengeToken: { type: string }
     QuestionType:
@@ -2673,7 +2601,6 @@ components:
       enum:
         [
           REAUTH_FAILED,
-          TWO_FACTOR_REQUIRED_FOR_ROLE,
           SETTINGS_CONFLICT,
           VARIANT_HAS_AI_REFERENCES,
           BUSY,
