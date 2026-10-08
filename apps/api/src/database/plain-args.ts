@@ -45,6 +45,9 @@
 // runs) normally drops non-enumerable and symbol keys and snapshots getters and Proxies, but it passes an
 // object BY REFERENCE when `value[Symbol.for('prisma.objectEnumValue')] === true` (the brand of its null
 // sentinels; the symbol is a registered one, so any code can set it), and a FieldRef or Skip instance too.
+// (A Skip instance is refused: it is walked, and its prototype is not plain. `Prisma.skip` is not exported by
+// this client, which does not enable the `strictUndefinedChecks` preview; a spec fails when it appears, so
+// enabling the preview adds it to isValueObject by identity, like the Json null sentinels.)
 // Confirmed against Postgres on Prisma 7.10: in system scope, a branded `_count` with a non-enumerable
 // `select: { sessions: true }` counted the relation, and in STAFF scope a branded relation args object with a
 // getter `include` gave the omit check `{}` and Prisma `{ invitation: { omit: { _count: false } } }`.
@@ -57,8 +60,12 @@
 //     or a setter), or (an array) an own key that is not an index.
 // A Date, a byte array, a Decimal, a field reference and the Json null sentinels are values and are skipped
 // only when they are the real thing (an exact shape and prototype, no extra own key, not a Proxy); anything
-// else that looks like one is walked as structure, so it is refused. The arrays one level below a column (a
-// scalar list, a Json array) get the prototype, Proxy and symbol checks; their elements are values.
+// else that looks like one is walked as structure, so it is refused. A value goes only where a value goes (a
+// filter operand, a cursor value, a column value): one where a query object is expected (the value of any
+// argument key, a where under AND, OR, NOT or a relation filter, a data row, the select, include, omit, where,
+// orderBy, cursor, having or an aggregate of a relation's args) is refused, so its own keys never become
+// structure. The arrays one level below a column (a scalar list, a Json array) get the prototype, Proxy and
+// symbol checks; their elements are values.
 import { types } from 'node:util';
 import { Prisma } from '../generated/prisma/client.js';
 import { deepFreeze } from './deep-freeze';
@@ -155,6 +162,8 @@ export function isPlainPrototype(proto: unknown): boolean {
  * properties `modelName`, `name`, `typeName`, `isList` and `isEnum`, and a `_toGraphQLInputType` method.
  * Either mark is enough, so a look-alike that carries the four properties is refused too (fail closed).
  * A column name is never a field reference: it is a key, and its value is a filter or a scalar.
+ * It reads those keys with [[Get]], so a getter of the caller's runs: candidate-interim.ts uses it to REFUSE a field
+ * reference; to SKIP one as a value, plain-args uses isRealFieldRef, which proves them data properties first.
  */
 export function isFieldRef(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false;
@@ -190,6 +199,9 @@ function hasOnlyDataKeys(object: object, allowed: ReadonlySet<string>): boolean 
   return true;
 }
 
+// The isReal* helpers run inside isValueObject, after its Proxy check: on a non-Proxy, Reflect.ownKeys,
+// Object.getPrototypeOf and getOwnPropertyDescriptor run no code of the caller's.
+
 /** A Date that carries nothing: no own key, and a realm's Date.prototype (not a subclass's) as its prototype. */
 function isRealDate(value: object): boolean {
   const proto: unknown = Object.getPrototypeOf(value);
@@ -207,9 +219,10 @@ function isRealDate(value: object): boolean {
  * A byte array: a typed array whose prototype is a realm's Uint8Array.prototype (or another element type's) or
  * Node's Buffer.prototype, with no symbol key (Prisma's brand among them). Prisma reads a byte array as bytes
  * (`buffer`, `byteOffset` and `byteLength`, then base64), never as structure, so its own string keys are not listed:
- * that would cost O(length) (about 100 ms for 1 MiB). The clone hands the hook a `slice(0)` copy, which owns its indices
- * only; a byte array keeps its own keys only by reference, and that needs the brand, which is refused here (an own
- * symbol) or on its prototype (not a builtin one).
+ * that would cost O(length) (about 100 ms for 1 MiB). The guarantee is the walk, not the clone: the clone calls the
+ * value's own `slice(0)` (for a Buffer, a view on the same memory, not a copy), so the hook sees whatever that
+ * returns. A branded or foreign object is refused here, and a real byte array is refused wherever a query object is
+ * expected (see the header), so its own keys are never read as structure.
  */
 function isRealByteArray(value: object): boolean {
   if (!types.isTypedArray(value)) return false;
@@ -284,6 +297,28 @@ function hasInheritedKey(object: object): boolean {
   }
   return false;
 }
+
+/**
+ * The keys of a relation's args (nested under select or include) whose value is a query object, never a value.
+ * No column of the schema has one of these names.
+ */
+const QUERY_OBJECT_KEYS: ReadonlySet<string> = new Set([
+  'select',
+  'include',
+  'omit',
+  'where',
+  'orderBy',
+  'cursor',
+  'having',
+  '_count',
+  '_avg',
+  '_sum',
+  '_min',
+  '_max',
+]);
+
+const VALUE_WHERE_OBJECT =
+  'a value (a Date, bytes, a Decimal, a field reference or a Json null) where a query object is expected';
 
 /** A canonical array index ('0', '1', ... but not '01' or '-1'), below 2^32 - 1. */
 function isArrayIndex(key: string): boolean {
@@ -391,8 +426,17 @@ function walkStructure(
     return;
   }
   checkObject(model, operation, value, place);
-  for (const inner of Object.values(value))
+  for (const [key, inner] of Object.entries(value) as Array<[string, unknown]>) {
+    if (
+      QUERY_OBJECT_KEYS.has(key) &&
+      typeof inner === 'object' &&
+      inner !== null &&
+      isValueObject(inner)
+    ) {
+      throw refusal(model, operation, place, VALUE_WHERE_OBJECT);
+    }
     walkStructure(model, operation, inner, place, depth + 1);
+  }
 }
 
 /** The operators of a Json filter: the operand of a value operator is skipped, the rest is walked. */
@@ -428,7 +472,8 @@ function walkWhere(
   depth: number,
   owner: ModelName | undefined,
 ): void {
-  if (typeof where !== 'object' || where === null || isValueObject(where)) return;
+  if (typeof where !== 'object' || where === null) return;
+  if (isValueObject(where)) throw refusal(model, operation, place, VALUE_WHERE_OBJECT);
   if (depth > MAX_STRUCTURE_DEPTH) {
     throw refusal(
       model,
@@ -463,7 +508,8 @@ function walkData(model: string, operation: string, value: unknown, place: strin
     for (const row of value) walkData(model, operation, row, place);
     return;
   }
-  if (typeof value !== 'object' || value === null || isValueObject(value)) return;
+  if (typeof value !== 'object' || value === null) return;
+  if (isValueObject(value)) throw refusal(model, operation, place, VALUE_WHERE_OBJECT);
   checkObject(model, operation, value, place);
   for (const inner of Object.values(value) as unknown[]) {
     if (typeof inner !== 'object' || inner === null) continue;
@@ -485,7 +531,10 @@ export function assertPlainArgs(model: string, operation: string, args: unknown)
   if (typeof args !== 'object' || args === null || Array.isArray(args)) return;
   checkObject(model, operation, args, 'the arguments');
   const owner = Object.hasOwn(Prisma.ModelName, model) ? (model as ModelName) : undefined;
-  for (const [key, value] of Object.entries(args)) {
+  for (const [key, value] of Object.entries(args) as Array<[string, unknown]>) {
+    if (typeof value === 'object' && value !== null && isValueObject(value)) {
+      throw refusal(model, operation, key, VALUE_WHERE_OBJECT);
+    }
     if ((WRITE_KEYS as readonly string[]).includes(key)) walkData(model, operation, value, key);
     else if (key === 'where' || key === 'having') walkWhere(model, operation, value, key, 0, owner);
     else walkStructure(model, operation, value, key, 0);
