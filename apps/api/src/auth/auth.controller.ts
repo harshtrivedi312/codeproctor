@@ -37,7 +37,6 @@ import {
   AcceptedDto,
   AuthSessionDto,
   ChallengeCodeDto,
-  ChallengeDto,
   CurrentPasswordDto,
   DisableTwoFactorDto,
   EnrollmentConfirmedDto,
@@ -109,42 +108,6 @@ export class AuthController {
   }
 
   @Public()
-  @Post('2fa/enroll/start')
-  @HttpCode(200)
-  @Header('Cache-Control', NO_STORE)
-  @ApiOperation({ summary: 'Begin forced TOTP enrollment with the login challenge (FR-102)' })
-  @ApiOkResponse({ type: TotpEnrollmentDto })
-  @ApiUnauthorizedResponse({ description: 'Challenge expired' })
-  async enrollStart(@Body() dto: ChallengeDto): Promise<TotpEnrollmentDto> {
-    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
-    return this.auth.startEnrollment(challenge.userId, challenge.pwv);
-  }
-
-  @Public()
-  @Post('2fa/enroll/confirm')
-  @HttpCode(200)
-  @Header('Cache-Control', NO_STORE)
-  @ApiOperation({ summary: 'Confirm forced enrollment; returns session and recovery codes once' })
-  @ApiOkResponse({ type: EnrollmentConfirmedDto })
-  @ApiBadRequestResponse({ description: 'Wrong code' })
-  @ApiConflictResponse({ description: 'Already enrolled' })
-  async enrollConfirm(
-    @Body() dto: ChallengeCodeDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<EnrollmentConfirmedDto> {
-    const challenge = await this.auth.resolveChallenge(dto.challengeToken);
-    const result = await this.auth.confirmEnrollmentWithChallenge(
-      challenge.userId,
-      dto.code,
-      ctxOf(req),
-      challenge,
-    );
-    setRefreshCookie(res, result.session);
-    return { session: result.session.body.session, recoveryCodes: result.recoveryCodes };
-  }
-
-  @Public()
   @Post('2fa/verify')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
@@ -168,7 +131,7 @@ export class AuthController {
     return outcome.body.session;
   }
 
-  // Optional 2FA for roles that do not require it: a signed-in user turns it on.
+  // Two-factor is optional for every role (FR-102): a signed-in user turns it on.
   @Roles(...ALL_STAFF)
   @ApiBearerAuth()
   @Post('2fa/setup/start')
@@ -217,13 +180,13 @@ export class AuthController {
   @HttpCode(204)
   @ApiOperation({
     summary:
-      'Turn 2FA off; needs the current password and a current TOTP code; signs the user out everywhere (refresh cookie cleared); not for 2FA-required roles',
+      'Turn 2FA off; needs the current password and a current TOTP code; signs the user out everywhere (refresh cookie cleared); allowed for every role',
   })
   @ApiNoContentResponse({ description: 'Refresh cookie cleared; every session is revoked' })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
   @ApiForbiddenResponse({
     description:
-      "Wrong or locked current password, or a wrong or replayed TOTP code (one identical body, detail 'The password or code is incorrect.', so it does not say which part was wrong): code 'REAUTH_FAILED' (not a session expiry). A code that was already used to sign in counts as replayed: wait for the next code. 2FA required for this role: code 'TWO_FACTOR_REQUIRED_FOR_ROLE', checked after the password",
+      "Wrong or locked current password, or a wrong or replayed TOTP code (one identical body, detail 'The password or code is incorrect.', so it does not say which part was wrong): code 'REAUTH_FAILED' (not a session expiry). A code that was already used to sign in counts as replayed: wait for the next code.",
   })
   @ApiConflictResponse({ description: '2FA is not on' })
   @ApiServiceUnavailableResponse({ description: 'Code verification is temporarily unavailable' })

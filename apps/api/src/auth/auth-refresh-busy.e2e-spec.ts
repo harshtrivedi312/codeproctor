@@ -364,13 +364,6 @@ describe('Refresh rotation failure split (FR-104, TC-005, DL-37, FU-BE-207)', ()
     expect(await liveCount(userId)).toBe(1);
   });
 
-  it('FR-104, DL-37, FU-BE-207: a failed revokeFamily for a role that needs 2FA without it is the ordinary 401 after 3 attempts', async () => {
-    const { userId, cookie } = await signedIn();
-    await prisma.user.update({ where: { id: userId }, data: { role: UserRole.REVIEWER } });
-    expectRevokeFailed(await withFailingRevoke(() => refresh(cookie)), 'totp');
-    expect(await liveCount(userId)).toBe(1);
-  });
-
   it('FR-104, DL-37, FU-BE-207: a failed revokeFamily after a changed password (PasswordChangedSignal) is the ordinary 401 after 3 attempts', async () => {
     const { userId, cookie } = await signedIn();
     // The hash changes after the route loaded the user and before the rotation INSERT runs.
