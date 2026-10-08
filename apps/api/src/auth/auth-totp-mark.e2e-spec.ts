@@ -256,6 +256,9 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
             .send({ currentPassword: PASSWORD })
             .expect(200)
         ).body as Body;
+        // The confirm now ends the user's access tokens (Redis marker, as disable does); these tests
+        // retry with the same token after a rollback, so the marker write is stubbed like disable's.
+        jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
         return { id: u.id, token, key: start.manualKey };
       }
       const confirm = (token: string, code: string): request.Test =>
@@ -668,6 +671,7 @@ describe('TOTP used-step key after a rolled-back transaction (FU-BE-208, DL-37, 
           .send({ currentPassword: PASSWORD })
           .expect(200)
       ).body as Body;
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
       return { id: u.id, token, key: start.manualKey };
     }
     const confirm = (token: string, code: string): request.Test =>

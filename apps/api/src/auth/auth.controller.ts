@@ -153,7 +153,10 @@ export class AuthController {
   @Post('2fa/setup/confirm')
   @HttpCode(200)
   @Header('Cache-Control', NO_STORE)
-  @ApiOperation({ summary: 'Signed-in user confirms optional TOTP; returns recovery codes once' })
+  @ApiOperation({
+    summary:
+      'Signed-in user confirms optional TOTP; returns recovery codes once; revokes every refresh family (the caller signs in again with the code) and clears the refresh cookie',
+  })
   @ApiOkResponse({ type: EnrollmentConfirmedDto })
   @ApiBadRequestResponse({ description: 'Wrong code' })
   @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
@@ -164,6 +167,7 @@ export class AuthController {
   async setupConfirm(
     @Body() dto: SetupConfirmDto,
     @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<EnrollmentConfirmedDto> {
     const result = await this.auth.confirmEnrollment(
       this.userId(req),
@@ -171,6 +175,13 @@ export class AuthController {
       dto.code,
       ctxOf(req),
     );
+    // Every refresh family is revoked, this one included: sign in again, with the code.
+    res.clearCookie(REFRESH_COOKIE, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'strict',
+      path: cookieOptions.path,
+    });
     return { recoveryCodes: result.recoveryCodes };
   }
 

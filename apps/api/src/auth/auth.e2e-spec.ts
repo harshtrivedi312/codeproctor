@@ -1460,7 +1460,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       for (const value of secrets) expect(output).not.toContain(value);
     });
 
-    it('FR-102: after setup/confirm the very next refresh reports totpEnabled true', async () => {
+    it('FR-102, FR-107, ADR 0011: after setup/confirm the old refresh cookie is refused (every family is revoked) and the next login asks for the code', async () => {
       const u = await createUser();
       const res = await login(u.email).expect(200);
       const auth = { Authorization: `Bearer ${(res.body as Body).session.accessToken}` };
@@ -1476,8 +1476,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .set(auth)
         .send({ currentPassword: PASSWORD, code: authenticator.generate(start.manualKey) })
         .expect(200);
-      const again = await refresh(refreshCookie(res)).expect(200);
-      expect((again.body as UserBody).user.totpEnabled).toBe(true);
+      await refresh(refreshCookie(res)).expect(401);
+      expect(((await login(u.email).expect(200)).body as Body).status).toBe('two_factor_required');
     });
 
     it('FR-102: challenge and failed responses carry no session user and no totpEnabled', async () => {
@@ -2489,6 +2489,51 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         );
       });
 
+      it('TC-003, FR-102, FU-BE-255: a password sign-in in flight when the user turns 2FA on gets no session (the same 401 as a changed password) and no refresh family survives', async () => {
+        const u = await createUser();
+        const first = (await login(u.email).expect(200)).body as Body;
+        const token = first.session.accessToken;
+        const start = await post('2fa/setup/start', token, { currentPassword: PASSWORD }).expect(
+          200,
+        );
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let reached: () => void = () => undefined;
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        passwordVerify.mockImplementationOnce(async (hash: string, password: string) => {
+          const ok = await realPasswordVerify(hash, password);
+          if (ok) {
+            reached();
+            await gate;
+          }
+          return ok;
+        });
+        const inFlight = Promise.resolve(login(u.email));
+        await atGate;
+        // The login read totpEnabled=false; now the user's own setup/confirm commits.
+        await post('2fa/setup/confirm', token, {
+          currentPassword: PASSWORD,
+          code: authenticator.generate((start.body as { manualKey: string }).manualKey),
+        }).expect(200);
+        release();
+        const res = await inFlight;
+        expect(res.status).toBe(401);
+        expect(res.headers['set-cookie']).toBeUndefined();
+        expect((res.body as Body).status).not.toBe('authenticated');
+        expect(await prisma.refreshToken.count({ where: { userId: u.id, revokedAt: null } })).toBe(
+          0,
+        );
+        // The attempt is given back (the password was right): not counted toward lockout.
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: u.id } })).failedLogins).toBe(0);
+        expect(((await login(u.email).expect(200)).body as Body).status).toBe(
+          'two_factor_required',
+        );
+      });
+
       it('TC-004, FR-102: a password sign-in that read a RECRUITER cannot open a family after the role changes (held after the password check)', async () => {
         const admin = await createUser({ role: UserRole.SUPER_ADMIN, totp: SECRET });
         const u = await createUser({ role: UserRole.RECRUITER });
@@ -3067,10 +3112,132 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           code: authenticator.generate(key),
         }).expect(200);
         expect(confirm.headers['cache-control']).toBe('no-store');
-        const regen = await post('2fa/recovery-codes/regenerate', token, {
+        // The confirm ended this token; regenerate needs a session of a user who already has 2FA.
+        const enrolled = await createUser({ totp: SECRET });
+        const regen = await post('2fa/recovery-codes/regenerate', await accessFor(enrolled.id), {
           currentPassword: PASSWORD,
         }).expect(200);
         expect(regen.headers['cache-control']).toBe('no-store');
+      });
+    });
+
+    describe('setup/confirm signs the user out everywhere (FR-102, FR-107, ADR 0011)', () => {
+      const clearsCookie = (res: request.Response): boolean =>
+        ((res.headers['set-cookie'] as unknown as string[] | undefined) ?? []).some(
+          (c) => c.startsWith('cp_refresh=;') && /Max-Age=0|Expires=Thu, 01 Jan 1970/i.test(c),
+        );
+      async function twoSessions(): Promise<{
+        id: string;
+        email: string;
+        tokens: string[];
+        cookies: string[];
+        key: string;
+      }> {
+        const u = await createUser();
+        const logins = [await login(u.email).expect(200), await login(u.email).expect(200)];
+        const tokens = logins.map((r) => (r.body as Body).session.accessToken);
+        const start = await post('2fa/setup/start', tokens[1] ?? '', {
+          currentPassword: PASSWORD,
+        }).expect(200);
+        return {
+          id: u.id,
+          email: u.email,
+          tokens,
+          cookies: logins.map(refreshCookie),
+          key: (start.body as { manualKey: string }).manualKey,
+        };
+      }
+      const live = (id: string): Promise<number> =>
+        prisma.refreshToken.count({ where: { userId: id, revokedAt: null } });
+
+      it('TC-003: a successful confirm revokes every refresh family (the caller included), clears the cookie, kills every access token at once, counts the revocation in the audit row, and leaves other users alone', async () => {
+        const other = await createUser();
+        const otherLogin = await login(other.email).expect(200);
+        const s = await twoSessions();
+        expect(await live(s.id)).toBe(2);
+        const res = await post('2fa/setup/confirm', s.tokens[1] ?? '', {
+          currentPassword: PASSWORD,
+          code: authenticator.generate(s.key),
+        }).expect(200);
+        expect((res.body as Body).recoveryCodes).toHaveLength(10);
+        expect((res.body as Body).session).toBeUndefined();
+        expect(clearsCookie(res)).toBe(true);
+        expect(await live(s.id)).toBe(0);
+        for (const cookie of s.cookies) await refresh(cookie).expect(401);
+        // Both the pre-enrolment token and the caller's own token die at once (no 15 minute wait).
+        for (const token of s.tokens) {
+          await post('2fa/setup/start', token, { currentPassword: PASSWORD }).expect(401);
+        }
+        const audit = await prisma.auditLog.findMany({
+          where: { actorId: s.id, action: 'AUTH_TOTP_ENABLED' },
+        });
+        expect(audit).toHaveLength(1);
+        expect(audit[0]?.metadata).toEqual({ sessionsRevoked: 2 });
+        expect(((await login(s.email).expect(200)).body as Body).status).toBe(
+          'two_factor_required',
+        );
+        // Another user's family and token are untouched.
+        expect(await live(other.id)).toBe(1);
+        await refresh(refreshCookie(otherLogin)).expect(200);
+        await post('2fa/setup/start', (otherLogin.body as Body).session.accessToken, {
+          currentPassword: PASSWORD,
+        }).expect(200);
+      });
+
+      it('TC-003: a failed confirm (wrong code, wrong password) revokes nothing and leaves the tokens valid', async () => {
+        const s = await twoSessions();
+        const token = s.tokens[1] ?? '';
+        await post('2fa/setup/confirm', token, {
+          currentPassword: PASSWORD,
+          code: '000000',
+        }).expect(400);
+        reauthRefused(
+          await post('2fa/setup/confirm', token, {
+            currentPassword: 'wrong-password-1',
+            code: authenticator.generate(s.key),
+          }),
+        );
+        expect(await live(s.id)).toBe(2);
+        expect((await prisma.user.findUniqueOrThrow({ where: { id: s.id } })).totpEnabled).toBe(
+          false,
+        );
+        expect(
+          await prisma.auditLog.count({ where: { actorId: s.id, action: 'AUTH_TOTP_ENABLED' } }),
+        ).toBe(0);
+        await refresh(s.cookies[0] ?? '').expect(200);
+        for (const t of s.tokens) {
+          await post('2fa/setup/start', t, { currentPassword: PASSWORD }).expect(200);
+        }
+      });
+
+      it('TC-003: when the access-token marker cannot be written confirm is a 503 and rolls everything back: 2FA off, families intact, tokens valid (same rule as disable)', async () => {
+        const s = await twoSessions();
+        const { TokenValidityService } = jest.requireActual<
+          typeof import('../common/auth/token-validity.service')
+        >('../common/auth/token-validity.service');
+        const { ServiceUnavailableException: Unavailable } =
+          jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common');
+        const spy = jest
+          .spyOn(app.get(TokenValidityService), 'invalidateIssuedTokens')
+          .mockRejectedValueOnce(new Unavailable('down'));
+        try {
+          await post('2fa/setup/confirm', s.tokens[1] ?? '', {
+            currentPassword: PASSWORD,
+            code: authenticator.generate(s.key),
+          }).expect(503);
+        } finally {
+          spy.mockRestore();
+        }
+        const row = await prisma.user.findUniqueOrThrow({ where: { id: s.id } });
+        expect(row.totpEnabled).toBe(false);
+        expect(row.recoveryCodeHashes).toEqual([]);
+        expect(await live(s.id)).toBe(2);
+        expect(
+          await prisma.auditLog.count({ where: { actorId: s.id, action: 'AUTH_TOTP_ENABLED' } }),
+        ).toBe(0);
+        for (const t of s.tokens) {
+          await post('2fa/setup/start', t, { currentPassword: PASSWORD }).expect(200);
+        }
       });
     });
 

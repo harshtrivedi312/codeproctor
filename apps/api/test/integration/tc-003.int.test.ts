@@ -220,9 +220,15 @@ describe('TC-003 (FR-102): 2FA optional for every role', () => {
     expect((ok.body as Body).session).toBeUndefined();
     expectNoTotpEnabled(ok);
     expect(ok.headers['cache-control']).toContain('no-store');
-    // The refresh cookie from before the change must report the new state, not a cached one.
-    const afterOn = await refresh(h, cookie).expect(200);
-    expect(sessionUser(afterOn.body, 'flat').totpEnabled).toBe(true);
+    // Turning 2FA on signs the user out everywhere: the refresh cookie from before is refused,
+    // the response clears it, and the access token is dead at once (FR-107, ADR 0011).
+    expect(
+      ((ok.headers['set-cookie'] as unknown as string[] | undefined) ?? []).some(
+        (c) => c.startsWith('cp_refresh=;') && /Max-Age=0|Expires=Thu, 01 Jan 1970/i.test(c),
+      ),
+    ).toBe(true);
+    await refresh(h, cookie).expect(401);
+    await post('2fa/setup/start').set(auth).send({ currentPassword: PASSWORD }).expect(401);
     const next = await login(h, u.email).expect(200);
     expect((next.body as Body).status).toBe('two_factor_required');
     expectNoTotpEnabled(next);
@@ -283,8 +289,10 @@ describe('TC-003 (FR-102): 2FA optional for every role', () => {
       .expect(200);
     expect(done.headers['cache-control']).toContain('no-store');
 
+    // The confirm ended that session; regenerate needs a sign-in with the code.
+    const enrolled = await createUser(h, { role: UserRole.REVIEWER, totp: TOTP_SECRET });
     const regen = await post('2fa/recovery-codes/regenerate')
-      .set(auth)
+      .set(await signInWithTotp(h, enrolled.email))
       .send({ currentPassword: PASSWORD })
       .expect(200);
     expect(regen.headers['cache-control']).toContain('no-store');

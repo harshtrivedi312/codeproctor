@@ -421,7 +421,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     };
   }
 
-  /** A signed-in user confirms optional TOTP (FR-102): recovery codes only, no new session. */
+  /** A signed-in user confirms optional TOTP (FR-102): recovery codes only, no new session; signs the user out everywhere. */
   async confirmEnrollment(
     userId: string,
     password: string,
@@ -486,7 +486,17 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
           if (now?.passwordHash !== boundPasswordHash) throw new PasswordChangedSignal();
           throw new AlreadyEnrolledSignal();
         }
-        await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, {}, tx);
+        // FR-102, FR-107, ADR 0011: a session opened before 2FA was on, e.g. by someone holding
+        // a stolen password, must not outlive this moment. Same order as disableTwoFactor: the
+        // users row is locked by the UPDATE above, then refresh_tokens; every family of the user
+        // is revoked, the caller's included (an access token carries no family id).
+        const revoked = await tx.refreshToken.updateMany({
+          where: { userId: user.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+        await this.validity.invalidateIssuedTokens(user.id);
+        await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, { sessionsRevoked: revoked.count }, tx);
         await this.clearFailures(user, tx);
         phase.finished = true;
       });
@@ -1474,7 +1484,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // that lands in between clears it, so no session is opened from the old second factor.
     const totpBound =
       boundTotpSecret === undefined
-        ? Prisma.empty
+        ? // Password-only path: a user whose own setup/confirm committed meanwhile gets no session
+          // without the code (FU-BE-255); the insert matches nothing, as for a changed password.
+          Prisma.sql`AND NOT u.totp_enabled`
         : Prisma.sql`AND u.totp_enabled AND u.totp_secret_enc = ${boundTotpSecret}`;
     const inserted = await this.raw(
       'open a refresh family: INSERT ... SELECT ... FOR SHARE of the user row (FR-104, FR-107)',
