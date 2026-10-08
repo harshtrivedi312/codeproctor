@@ -464,14 +464,37 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
               .scheduledWindows(),
           ),
       ],
+      [
+        'select _count: true from Organization (BACKGROUND_JOB, B1a of the delta review)',
+        () =>
+          orgContext.runSystem('BACKGROUND_JOB', () =>
+            client.organization.findMany({ select: { id: true, _count: true } }),
+          ),
+      ],
+      [
+        'select _count: true from User (AUTH_BOOTSTRAP, B1a)',
+        () =>
+          orgContext.runSystem('AUTH_BOOTSTRAP', () =>
+            client.user.findMany({ select: { id: true, orgId: true, _count: true } }),
+          ),
+      ],
+      [
+        'include _count: true two levels down from Session (RETENTION_ERASURE, B1a)',
+        () =>
+          orgContext.runSystem('RETENTION_ERASURE', () =>
+            client.session.findMany({ include: { invitation: { include: { _count: true } } } }),
+          ),
+      ],
     ];
     for (const [what, run] of routes) {
       const before = await statementCount();
       const error = await failure(run());
-      expect({ what, refused: error instanceof OrgScopeViolationError }).toEqual({
+      expect({
         what,
-        refused: true,
-      });
+        refused:
+          error instanceof OrgScopeViolationError &&
+          /leads to scheduled_windows|counts every relation/.test(error.message),
+      }).toEqual({ what, refused: true });
       expect({ what, statements: await statementCount() }).toEqual({ what, statements: before });
     }
   });
@@ -487,7 +510,32 @@ describe('scheduled_windows and invitations.time_zone (C-53, ADR 0017 4.7; FR-30
       ),
     );
     expect(error).toBeInstanceOf(OrgScopeViolationError);
+    // Nit 3 of the delta review: the Unsafe form and a raw query inside an interactive transaction too.
+    const unsafe = await failure(
+      orgContext.runSystem('SCHEDULE_CAPACITY', () =>
+        orgContext.runRawSql('instance-hours test query', () =>
+          client.$executeRawUnsafe('UPDATE scheduled_windows SET status = status'),
+        ),
+      ),
+    );
+    expect(unsafe).toBeInstanceOf(OrgScopeViolationError);
     expect(await statementCount()).toBe(before);
+    // The interactive transaction sends its own BEGIN and ROLLBACK; what matters is that no statement on
+    // scheduled_windows runs, so compare the calls of those statements before and after.
+    const windowCalls = async (): Promise<number> =>
+      (await db.statements.read())
+        .filter((st) => /scheduled_windows/.test(st.query))
+        .reduce((sum, st) => sum + st.calls, 0);
+    const windowsBefore = await windowCalls();
+    const inTransaction = await failure(
+      orgContext.runSystem('SCHEDULE_CAPACITY', () =>
+        orgContext.runRawSql('instance-hours test query', () =>
+          client.$transaction(async (tx) => tx.$queryRaw`SELECT org_id FROM scheduled_windows`),
+        ),
+      ),
+    );
+    expect(inTransaction).toBeInstanceOf(OrgScopeViolationError);
+    expect(await windowCalls()).toBe(windowsBefore);
   });
 
   it('TC-008 CANDIDATE scope cannot touch scheduled_windows', async () => {

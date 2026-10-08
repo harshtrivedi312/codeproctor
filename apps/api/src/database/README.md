@@ -160,7 +160,7 @@ change. **`SCHEDULE_CAPACITY`** (ADR 0017 §4.7, C-53) is the one cross-organisa
 statement, to `findMany` (with an explicit `select`), `count`, `aggregate` and `groupBy` of `ScheduledWindow`, naming
 only `startsAt`, `endsAt`, `ceilingAt`, `status` and `kind` anywhere (select, by, where, orderBy, distinct, having,
 the aggregates; no include, omit, cursor, relation filter or field reference). It writes nothing and reads no other
-model (raw SQL is refused under it, even inside `runRawSql`), and every other system reason is refused on `ScheduledWindow`, reads included, **also through a relation**: no system query on another model may name `scheduledWindows` or `requestedScheduledWindows` anywhere in its arguments (include, select, `_count`, where, orderBy, at any depth; the set is derived from `FK_CLASSES`): writes, and the retention and
+model (raw SQL is refused under it, even inside `runRawSql`), and every other system reason is refused on `ScheduledWindow` through the model API, reads included, **also through a relation** (raw SQL under another reason is outside this check: FU-DB-277): no system query on another model may name `scheduledWindows` or `requestedScheduledWindows` anywhere in its arguments (include, select, `_count`, where, orderBy, at any depth; the set is derived from `FK_CLASSES`): writes, and the retention and
 erasure deletes of SLOT rows, run in an org scope. The reason is a guarded name in `call-sites.spec.ts`: no file
 outside `database/` may enter it until the schedule code adds its one reviewed entry.
 `BACKGROUND_JOB` is for **scheduled cross-org discovery only**: job payloads carry `orgId`

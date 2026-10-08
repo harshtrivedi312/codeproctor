@@ -156,29 +156,65 @@ export function assertNoRawUnderScheduleCapacity(reason: string, operation: stri
 }
 
 /**
- * The relation fields that lead to scheduled_windows (`Organization.scheduledWindows`,
- * `Invitation.scheduledWindows`, `User.requestedScheduledWindows`), derived from FK_CLASSES so a new one is
- * refused without an edit here.
+ * The relation fields that lead to scheduled_windows, derived from FK_CLASSES (checked against schema.prisma) so a
+ * new one is refused without an edit here: the back-relations of the keys FROM scheduled_windows
+ * (`Organization.scheduledWindows`, `Invitation.scheduledWindows`, `User.requestedScheduledWindows`) and the forward
+ * relations of any key INTO it (none today; S-a of the #261 delta review).
  */
 export const SCHEDULE_BACK_RELATIONS: readonly string[] = deepFreeze(
   [
-    ...new Set(FK_CLASSES.filter((key) => key.model === SCHEDULE_MODEL).map((key) => key.back)),
+    ...new Set([
+      ...FK_CLASSES.filter((key) => key.model === SCHEDULE_MODEL).map((key) => key.back),
+      ...FK_CLASSES.filter((key) => key.target === SCHEDULE_MODEL).map((key) => key.field),
+    ]),
   ].sort(),
 );
 
-/** The first key named like a relation to scheduled_windows, anywhere in `value` (objects and arrays). */
-function findRelationKey(value: unknown, depth: number): string | undefined {
-  if (depth > 64 || value === null || typeof value !== 'object') return undefined;
+/** How deep the relation walk goes; deeper arguments are refused, never passed (B1b of the #261 delta review). */
+const RELATION_WALK_DEPTH = 96;
+/** The write payloads of a call: nested relation writes in them are refused elsewhere (assertSystemScopeWrite). */
+const WRITE_PAYLOADS = new Set(['data', 'create', 'update']);
+/** A `_count` that counts every list relation of its model (no explicit `select`): B1a of the #261 delta review. */
+const COUNT_ALL =
+  '_count without an explicit select (it counts every relation, scheduled_windows included)';
+
+/**
+ * The first relation to scheduled_windows that `value` reaches, anywhere in it (objects and arrays): a key named like
+ * one, or a `_count` under a select or include that has no explicit `select` object (`_count: true`, `{}`,
+ * `{ select: null }`), which counts every list relation of its model. Past RELATION_WALK_DEPTH it throws.
+ */
+function findRelationKey(
+  operation: string,
+  value: unknown,
+  depth: number,
+  parentKey: string | undefined,
+): string | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  if (depth > RELATION_WALK_DEPTH) {
+    throw new OrgScopeViolationError(
+      `${operation}: the arguments are nested too deep to check for a relation to scheduled_windows (ADR 0017 section 4.7).`,
+    );
+  }
   if (Array.isArray(value)) {
     for (const item of value) {
-      const found = findRelationKey(item, depth + 1);
+      const found = findRelationKey(operation, item, depth + 1, parentKey);
       if (found !== undefined) return found;
     }
     return undefined;
   }
   for (const [key, inner] of Object.entries(value)) {
+    if (depth === 0 && WRITE_PAYLOADS.has(key)) continue;
     if (SCHEDULE_BACK_RELATIONS.includes(key)) return key;
-    const found = findRelationKey(inner, depth + 1);
+    if (key === '_count' && (parentKey === 'select' || parentKey === 'include')) {
+      const explicit =
+        typeof inner === 'object' &&
+        inner !== null &&
+        !Array.isArray(inner) &&
+        typeof (inner as { select?: unknown }).select === 'object' &&
+        (inner as { select?: unknown }).select !== null;
+      if (!explicit) return COUNT_ALL;
+    }
+    const found = findRelationKey(operation, inner, depth + 1, key);
     if (found !== undefined) return found;
   }
   return undefined;
@@ -205,7 +241,7 @@ export function assertScheduleCapacityScope(
     // relation that leads to scheduled_windows anywhere in its arguments (include, select, _count, where,
     // orderBy, cursor, having, at any depth), or `invitation.findMany({ include: { scheduledWindows: true } })`
     // would return every organisation's windows, all columns, under BACKGROUND_JOB or RETENTION_ERASURE.
-    const relation = findRelationKey(args, 0);
+    const relation = findRelationKey(operation, args, 0, undefined);
     if (relation !== undefined) {
       throw new OrgScopeViolationError(
         `${model}.${operation}: ${relation} leads to scheduled_windows, which a system scope reads only under ${REASON}, on ScheduledWindow itself (ADR 0017 section 4.7).`,

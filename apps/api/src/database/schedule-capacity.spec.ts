@@ -1,5 +1,6 @@
 import { OrgScopeViolationError } from './errors';
 import { SYSTEM_SCOPE_REASONS } from './org-context';
+import { FK_CLASSES } from './org-scope-relations';
 import {
   SCHEDULE_BACK_RELATIONS,
   SCHEDULE_CAPACITY_COLUMNS,
@@ -264,11 +265,110 @@ describe('the SCHEDULE_CAPACITY system read of scheduled_windows (ADR 0017 4.7, 
       ],
     ];
 
-    for (const reason of ['BACKGROUND_JOB', 'RETENTION_ERASURE', 'AUTH_BOOTSTRAP']) {
+    // Nit 5 of the #261 delta review: every other system reason, derived, so a new reason is covered without an edit.
+    const OTHER_REASONS = Object.keys(SYSTEM_SCOPE_REASONS).filter(
+      (r) => r !== 'SCHEDULE_CAPACITY',
+    );
+
+    for (const reason of OTHER_REASONS) {
       it.each(routes)(`TC-008 under ${reason}, %s is refused`, (_what, model, operation, args) => {
         expect(check(operation, args, reason, model)).toThrow(/leads to scheduled_windows/);
       });
     }
+
+    // B1a of the #261 delta review: a _count with no explicit select counts every list relation of its model.
+    const countAll: ReadonlyArray<[string, string, unknown]> = [
+      [
+        'select _count: true on Organization',
+        'Organization',
+        { select: { id: true, _count: true } },
+      ],
+      ['include _count: true on Invitation', 'Invitation', { include: { _count: true } }],
+      ['include _count: {} on Invitation', 'Invitation', { include: { _count: {} } }],
+      ['select _count: { select: null } on User', 'User', { select: { _count: { select: null } } }],
+      ['select _count: true on User', 'User', { select: { id: true, orgId: true, _count: true } }],
+      [
+        'include _count: true two levels down, from Session',
+        'Session',
+        { include: { invitation: { include: { _count: true } } } },
+      ],
+      [
+        'select _count: true two levels down, from Session',
+        'Session',
+        { select: { invitation: { select: { id: true, _count: true } } } },
+      ],
+    ];
+    for (const reason of OTHER_REASONS) {
+      it.each(countAll)(`TC-008 B1a under ${reason}, %s is refused`, (_what, model, args) => {
+        expect(check('findMany', args, reason, model)).toThrow(/counts every relation/);
+      });
+    }
+
+    it.each([
+      [
+        'an explicit _count select of another relation',
+        'Invitation',
+        'findMany',
+        { select: { _count: { select: { sessions: true } } } },
+      ],
+      ['a row aggregate _count: true', 'Session', 'aggregate', { _count: true }],
+      [
+        'a groupBy orderBy _count',
+        'Session',
+        'groupBy',
+        { by: ['status'], orderBy: { _count: { status: 'desc' } } },
+      ],
+      [
+        'a groupBy having _count',
+        'Session',
+        'groupBy',
+        { by: ['status'], having: { status: { _count: { gt: 1 } } } },
+      ],
+    ])('TC-008 B1a %s still passes', (_what, model, operation, args) => {
+      expect(check(operation, args, 'RETENTION_ERASURE', model)).not.toThrow();
+    });
+
+    it('TC-008 B1a an explicit _count select that names scheduledWindows is refused by name', () => {
+      expect(
+        check(
+          'findMany',
+          { select: { _count: { select: { scheduledWindows: true } } } },
+          'BACKGROUND_JOB',
+          'Invitation',
+        ),
+      ).toThrow(/scheduledWindows leads to scheduled_windows/);
+    });
+
+    it('TC-008 B1b a relation 40 hops deep is still found, and arguments past the walk depth are refused, never passed', () => {
+      let deep: Record<string, unknown> = { scheduledWindows: true };
+      for (let hop = 0; hop < 40; hop += 1) {
+        deep = { select: { [hop % 2 === 0 ? 'invitation' : 'sessions']: deep } };
+      }
+      expect(check('findMany', deep, 'BACKGROUND_JOB', 'Invitation')).toThrow(
+        OrgScopeViolationError,
+      );
+      let tooDeep: Record<string, unknown> = { id: true };
+      for (let hop = 0; hop < 120; hop += 1) tooDeep = { select: { invitation: tooDeep } };
+      expect(check('findMany', tooDeep, 'BACKGROUND_JOB', 'Invitation')).toThrow(/nested too deep/);
+    });
+
+    it('TC-008 S-a the set holds every relation of a foreign key from or into scheduled_windows', () => {
+      for (const key of FK_CLASSES) {
+        if (key.model === 'ScheduledWindow') expect(SCHEDULE_BACK_RELATIONS).toContain(key.back);
+        if (key.target === 'ScheduledWindow') expect(SCHEDULE_BACK_RELATIONS).toContain(key.field);
+      }
+    });
+
+    it('TC-008 nit 4 a JSON write payload that merely holds the name is not a relation (write payloads are not walked)', () => {
+      expect(
+        check(
+          'create',
+          { data: { action: 'X', metadata: { scheduledWindows: 3 } } },
+          'BACKGROUND_JOB',
+          'AuditLog',
+        ),
+      ).not.toThrow();
+    });
 
     it('TC-008 a system query on another model with no such relation is untouched', () => {
       expect(
