@@ -7,12 +7,14 @@ import { describe, it } from 'node:test';
 import { looksLikeOurs, parsePids } from './demo-down.mjs';
 import {
   DEMO_PORTS,
+  composeEnv,
+  demoProject,
   foreignContainers,
   foreignMessage,
   judgePort,
   parseDockerPs,
 } from './demo-ports.mjs';
-import { planSteps, summary } from './demo-up.mjs';
+import { failureHint, planSteps, summary } from './demo-up.mjs';
 import { REPO_ROOT } from './test-support.mjs';
 
 const names = (steps) => steps.map((s) => s.name);
@@ -277,5 +279,79 @@ describe('local compose stack (D-67)', () => {
 
   it('the worker is behind a profile (it is not part of demo:up)', () => {
     assert.match(compose, /worker:\n\s+profiles: \['worker'\]/);
+  });
+});
+
+describe('demo:up compose project (local demo)', () => {
+  it("uses its own project, codeproctor-demo, so its volumes are never the dev stack's", () => {
+    assert.equal(demoProject({}), 'codeproctor-demo');
+    assert.equal(composeEnv({ PATH: '/bin' }).COMPOSE_PROJECT_NAME, 'codeproctor-demo');
+    assert.equal(composeEnv({ PATH: '/bin' }).PATH, '/bin');
+  });
+
+  it('COMPOSE_PROJECT_NAME chosen on purpose still wins, a malformed one does not', () => {
+    assert.equal(demoProject({ COMPOSE_PROJECT_NAME: 'mine' }), 'mine');
+    assert.equal(demoProject({ COMPOSE_PROJECT_NAME: '../x y' }), 'codeproctor-demo');
+  });
+
+  it('demo:down --infra runs in the same project', () => {
+    assert.match(readFileSync(`${REPO_ROOT}infra/scripts/demo-down.mjs`, 'utf8'), /composeEnv\(\)/);
+  });
+
+  it('P1000 from the migrations gets a hint: another .env owns the volume, no reset', () => {
+    const hint = failureHint(
+      ['pnpm', 'db:migrate'],
+      'Error: P1000: Authentication failed against database server',
+      'codeproctor-demo',
+    );
+    assert.match(hint, /P1000/);
+    assert.match(hint, /codeproctor-demo_postgres_data/);
+    assert.match(hint, /another \.env/);
+    assert.match(hint, /Never run db:reset or db push/);
+    assert.doesNotMatch(hint, /pnpm db:reset\b/);
+  });
+
+  it('with COMPOSE_PROJECT_NAME set the hint says to unset it; other failures get no hint', () => {
+    assert.match(
+      failureHint(['pnpm', 'db:seed'], 'P1000', 'codeproctor'),
+      /Unset it so the demo uses its own project, "codeproctor-demo"/,
+    );
+    assert.equal(failureHint(['pnpm', 'db:migrate'], 'P3009 failed migration', 'x'), '');
+    assert.equal(failureHint(['pnpm', 'dev:infra'], 'P1000', 'x'), '');
+  });
+
+  it("this checkout's own dev stack (project codeproctor) holding a port is a clash for the demo project", () => {
+    const ourCompose = '/work/codeproctor/infra/docker-compose.yml';
+    const spec = DEMO_PORTS.find((p) => p.port === 5432);
+    const dev = [
+      {
+        name: 'codeproctor-postgres-1',
+        configFiles: [ourCompose],
+        ports: [5432],
+        project: 'codeproctor',
+      },
+    ];
+    const verdict = judgePort({
+      spec,
+      free: false,
+      containers: dev,
+      ourCompose,
+      ourAppUp: false,
+      project: 'codeproctor-demo',
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.message, /pnpm dev:infra:down/);
+    const mine = [{ ...dev[0], project: 'codeproctor-demo' }];
+    assert.equal(
+      judgePort({
+        spec,
+        free: false,
+        containers: mine,
+        ourCompose,
+        ourAppUp: false,
+        project: 'codeproctor-demo',
+      }).ok,
+      true,
+    );
   });
 });

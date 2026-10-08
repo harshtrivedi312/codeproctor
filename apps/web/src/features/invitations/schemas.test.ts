@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { inviteSchema, toAccommodations, type InviteFormValues } from './schemas';
+import { inviteSchema, toAccommodations, windowAtSubmit, type InviteFormValues } from './schemas';
 
 const NOW = new Date('2026-06-01T09:00:00');
 const base: InviteFormValues = {
@@ -89,5 +89,46 @@ describe('FR-303 FR-305 ADR 0015: the invite form rules', () => {
       toAccommodations({ ...base, waiver: true, waiverReason: 'OTHER', waiverNote: ' why ' })
         ?.identityCheckWaiver,
     ).toEqual({ reasonCode: 'OTHER', reasonNote: 'why' });
+  });
+});
+
+describe('FR-303 windowAtSubmit: the window start is worked out at submit time', () => {
+  const initial = { windowStart: '2026-06-01T09:00', windowEnd: '2026-06-08T09:00' };
+  const at = (iso: string) => new Date(iso);
+  it('FR-303: an untouched start becomes now and the untouched end keeps the 7 day length', () => {
+    const r = windowAtSubmit(
+      initial,
+      { start: false, end: false },
+      initial,
+      at('2026-06-01T09:10:30'),
+    );
+    expect(r).toEqual({
+      windowStart: '2026-06-01T09:10',
+      windowEnd: '2026-06-08T09:10',
+      clamped: false,
+    });
+  });
+  it('FR-303: a chosen start more than 4 minutes old is clamped to now and reported', () => {
+    const cur = { windowStart: '2026-06-01T08:00', windowEnd: '2026-06-02T08:00' };
+    const r = windowAtSubmit(cur, { start: true, end: true }, initial, at('2026-06-01T09:10:00'));
+    expect(r).toEqual({
+      windowStart: '2026-06-01T09:10',
+      windowEnd: '2026-06-02T08:00',
+      clamped: true,
+    });
+  });
+  it('FR-303: a recent or future chosen start is kept as typed', () => {
+    const recent = { windowStart: '2026-06-01T09:08', windowEnd: '2026-06-02T08:00' };
+    expect(
+      windowAtSubmit(recent, { start: true, end: true }, initial, at('2026-06-01T09:10:00'))
+        .clamped,
+    ).toBe(false);
+    const future = { windowStart: '2026-06-03T08:00', windowEnd: '2026-06-04T08:00' };
+    expect(
+      windowAtSubmit(future, { start: true, end: true }, initial, at('2026-06-01T09:10:00')),
+    ).toEqual({
+      ...future,
+      clamped: false,
+    });
   });
 });

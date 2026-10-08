@@ -60,6 +60,8 @@ export const envSchema = z
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),
+    // Longest candidate invitation window a recruiter may set, in days (FR-303).
+    INVITATION_MAX_WINDOW_DAYS: z.coerce.number().int().min(1).max(30).default(7),
     // Global default: requests per window per client IP.
     THROTTLE_DEFAULT_LIMIT: positiveInt.default(100),
     // Stricter limits for /auth and /candidate (NFR-04).
@@ -103,6 +105,8 @@ export const envSchema = z
     TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
     // Staff invites per organization per hour (FR-103); a stolen admin session cannot mass-create.
     INVITE_RATE_LIMIT_PER_ORG_HOUR: positiveInt.default(20),
+    // Candidate invitations (mail to arbitrary addresses) per organization per hour (FR-303).
+    INVITATION_RATE_LIMIT_PER_ORG_HOUR: z.coerce.number().int().min(1).max(10_000).default(200),
     // OpenAPI is opt-in and refused in pilot and production. FU-BE-10.
     ENABLE_API_DOCS: z
       .enum(['true', 'false'])

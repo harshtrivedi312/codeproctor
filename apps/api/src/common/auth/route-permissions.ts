@@ -216,6 +216,8 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /tests': { roles: RECRUITER_ADMIN, permission: 'test:create' },
   'GET /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:read' },
   'PATCH /tests/:id': { roles: RECRUITER_ADMIN, permission: 'test:update' },
+  // Invitations (FR-303, BE-06 slice 6c): one route today; recruiters and super admins only.
+  'POST /tests/:id/invitations': { roles: RECRUITER_ADMIN, permission: 'invitation:create' },
   // Reviewer read API (FR-901, FR-703, FR-105): REVIEWER and SUPER_ADMIN. All three read candidate
   // data, so all three are audited (the row is written before the response leaves).
   'GET /review/queue': { ...reviewQueueRead, audited: true, candidateData: true },
