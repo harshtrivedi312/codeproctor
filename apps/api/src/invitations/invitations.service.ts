@@ -108,9 +108,9 @@ export class InvitationsService {
     const token = newOpaqueToken();
     const tokenHash = sha256Hex(token);
 
-    let created;
+    let result;
     try {
-      created = await this.prisma.client.$transaction(
+      result = await this.prisma.client.$transaction(
         async (tx) => {
           await this.orgContext.runRawSql(
             'cap lock waits of this transaction (SET LOCAL, no data access)',
@@ -127,8 +127,8 @@ export class InvitationsService {
             'insert the candidate of this organization if absent: ON CONFLICT DO NOTHING keeps the transaction usable after a lost race, same org only',
             () =>
               tx.$executeRaw(Prisma.sql`
-            INSERT INTO candidates (org_id, email, full_name, external_ref)
-            VALUES (${actor.orgId}::uuid, ${dto.email}::citext, ${dto.fullName}, ${dto.externalRef ?? null})
+            INSERT INTO candidates (org_id, email, full_name)
+            VALUES (${actor.orgId}::uuid, ${dto.candidate.email}::citext, ${dto.candidate.name})
             ON CONFLICT (org_id, email) DO NOTHING`),
           );
           const rows = await this.orgContext.runRawSql(
@@ -138,7 +138,7 @@ export class InvitationsService {
                 { id: string; erasure_requested_at: Date | null; erased_at: Date | null }[]
               >(Prisma.sql`
             SELECT id, erasure_requested_at, erased_at FROM candidates
-            WHERE org_id = ${actor.orgId}::uuid AND email = ${dto.email}::citext
+            WHERE org_id = ${actor.orgId}::uuid AND email = ${dto.candidate.email}::citext
             FOR NO KEY UPDATE`),
           );
           const candidate = rows[0];
@@ -181,10 +181,16 @@ export class InvitationsService {
             throw new UnprocessableEntityException({ message: check.problems });
           }
 
-          await this.sessions.createInvited(
+          const session = await this.sessions.createInvited(
             { orgId: actor.orgId, invitationId: invitation.id },
             tx,
           );
+          const sessionRow = await tx.session.findUnique({
+            where: { id: session.id },
+            select: { status: true },
+          });
+          if (!sessionRow)
+            throw new InternalServerErrorException('The invitation could not be created.');
 
           await tx.auditLog.create({
             data: {
@@ -202,7 +208,7 @@ export class InvitationsService {
               },
             },
           });
-          return invitation;
+          return { invitation, status: sessionRow.status };
         },
         { timeout: this.txTimeoutMs, maxWait: this.txMaxWaitMs },
       );
@@ -223,8 +229,9 @@ export class InvitationsService {
       throw e;
     }
 
+    const created = result.invitation;
     // The mail is outside the transaction: an outcome other than queued does not undo anything.
-    const mail = await this.sendMail(dto.email, token, start, end);
+    const mail = await this.sendMail(dto.candidate.email, token, start, end);
     if (mail === 'queued') {
       try {
         await this.prisma.client.invitation.update({
@@ -240,6 +247,7 @@ export class InvitationsService {
       id: created.id,
       testId: created.testId,
       candidateId: created.candidateId,
+      status: result.status,
       windowStart: created.windowStart.toISOString(),
       windowEnd: created.windowEnd.toISOString(),
       createdAt: created.createdAt.toISOString(),
@@ -278,7 +286,7 @@ export class InvitationsService {
 
   /** Server time is the only clock: the rules compare against `now`, never a client value. */
   private window(dto: CreateInvitationDto, now: Date): { start: Date; end: Date } {
-    const start = dto.windowStart === undefined ? now : parseInstant(dto.windowStart);
+    const start = parseInstant(dto.windowStart);
     const end = parseInstant(dto.windowEnd);
     if (!start || !end) throw new BadRequestException(['the window is not a valid date-time']);
     const problems: string[] = [];

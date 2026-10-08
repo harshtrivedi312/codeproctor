@@ -208,12 +208,20 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
   }
 
   const email = (): string => `cand.${++seq}@Example.org`;
-  const goodBody = (over: Json = {}): Json => ({
-    email: email(),
-    fullName: 'Ada Lovelace',
-    windowEnd: iso(Date.now() + 2 * DAY),
-    ...over,
-  });
+  // The body the web dialog sends. `email` and `fullName` in `over` are shorthand for the nested
+  // candidate fields; `candidate` replaces the whole object.
+  const goodBody = (over: Json = {}): Json => {
+    const { email: e, fullName, ...rest } = over;
+    const candidate = { email: email(), name: 'Ada Lovelace' } as Json;
+    if ('email' in over) candidate.email = e;
+    if ('fullName' in over) candidate.name = fullName;
+    return {
+      candidate,
+      windowStart: iso(Date.now()),
+      windowEnd: iso(Date.now() + 2 * DAY),
+      ...rest,
+    };
+  };
   const invite = (who: Made, testId: string, b: Json): request.Test =>
     http().post(`${API}/tests/${testId}/invitations`).set(who.auth).send(b);
 
@@ -231,15 +239,25 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
     it('FR-303, TC-006: creates candidate, hashed-token invitation, INVITED session, audit row, then mails once', async () => {
       const who = await make(UserRole.RECRUITER);
       const testId = await makeTest(who);
-      const b = goodBody({ email: '  Ada.Mixed@Example.ORG ', externalRef: ' ATS-1 ' });
+      const b = goodBody({ email: '  Ada.Mixed@Example.ORG ' });
       const start = Date.now() + HOUR;
       const res = await invite(who, testId, { ...b, windowStart: iso(start) });
       expect([res.status, res.body]).toEqual([201, expect.anything()]);
       const body = res.body as Json;
       expect(Object.keys(body).sort()).toEqual(
-        ['candidateId', 'createdAt', 'id', 'mail', 'testId', 'windowEnd', 'windowStart'].sort(),
+        [
+          'candidateId',
+          'createdAt',
+          'id',
+          'mail',
+          'status',
+          'testId',
+          'windowEnd',
+          'windowStart',
+        ].sort(),
       );
       expect(body.mail).toBe('queued');
+      expect(body.status).toBe('INVITED');
       expect(body.testId).toBe(testId);
       expect(body.windowStart).toBe(iso(start));
 
@@ -250,7 +268,7 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         orgId: orgA,
         email: 'ada.mixed@example.org',
         fullName: 'Ada Lovelace',
-        externalRef: 'ATS-1',
+        externalRef: null,
       });
       const inv = await owner.invitation.findUniqueOrThrow({ where: { id: body.id as string } });
       expect(inv).toMatchObject({
@@ -284,17 +302,6 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       expect(Object.keys(rows[0]?.metadata as Json).sort()).toEqual(
         ['candidateId', 'testId', 'windowEnd', 'windowStart'].sort(),
       );
-    });
-
-    it('FR-303: windowStart defaults to the server time now', async () => {
-      const who = await make(UserRole.RECRUITER);
-      const testId = await makeTest(who);
-      const before = Date.now();
-      const res = await invite(who, testId, goodBody());
-      expect(res.status).toBe(201);
-      const start = Date.parse((res.body as Json).windowStart as string);
-      expect(start).toBeGreaterThanOrEqual(before - 1);
-      expect(start).toBeLessThanOrEqual(Date.now());
     });
 
     it('FR-303: an existing candidate of the same org is reused (case-insensitive) and keeps its name', async () => {
@@ -391,9 +398,20 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       ['name with NUL', () => ({ fullName: 'a\u0000b' })],
       ['name with lone surrogate', () => ({ fullName: 'a\ud800b' })],
       ['name is a number', () => ({ fullName: 5 })],
-      ['externalRef over 100', () => ({ externalRef: 'r'.repeat(101) })],
-      ['externalRef null', () => ({ externalRef: null })],
-      ['externalRef with NUL', () => ({ externalRef: 'a\u0000' })],
+      ['no windowStart', () => ({ windowStart: undefined })],
+      ['no candidate', () => ({ candidate: undefined })],
+      ['candidate null', () => ({ candidate: null })],
+      ['candidate a string', () => ({ candidate: 'ada@example.org' })],
+      ['candidate an array', () => ({ candidate: [] })],
+      [
+        'candidate with fullName instead of name',
+        () => ({ candidate: { email: 'a@example.org', fullName: 'Ada' } }),
+      ],
+      [
+        'candidate with externalRef',
+        () => ({ candidate: { email: 'a@example.org', name: 'Ada', externalRef: 'x' } }),
+      ],
+      ['top-level externalRef', () => ({ externalRef: 'ATS-1' })],
       ['no windowEnd', () => ({ windowEnd: undefined })],
       ['windowEnd not a date', () => ({ windowEnd: 'tomorrow' })],
       ['windowEnd without offset', () => ({ windowEnd: '2099-01-01T00:00:00' })],
@@ -430,8 +448,6 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       ['name with a C1 control', () => ({ fullName: 'Ada\u0085Lovelace' })],
       ['name with a bidi override', () => ({ fullName: 'Ada\u202Eevol' })],
       ['name with a bidi isolate', () => ({ fullName: 'Ada\u2066x' })],
-      ['externalRef with a bidi override', () => ({ externalRef: 'A\u202EB' })],
-      ['externalRef with a tab', () => ({ externalRef: 'A\tB' })],
       ['unknown field', () => ({ allowDuplicate: true })],
       [
         'mass assignment of orgId, tokenHash and createdById',
@@ -449,6 +465,76 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       expect(await owner.candidate.count()).toBe(cands);
       expect(await owner.invitation.count({ where: { testId } })).toBe(0);
       expect(sent).toHaveLength(0);
+    });
+
+    it('FR-303: the old flat body { email, fullName, windowEnd } is 400 (the contract is the nested candidate)', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const res = await invite(who, testId, {
+        email: email(),
+        fullName: 'Ada Lovelace',
+        windowEnd: iso(Date.now() + DAY),
+      });
+      expect(res.status).toBe(400);
+      expect(await owner.invitation.count({ where: { testId } })).toBe(0);
+    });
+
+    it.each([
+      ['no email', { name: 'Ada' }, 'candidate.email'],
+      ['bad email', { email: 'nope', name: 'Ada' }, 'candidate.email'],
+      ['no name', { email: 'a@example.org' }, 'candidate.name'],
+      ['empty name', { email: 'a@example.org', name: ' ' }, 'candidate.name'],
+      ['name with a newline', { email: 'a@example.org', name: 'A\nB' }, 'candidate.name'],
+    ])('FR-303: nested candidate error for %s names %s', async (_n, candidate, field) => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const res = await invite(who, testId, goodBody({ candidate }));
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toContain(field);
+    });
+
+    it('FR-303: the exact body the web dialog sends (candidate, start truncated to the minute, end = start + 7 days, ISO Z) is 201 with the web response shape', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const start = new Date(Math.floor(Date.now() / 60_000) * 60_000);
+      const end = new Date(start.getTime() + 7 * DAY);
+      const res = await invite(who, testId, {
+        candidate: { email: email(), name: 'Dialog Person' },
+        windowStart: start.toISOString(),
+        windowEnd: end.toISOString(),
+      });
+      expect(res.status).toBe(201);
+      const body = res.body as Json;
+      expect(body).toMatchObject({
+        testId,
+        status: 'INVITED',
+        windowStart: start.toISOString(),
+        windowEnd: end.toISOString(),
+        mail: 'queued',
+      });
+      expect(Object.keys(body).sort()).toEqual(
+        [
+          'candidateId',
+          'createdAt',
+          'id',
+          'mail',
+          'status',
+          'testId',
+          'windowEnd',
+          'windowStart',
+        ].sort(),
+      );
+    });
+
+    it('FR-303: a windowStart a few seconds in the past is accepted', async () => {
+      const who = await make(UserRole.RECRUITER);
+      const testId = await makeTest(who);
+      const res = await invite(
+        who,
+        testId,
+        goodBody({ windowStart: iso(Date.now() - 5_000), windowEnd: iso(Date.now() + DAY) }),
+      );
+      expect(res.status).toBe(201);
     });
 
     it('FR-303: a windowStart a minute in the past (clock skew) is accepted', async () => {
@@ -891,7 +977,11 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         const res = await invite(who, test.id, refused);
         expect(res.status).toBe(429);
         expect(await owner.invitation.count({ where: { testId: test.id } })).toBe(2);
-        expect(await owner.candidate.count({ where: { email: refused.email as string } })).toBe(0);
+        expect(
+          await owner.candidate.count({
+            where: { email: (refused.candidate as Json).email as string },
+          }),
+        ).toBe(0);
         expect(sent).toHaveLength(2);
         // The counter is per organization.
         await invite(other, otherTest.id, goodBody()).expect(201);
@@ -1035,8 +1125,8 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
       const responses: string[] = [];
       try {
         const ok = await inviteT(testId, {
-          email: addr,
-          fullName: name,
+          candidate: { email: addr, name },
+          windowStart: iso(Date.now()),
           windowEnd: iso(Date.now() + DAY),
         });
         responses.push(JSON.stringify(ok.body), JSON.stringify(ok.headers));
@@ -1045,23 +1135,23 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
         mailMode = 'throw';
         const t2 = await makeTest(who);
         const failed = await inviteT(t2, {
-          email: addr,
-          fullName: name,
+          candidate: { email: addr, name },
+          windowStart: iso(Date.now()),
           windowEnd: iso(Date.now() + DAY),
         });
         responses.push(JSON.stringify(failed.body));
         expect([failed.status, (failed.body as Json).mail]).toEqual([201, 'failed']);
         // A conflict and a validation failure, which echo input in some APIs.
         const dup = await inviteT(t2, {
-          email: addr,
-          fullName: name,
+          candidate: { email: addr, name },
+          windowStart: iso(Date.now()),
           windowEnd: iso(Date.now() + DAY),
         });
         expect(dup.status).toBe(409);
         responses.push(JSON.stringify(dup.body));
         const bad = await inviteT(testId, {
-          email: addr,
-          fullName: name,
+          candidate: { email: addr, name },
+          windowStart: iso(Date.now()),
           windowEnd: 'planted',
         });
         expect(bad.status).toBe(400);

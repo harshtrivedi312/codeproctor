@@ -1,10 +1,17 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
-import { IsEmail, IsString, Length, MaxLength, ValidateBy, ValidateIf } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+import { Transform, Type } from 'class-transformer';
+import {
+  IsDefined,
+  IsEmail,
+  IsObject,
+  IsString,
+  Length,
+  MaxLength,
+  ValidateBy,
+  ValidateNested,
+} from 'class-validator';
 import { isStorableText } from '../../questions/text-rules';
 
-/** Like @IsOptional(), but only `undefined` skips validation: an explicit null is a 400. */
-const Opt = (): PropertyDecorator => ValidateIf((_o: unknown, v: unknown) => v !== undefined);
 const SafeText = (): PropertyDecorator =>
   ValidateBy({
     name: 'safeText',
@@ -62,9 +69,9 @@ const trimLower = ({ value }: { value: unknown }): unknown =>
 
 export const MAX_EMAIL_LENGTH = 254;
 export const MAX_FULL_NAME_LENGTH = 200;
-export const MAX_EXTERNAL_REF_LENGTH = 100;
 
-export class CreateInvitationDto {
+/** The invited person. Same shape the web dialog sends: { email, name }. */
+export class InvitationCandidateDto {
   @ApiProperty({ maxLength: MAX_EMAIL_LENGTH, description: 'Stored lower-case.' })
   @Transform(trimLower)
   @IsString()
@@ -74,33 +81,33 @@ export class CreateInvitationDto {
   @PlainLocalPart()
   email!: string;
 
-  @ApiProperty({ minLength: 1, maxLength: MAX_FULL_NAME_LENGTH })
+  @ApiProperty({
+    minLength: 1,
+    maxLength: MAX_FULL_NAME_LENGTH,
+    description: 'Stored as full_name.',
+  })
   @Transform(trim)
   @IsString()
   @Length(1, MAX_FULL_NAME_LENGTH)
   @SafeText()
   @DisplaySafe()
-  fullName!: string;
+  name!: string;
+}
 
-  @ApiPropertyOptional({
-    maxLength: MAX_EXTERNAL_REF_LENGTH,
-    description: 'Your own reference (for example an ATS id). Kept only for a new candidate.',
-  })
-  @Opt()
-  @Transform(trim)
-  @IsString()
-  @Length(1, MAX_EXTERNAL_REF_LENGTH)
-  @SafeText()
-  @DisplaySafe()
-  externalRef?: string;
+export class CreateInvitationDto {
+  @ApiProperty({ type: InvitationCandidateDto })
+  @IsDefined()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => InvitationCandidateDto)
+  candidate!: InvitationCandidateDto;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     format: 'date-time',
-    description: 'ISO 8601 with a UTC offset. Default: the server time now.',
+    description: 'ISO 8601 with a UTC offset. At most 5 minutes before the server time now.',
   })
-  @Opt()
   @IsInstant()
-  windowStart?: string;
+  windowStart!: string;
 
   @ApiProperty({
     format: 'date-time',
@@ -118,6 +125,7 @@ export class InvitationCreatedDto {
   @ApiProperty({ format: 'uuid' }) id!: string;
   @ApiProperty({ format: 'uuid' }) testId!: string;
   @ApiProperty({ format: 'uuid' }) candidateId!: string;
+  @ApiProperty({ description: 'Session status: INVITED for a new invitation.' }) status!: string;
   @ApiProperty({ format: 'date-time' }) windowStart!: string;
   @ApiProperty({ format: 'date-time' }) windowEnd!: string;
   @ApiProperty({ format: 'date-time' }) createdAt!: string;
