@@ -124,14 +124,17 @@ describe('plain-args: the pure check (review of #185, B1; NFR-04, TC-008)', () =
         const inherited = Object.assign(Object.create({ status: 'PAUSED' }) as object, {
           lastHeartbeat: new Date(),
         });
-        expect(() => plain({ [key]: inherited })).toThrow(/an inherited key/);
+        // A data row needs a plain prototype too (FU-DB-281), so the prototype check refuses it first.
+        expect(() => plain({ [key]: inherited })).toThrow(
+          /a prototype other than Object.prototype/,
+        );
         expect(() =>
           plain({ [key]: json('{"lastHeartbeat":"x","__proto__":{"status":"PAUSED"}}') }),
         ).toThrow(/own "__proto__" key/);
         // One level below: a { set } or { increment } object, or a JSON value.
         expect(() =>
           plain({ [key]: { points: Object.create({ increment: 5 }) as object } }),
-        ).toThrow(/an inherited key/);
+        ).toThrow(/a prototype other than Object.prototype/);
         expect(() => plain({ [key]: { settings: json('{"a":1,"__proto__":{"b":2}}') } })).toThrow(
           /own "__proto__" key/,
         );
@@ -140,9 +143,9 @@ describe('plain-args: the pure check (review of #185, B1; NFR-04, TC-008)', () =
 
     it('TC-008 every row of a createMany, and a createMany given one row', () => {
       const bad = Object.create({ source: 'SERVER' }) as object;
-      expect(() => plain({ data: [{ a: 1 }, { a: 2 }, bad] })).toThrow(/an inherited key/);
-      expect(() => plain({ data: bad })).toThrow(/an inherited key/);
-      expect(() => plain({ data: [[bad]] })).toThrow(/an inherited key/);
+      for (const data of [[{ a: 1 }, { a: 2 }, bad], bad, [[bad]]]) {
+        expect(() => plain({ data })).toThrow(/a prototype other than Object.prototype/);
+      }
     });
 
     it('TC-008 the message names the model, the operation and the place, never a value', () => {
@@ -235,17 +238,23 @@ describe('plain-args: the pure check (review of #185, B1; NFR-04, TC-008)', () =
       }
     });
 
-    it('TC-008 a class instance with no enumerable inherited key passes as a data row (a DTO), but never as the args or a structure object', () => {
+    it('TC-008 a class instance is refused everywhere the hook looks, a data row included (FU-DB-281); through the client a DTO still works, as Prisma clones it first', () => {
       class Dto {
         status = 'PAUSED';
         method(): number {
           return 1;
         }
       }
-      expect(() => plain({ data: new Dto() })).not.toThrow();
-      expect(() => plain({ data: { settings: new Dto() } })).not.toThrow();
-      expect(() => plain({ where: new Dto() })).toThrow(refused);
-      expect(() => plain(new Dto())).toThrow(refused);
+      for (const args of [
+        { data: new Dto() },
+        { data: { settings: new Dto() } },
+        { data: [new Dto()] },
+        { where: new Dto() },
+        new Dto(),
+      ]) {
+        expect(() => plain(args)).toThrow(/a prototype other than Object.prototype/);
+      }
+      // The client-level case (the hook sees Prisma's plain clone of the DTO) is in the "real client" block.
     });
 
     it('TC-008 Object.prototype of another realm (a vm context, as in a worker) is plain', () => {
@@ -271,6 +280,482 @@ describe('plain-args: the pure check (review of #185, B1; NFR-04, TC-008)', () =
       plain({ data: rows });
       expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(250);
     });
+  });
+});
+
+/** Prisma's brand of its null sentinels: its argument clone passes an object that carries it BY REFERENCE. */
+const BRAND = Symbol.for('prisma.objectEnumValue');
+const HIDDEN_KEY = /a non-enumerable key|an accessor|a symbol key|a Proxy/;
+
+describe('plain-args: hidden keys, anywhere in the tree (FU-DB-281; #261 delta review, S1; NFR-04, TC-008)', () => {
+  const plain = (args: unknown): void => assertPlainArgs('Session', 'findMany', args);
+
+  /** Each shape hides something from an own-enumerable walk that Prisma's [[Get]] (or a trap) still answers. */
+  const HIDDEN: Array<[string, () => object]> = [
+    [
+      'a non-enumerable own select',
+      () => Object.defineProperty({}, 'select', { value: { hmacKeyEnc: true } }),
+    ],
+    [
+      'a non-enumerable own include',
+      () => Object.defineProperty({}, 'include', { value: { invitation: true } }),
+    ],
+    [
+      'an enumerable getter',
+      () => Object.defineProperty({}, 'id', { get: () => true, enumerable: true }),
+    ],
+    ['a non-enumerable getter', () => Object.defineProperty({}, 'include', { get: () => ({}) })],
+    [
+      'a setter alone',
+      () => Object.defineProperty({}, 'id', { set: () => undefined, enumerable: true }),
+    ],
+    ['a symbol key', () => ({ [Symbol('hidden')]: true })],
+    ["Prisma's brand, which its clone passes by reference", () => ({ [BRAND]: true })],
+    ['a Proxy', () => new Proxy({}, {})],
+    [
+      'a Proxy whose get trap answers select',
+      () =>
+        new Proxy({}, { get: (_t, key) => (key === 'select' ? { hmacKeyEnc: true } : undefined) }),
+    ],
+  ];
+
+  /** Every place the walk visits, with the hiding object put there. */
+  const PLACES: Array<[string, (bad: object) => unknown]> = [
+    ['the arguments', (bad) => bad],
+    ['where', (bad) => ({ where: bad })],
+    ['where, under AND', (bad) => ({ where: { AND: [{ id: 'x' }, bad] } })],
+    ['where, a relation filter', (bad) => ({ where: { invitation: { is: bad } } })],
+    ['where, the filter of a Json column', (bad) => ({ where: { deviceInfo: bad } })],
+    ['select', (bad) => ({ select: bad })],
+    ['select, the args of a relation', (bad) => ({ select: { id: true, invitation: bad } })],
+    ['select, _count', (bad) => ({ select: { id: true, _count: bad } })],
+    ['include, the args of a relation', (bad) => ({ include: { invitation: bad } })],
+    [
+      'include, deep',
+      (bad) => ({ include: { invitation: { include: { candidate: { select: bad } } } } }),
+    ],
+    ['omit', (bad) => ({ omit: bad })],
+    ['orderBy', (bad) => ({ orderBy: [{ id: 'asc' }, bad] })],
+    ['having', (bad) => ({ having: bad })],
+    ['cursor', (bad) => ({ cursor: bad })],
+    ['an aggregate', (bad) => ({ _count: bad })],
+    ['data, the row', (bad) => ({ data: bad })],
+    ['data, one level below a column', (bad) => ({ data: { deviceInfo: bad } })],
+    ['a createMany row', (bad) => ({ data: [{ orgId: 'x' }, bad] })],
+    ['an upsert create', (bad) => ({ where: { id: 'x' }, create: bad, update: {} })],
+    ['an upsert update', (bad) => ({ where: { id: 'x' }, create: {}, update: bad })],
+  ];
+
+  it.each(PLACES)('TC-008 %s: every hidden-key shape is refused', (_place, put) => {
+    for (const [shape, make] of HIDDEN) {
+      expect({ shape, refused: !passes(() => plain(put(make()))) }).toEqual({
+        shape,
+        refused: true,
+      });
+      expect(() => plain(put(make()))).toThrow(HIDDEN_KEY);
+    }
+  });
+
+  it('TC-008 the checks run before any getter of the caller does, and the message names no key and no value', () => {
+    let reads = 0;
+    const bad = Object.defineProperty({}, 'include', {
+      get: () => {
+        reads += 1;
+        return { secretRelation: true };
+      },
+      enumerable: true,
+    });
+    let message = '';
+    try {
+      plain({ select: { id: true, invitation: bad } });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(reads).toBe(0);
+    expect(message).toMatch(/an accessor \(a getter or a setter\) in select is refused/);
+    expect(message).not.toMatch(/include|secret/);
+  });
+
+  it('TC-008 arrays: a foreign prototype, a Proxy, a symbol key, a named key, a getter or a non-enumerable index are refused in structure and createMany rows', () => {
+    class List extends Array<unknown> {}
+    const ARRAYS: Array<[string, () => unknown[]]> = [
+      ['an Array subclass', () => List.from([{ id: 'x' }])],
+      [
+        'an array on another array',
+        () => Object.setPrototypeOf([{ id: 'x' }], [] as unknown[]) as unknown[],
+      ],
+      ['a Proxy of an array', () => new Proxy([{ id: 'x' }], {})],
+      ['the brand', () => Object.assign([{ id: 'x' }], { [BRAND]: true })],
+      ['a named key', () => Object.assign([{ id: 'x' }], { select: { id: true } })],
+      [
+        'a non-enumerable named key',
+        () => Object.defineProperty([{ id: 'x' }], 'select', { value: { id: true } }),
+      ],
+      [
+        'a getter at an index',
+        () => Object.defineProperty([], '0', { get: () => ({ id: 'x' }), enumerable: true }),
+      ],
+      [
+        'a non-enumerable index',
+        () => Object.defineProperty([], '0', { value: { id: 'x' }, enumerable: false }),
+      ],
+    ];
+    const PUT: Array<[string, (list: unknown[]) => unknown]> = [
+      ['where AND', (list) => ({ where: { AND: list } })],
+      ['orderBy', (list) => ({ orderBy: list })],
+      ['distinct', (list) => ({ distinct: list })],
+      ['createMany rows', (list) => ({ data: list })],
+    ];
+    for (const [shape, make] of ARRAYS) {
+      for (const [place, put] of PUT) {
+        expect({ shape, place, refused: !passes(() => plain(put(make()))) }).toEqual({
+          shape,
+          place,
+          refused: true,
+        });
+      }
+    }
+    // One level below a data column an array is a value (a scalar list, a Json array): its prototype, a Proxy and a
+    // symbol key are refused, and its elements and named keys are not looked at (Prisma reads it as a value).
+    for (const [shape, make] of ARRAYS.slice(0, 4)) {
+      expect({ shape, refused: !passes(() => plain({ data: { pauseReasons: make() } })) }).toEqual({
+        shape,
+        refused: true,
+      });
+    }
+    expect(() =>
+      plain({ data: { pauseReasons: Object.assign(['PROCTOR'], { note: 1 }) } }),
+    ).not.toThrow();
+    expect(() => plain({ where: { AND: [{ id: 'x' }, [{ id: 'y' }]] } })).not.toThrow();
+    // A sparse array has holes, not hidden keys.
+    // eslint-disable-next-line no-sparse-arrays
+    expect(() => plain({ orderBy: [{ id: 'asc' }, , { status: 'desc' }] })).not.toThrow();
+  });
+
+  it('TC-008 a value object is skipped only when it is the real thing: a look-alike, or a real one with something added, is walked and refused', () => {
+    const client = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    try {
+      const ref = (client as unknown as { session: { fields: Record<string, object> } }).session
+        .fields.deadlineAt as object;
+      const refProto = Object.getPrototypeOf(ref) as object;
+      const polluted = (): object => Object.create({ hmacKeyEnc: true }) as object;
+      const FAKES: Array<[string, () => object]> = [
+        ['a Date with an own key', () => Object.assign(new Date(), { select: { id: true } })],
+        [
+          'a Date with a non-enumerable own key',
+          () => Object.defineProperty(new Date(), 'select', { value: { id: true } }),
+        ],
+        ['a Date with the brand', () => Object.assign(new Date(), { [BRAND]: true })],
+        ['a Date subclass', () => new (class extends Date {})()],
+        ['a Proxy of a Date', () => new Proxy(new Date(), {})],
+        ['a Uint8Array subclass', () => new (class extends Uint8Array {})(2)],
+        ['a byte array with the brand', () => Object.assign(new Uint8Array(2), { [BRAND]: true })],
+        ['a DataView', () => new DataView(new ArrayBuffer(2))],
+        ['a Decimal with an own key', () => Object.assign(new Prisma.Decimal(1), { select: {} })],
+        [
+          'a Decimal with a getter',
+          () => Object.defineProperty(new Prisma.Decimal(1), 's', { get: () => 1 }),
+        ],
+        [
+          'a Decimal look-alike on a prototype with a key (the old duck test skipped it)',
+          () => Object.assign(polluted(), { s: 1, e: 0, d: [1], toStringTag: '[object Decimal]' }),
+        ],
+        [
+          'a field reference with a key added',
+          () => Object.assign(Object.create(refProto) as object, ref, { select: {} }),
+        ],
+        [
+          'a field reference with the brand',
+          () => Object.assign(Object.create(refProto) as object, ref, { [BRAND]: true }),
+        ],
+        ['an object built on a field reference', () => Object.create(ref) as object],
+        ['a Proxy of a field reference', () => new Proxy(ref, {})],
+        [
+          'a field reference look-alike on a prototype with a key (the old duck test skipped it)',
+          () =>
+            Object.assign(polluted(), {
+              modelName: 'Session',
+              name: 'id',
+              typeName: 'String',
+              isList: false,
+              isEnum: false,
+            }),
+        ],
+      ];
+      const PUT: Array<[string, (value: object) => unknown]> = [
+        ['a where operand', (value) => ({ where: { startedAt: { equals: value } } })],
+        ['a data column', (value) => ({ data: { lastHeartbeat: value } })],
+        ['a select entry', (value) => ({ select: { id: value } })],
+      ];
+      for (const [shape, make] of FAKES) {
+        for (const [place, put] of PUT) {
+          expect({ shape, place, refused: !passes(() => plain(put(make()))) }).toEqual({
+            shape,
+            place,
+            refused: true,
+          });
+        }
+      }
+      // The real ones still pass, of this realm and of another (a vm context), and a large Buffer costs nothing.
+      const big = Buffer.alloc(1 << 20);
+      const REAL: unknown[] = [
+        new Date(),
+        runInNewContext('new Date()'),
+        Buffer.from('x'),
+        Buffer.from('xyz').subarray(1),
+        new Uint8Array(2),
+        runInNewContext('new Uint8Array(2)'),
+        new Prisma.Decimal('1.5'),
+        Prisma.DbNull,
+        ref,
+        (client as unknown as { session: { fields: Record<string, object> } }).session.fields.id,
+      ];
+      for (const value of REAL) {
+        expect(() =>
+          plain({ where: { startedAt: { equals: value } }, data: { lastHeartbeat: value } }),
+        ).not.toThrow();
+      }
+      const started = process.hrtime.bigint();
+      plain({ data: { signature: big }, where: { signature: { equals: big } } });
+      expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(20);
+    } finally {
+      void client.$disconnect();
+    }
+  });
+
+  it('TC-008 a value goes only where a value goes: a real Date, byte array, Decimal, field reference or Json null where a query object is expected is refused', () => {
+    const client = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    try {
+      const ref = (client as unknown as { session: { fields: Record<string, object> } }).session
+        .fields.deadlineAt as object;
+      const VALUES: Array<[string, object]> = [
+        ['a Date', new Date()],
+        ['a Buffer', Buffer.from('x')],
+        ['a Uint8Array', new Uint8Array(0)],
+        ['a Decimal', new Prisma.Decimal('1.5')],
+        ['a field reference', ref],
+        ['Prisma.DbNull', Prisma.DbNull],
+        ['Prisma.JsonNull', Prisma.JsonNull],
+      ];
+      const QUERY_OBJECT: Array<[string, (value: object) => unknown]> = [
+        ...[
+          'select',
+          'include',
+          'omit',
+          'where',
+          'having',
+          'orderBy',
+          'cursor',
+          '_count',
+          '_sum',
+          'data',
+          'create',
+          'update',
+        ].map((key): [string, (value: object) => unknown] => [key, (value) => ({ [key]: value })]),
+        ['a where under AND', (value) => ({ where: { AND: [value] } })],
+        ['a where under NOT', (value) => ({ where: { NOT: value } })],
+        ['a relation filter', (value) => ({ where: { invitation: value } })],
+        ['a relation filter body', (value) => ({ where: { invitation: { is: value } } })],
+        ['a createMany row', (value) => ({ data: [{ orgId: 'x' }, value] })],
+        ['the select of relation args', (value) => ({ select: { invitation: { select: value } } })],
+        ['the where of relation args', (value) => ({ include: { invitation: { where: value } } })],
+        ['the select of _count', (value) => ({ select: { _count: { select: value } } })],
+        ['an aggregate inside having', (value) => ({ having: { pausedMs: { _avg: value } } })],
+      ];
+      for (const [kind, value] of VALUES) {
+        for (const [place, put] of QUERY_OBJECT) {
+          let reason = '';
+          try {
+            plain(put(value));
+          } catch (error) {
+            reason = (error as Error).message;
+          }
+          expect({ kind, place, matched: /where a query object is expected/.test(reason) }).toEqual(
+            {
+              kind,
+              place,
+              matched: true,
+            },
+          );
+        }
+        expect(() => plain({ where: value })).toThrow(/where a query object is expected/);
+      }
+      // Where a value goes, each still passes.
+      for (const [kind, value] of VALUES.filter(([k]) => !k.startsWith('Prisma.'))) {
+        for (const args of [
+          { where: { startedAt: value } },
+          { where: { startedAt: { gte: value } } },
+          { where: { id: { in: [value] } } },
+          { cursor: { id: value } },
+          { data: { lastHeartbeat: value } },
+          {
+            create: { lastHeartbeat: value },
+            update: { lastHeartbeat: value },
+            where: { id: 'x' },
+          },
+        ]) {
+          expect({ kind, args: Object.keys(args), ok: passes(() => plain(args)) }).toEqual({
+            kind,
+            args: Object.keys(args),
+            ok: true,
+          });
+        }
+      }
+      for (const nullValue of [Prisma.DbNull, Prisma.JsonNull, Prisma.AnyNull]) {
+        expect(() =>
+          plain({
+            where: { deviceInfo: { equals: nullValue } },
+            data: { deviceInfo: nullValue },
+          }),
+        ).not.toThrow();
+      }
+    } finally {
+      void client.$disconnect();
+    }
+  });
+});
+
+describe('plain-args: the Prisma serializer markers and value positions (FU-DB-281 review B1, S1; NFR-04, TC-008)', () => {
+  const plain = (args: unknown): void => assertPlainArgs('Session', 'findMany', args);
+
+  it('TC-008 B1: an own __prismaRawParameters__ key (Prisma sends `values` raw, dropping the org filter) is refused everywhere the walk visits', () => {
+    const marker = (): Record<string, unknown> => ({ __prismaRawParameters__: true, values: {} });
+    const PLACES: Array<[string, (bad: object) => unknown]> = [
+      ['the arguments', (bad) => bad],
+      ['where', (bad) => ({ where: bad })],
+      ['where, under AND', (bad) => ({ where: { AND: [bad] } })],
+      ['where, a relation filter body', (bad) => ({ where: { invitation: { is: bad } } })],
+      ['a scalar filter operand', (bad) => ({ where: { id: { equals: bad } } })],
+      ['data, the row', (bad) => ({ data: bad })],
+      ['data, one level below a column', (bad) => ({ data: { deviceInfo: bad } })],
+      ['a createMany row', (bad) => ({ data: [{ orgId: 'x' }, bad] })],
+      ['an upsert update', (bad) => ({ where: { id: 'x' }, create: {}, update: bad })],
+      ['select, a relation args', (bad) => ({ select: { id: true, invitation: bad } })],
+    ];
+    for (const [place, put] of PLACES) {
+      expect({ place, refused: !passes(() => plain(put(marker()))) }).toEqual({
+        place,
+        refused: true,
+      });
+    }
+    expect(() => plain({ where: marker() })).toThrow(/__prismaRawParameters__/);
+  });
+
+  it("TC-008 B1: an own function value (Prisma serializes toJSON() in the object's place) is refused; the message names no value", () => {
+    const withToJson = (): Record<string, unknown> => ({ toJSON: () => ({ orgId: 'other' }) });
+    for (const put of [
+      (b: object) => ({ where: b }),
+      (b: object) => ({ data: b }),
+      (b: object) => ({ where: { id: { equals: b } } }),
+      (b: object) => ({ select: { id: true, invitation: b } }),
+    ]) {
+      expect(passes(() => plain(put(withToJson())))).toBe(false);
+    }
+    let message = '';
+    try {
+      plain({ data: { onlyIf: () => 'secret' } });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/a function value in data is refused/);
+    expect(message).not.toMatch(/secret|onlyIf/);
+  });
+
+  it('TC-008 S1: a value object or a hidden-key carrier as the value of a select or include relation field is refused in plain-args itself (not only omit-args)', () => {
+    const client = createPrismaClient('postgresql://nobody:nothing@127.0.0.1:1/none');
+    try {
+      const ref = (client as unknown as { session: { fields: Record<string, object> } }).session
+        .fields.deadlineAt as object;
+      const VALUES: Array<[string, object]> = [
+        ['a Date', new Date()],
+        ['a Buffer', Buffer.from('x')],
+        ['a Decimal', new Prisma.Decimal('1.5')],
+        ['a field reference', ref],
+        ['Prisma.DbNull', Prisma.DbNull],
+        [
+          'a non-enumerable select carrier',
+          Object.defineProperty({}, 'select', { value: { tokenHash: true } }),
+        ],
+      ];
+      for (const [kind, value] of VALUES) {
+        for (const put of [
+          (v: object) => ({ select: { id: true, invitation: v } }),
+          (v: object) => ({ include: { invitation: v } }),
+          (v: object) => ({ select: { _count: { select: { sessions: v } } } }),
+          (v: object) => ({ select: { invitation: { include: { candidate: v } } } }),
+        ]) {
+          expect({ kind, refused: !passes(() => plain(put(value))) }).toEqual({
+            kind,
+            refused: true,
+          });
+        }
+      }
+      // A relation field that is true/false or a real args object still passes.
+      expect(() =>
+        plain({ select: { id: true, invitation: true, candidate: false } }),
+      ).not.toThrow();
+      expect(() =>
+        plain({
+          select: {
+            invitation: { select: { id: true }, where: { createdAt: { gte: new Date() } } },
+          },
+        }),
+      ).not.toThrow();
+    } finally {
+      void client.$disconnect();
+    }
+  });
+
+  it('TC-008 N1: a real Skip instance from the runtime (exported even with the preview off, so Prisma.skip is not) is walked and refused, fail closed', async () => {
+    const runtime = (await import('@prisma/client/runtime/client')) as { skip: unknown };
+    const skip = runtime.skip as object;
+    expect(isPlainPrototype(Object.getPrototypeOf(skip))).toBe(false);
+    // Prisma.skip is not exported by this client (no strictUndefinedChecks preview).
+    expect(Object.hasOwn(Prisma, 'skip')).toBe(false);
+    // The Skip singleton reaches the hook by reference, and is refused wherever a query object is expected.
+    for (const put of [
+      (v: object) => ({ where: v }),
+      (v: object) => ({ data: v }),
+      (v: object) => ({ select: v }),
+    ]) {
+      expect(passes(() => plain(put(skip)))).toBe(false);
+    }
+    // A Skip as a filter operand is a non-plain-prototype object, refused by checkObject.
+    expect(passes(() => plain({ where: { status: skip } }))).toBe(false);
+  });
+
+  it('TC-008 N3: no schema column is named like a query-object key, a logical key or a relation-filter key (so the position rules never refuse a real column)', async () => {
+    const metas = await readModelMetas();
+    const reserved = new Set([
+      'select',
+      'include',
+      'omit',
+      'where',
+      'orderBy',
+      'cursor',
+      'having',
+      '_count',
+      '_avg',
+      '_sum',
+      '_min',
+      '_max',
+      'AND',
+      'OR',
+      'NOT',
+      'some',
+      'every',
+      'none',
+      'is',
+      'isNot',
+      '__prismaRawParameters__',
+    ]);
+    const clashes: string[] = [];
+    for (const [model, meta] of Object.entries(metas)) {
+      for (const field of meta.fields) {
+        if (reserved.has(field.name)) clashes.push(`${model}.${field.name}`);
+      }
+    }
+    expect(clashes).toEqual([]);
   });
 });
 
@@ -710,6 +1195,81 @@ describe('plain-args: through the real client, in every scope (review of #185, B
       }
     });
 
+    // FU-DB-281: Prisma's clone passes an object BY REFERENCE when `value[Symbol.for('prisma.objectEnumValue')]` is
+    // true, so its hidden keys reach the hook and then Prisma's `Wt({ select, include })`. Refused before the query.
+    it("TC-008 FU-DB-281: an object with Prisma's brand (kept by reference past its clone) and a hidden select, a getter include or a trap is refused before the query", async () => {
+      const carriers: Array<() => object> = [
+        () => Object.defineProperty({ [BRAND]: true }, 'select', { value: { hmacKeyEnc: true } }),
+        () =>
+          Object.defineProperty({ [BRAND]: true }, 'include', {
+            get: () => ({ invitation: true }),
+          }),
+        () =>
+          new Proxy(
+            {},
+            {
+              get: (_t, key) =>
+                key === BRAND ? true : key === 'select' ? { hmacKeyEnc: true } : undefined,
+            },
+          ),
+      ];
+      const makes: Array<(carrier: object) => Promise<unknown>> = [
+        (c) => client.session.findFirst({ select: { id: true, _count: c } } as never),
+        (c) => client.session.findFirst({ include: { invitation: c } } as never),
+        (c) => client.session.count({ where: { AND: [c] } } as never),
+        (c) => client.session.update({ where: { id: SID }, data: c } as never),
+      ];
+      for (const carrier of carriers) {
+        for (const make of makes) {
+          const error = await run(() => outcome(make(carrier())));
+          expect(error).toBeInstanceOf(OrgScopeViolationError);
+          expect((error as Error).message).toMatch(HIDDEN_KEY);
+        }
+      }
+    });
+
+    it('TC-008 FU-DB-281: the walk is the guarantee, not the clone: a byte array whose own slice returns a branded object, or a byte array with own keys, is refused', async () => {
+      const slicesTo = (result: object): object =>
+        Object.assign(new Uint8Array(0), { slice: () => result });
+      const makes: Array<() => Promise<unknown>> = [
+        () =>
+          client.session.update({
+            where: { id: SID },
+            data: {
+              lastHeartbeat: slicesTo(
+                Object.defineProperty({ [BRAND]: true }, 'select', { value: { hmacKeyEnc: true } }),
+              ),
+            },
+          } as never),
+        () =>
+          client.session.findFirst({
+            select: slicesTo(Object.assign(new Uint8Array(0), { hmacKeyEnc: true })),
+          } as never),
+        () =>
+          client.session.findFirst({
+            where: slicesTo(Object.assign(new Uint8Array(0), { hmacKeyEnc: 'guess' })),
+          } as never),
+      ];
+      for (const make of makes) {
+        const error = await run(() => outcome(make()));
+        expect(error).toBeInstanceOf(OrgScopeViolationError);
+        expect((error as Error).message).toMatch(refused);
+      }
+    });
+
+    it('TC-008 FU-DB-281: without the brand, Prisma clones first: a non-enumerable key, a symbol key, a getter and a plain Proxy reach the hook as plain own keys (or not at all), so they are not refused', async () => {
+      for (const where of [
+        Object.defineProperty({ id: SID }, 'hmacKeyEnc', { value: 'guess' }),
+        { id: SID, [Symbol('hidden')]: 'guess' },
+        Object.defineProperty({}, 'id', { get: () => SID, enumerable: true }),
+        new Proxy({ id: SID }, {}),
+      ]) {
+        const error = await run(() => outcome(client.session.findFirst({ where } as never)));
+        expect(error).toBeDefined();
+        expect(error).not.toBeInstanceOf(OrgScopeError);
+      }
+    });
+
     it('TC-008 a plain query, and a query with null-prototype arguments, are not refused (they reach the closed port)', async () => {
       for (const make of [
         () => client.session.findFirst({ select: { id: true }, where: { id: SID } }),
@@ -748,6 +1308,30 @@ describe('plain-args: through the real client, in every scope (review of #185, B
       outcome(client.session.findFirst(Object.create({ select: { hmacKeyEnc: true } }) as never)),
     );
     expect((topError as Error).message).toMatch(/the column hmacKeyEnc is not available/);
+  });
+
+  it('TC-008 FU-DB-281: a DTO row, a Date, a Buffer and a Decimal still pass through the client (Prisma hands the hook its plain clone and real values)', async () => {
+    class HeartbeatDto {
+      lastHeartbeat = new Date();
+      touch(): number {
+        return 1;
+      }
+    }
+    const staff = scopes[2]?.[1] as Run;
+    for (const make of [
+      () => client.session.update({ where: { id: SID }, data: new HeartbeatDto() }),
+      () =>
+        client.testQuestion.update({
+          where: { id: OTHER },
+          data: { points: new Prisma.Decimal('5.5') },
+        }),
+      () => client.keystrokeBatch.findFirst({ where: { signature: { equals: Buffer.from('x') } } }),
+      () => client.session.count({ where: { startedAt: { lt: new Date() } } }),
+    ]) {
+      const error = await staff(() => outcome(make()));
+      expect(error).toBeDefined();
+      expect(error).not.toBeInstanceOf(OrgScopeError);
+    }
   });
 
   it('TC-008 raw queries are not model arguments: the hatch still decides them (nothing here walks a template)', async () => {
