@@ -3,12 +3,13 @@
 //   pnpm demo:down [--infra]
 //
 // Stops the API and the web app (the process groups recorded in .demo/pids.json) and removes the
-// record. With --infra it also stops the containers (pnpm dev:infra:down); the data stays in the Docker
-// volumes. Never deletes data: `pnpm db:reset` (a person, local only) is the way to a clean database.
+// record. With --infra it also stops the containers (pnpm dev:infra:down, in the demo's own compose project
+// `codeproctor-demo`); the data stays in the Docker volumes. Never deletes data: `pnpm db:reset` (a person, local only) is the way to a clean database.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { composeEnv } from './demo-ports.mjs';
 
 /** Process ids from a pids.json text: only positive integers, for names we started. */
 export function parsePids(text) {
@@ -71,7 +72,11 @@ function main() {
     console.log('no apps recorded in .demo/pids.json.');
   }
   if (args.includes('--infra')) {
-    const r = spawnSync('pnpm', ['dev:infra:down'], { cwd: root, stdio: 'inherit' });
+    const r = spawnSync('pnpm', ['dev:infra:down'], {
+      cwd: root,
+      stdio: 'inherit',
+      env: composeEnv(),
+    });
     if (r.status !== 0) process.exit(1);
   }
 }

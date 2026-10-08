@@ -5,6 +5,25 @@
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 
+/** The dev stack's compose project (`name:` in infra/docker-compose.yml) and the demo's own. */
+export const DEV_PROJECT = 'codeproctor';
+export const DEMO_PROJECT = 'codeproctor-demo';
+
+/**
+ * The compose project the demo uses: its own (`codeproctor-demo`), so its volumes never are the dev
+ * stack's (the dev volume was initialised with another .env's passwords). COMPOSE_PROJECT_NAME in the
+ * environment still wins, for someone who chooses a project on purpose.
+ */
+export function demoProject(env = process.env) {
+  const name = env.COMPOSE_PROJECT_NAME;
+  return typeof name === 'string' && /^[a-z0-9][a-z0-9_-]*$/.test(name) ? name : DEMO_PROJECT;
+}
+
+/** The environment for the docker compose commands the demo runs (pnpm dev:infra, dev:infra:down). */
+export function composeEnv(env = process.env) {
+  return { ...env, COMPOSE_PROJECT_NAME: demoProject(env) };
+}
+
 /** Every port the demo binds on 127.0.0.1, with what uses it. `kind` says who must be free of it. */
 export const DEMO_PORTS = [
   { port: 5432, name: 'PostgreSQL', kind: 'infra' },
@@ -30,24 +49,24 @@ export function isFree(port) {
 }
 
 /**
- * The containers of the `codeproctor` compose project (running or stopped), from `docker ps -a`: [{ name, configFiles, ports }]. Reads only;
+ * The containers of one compose project (running or stopped), from `docker ps -a`: [{ name, configFiles, ports }]. Reads only;
  * a missing docker gives an empty list.
  */
-export function dockerContainers() {
+export function dockerContainers(project = DEV_PROJECT) {
   const r = spawnSync(
     'docker',
     [
       'ps',
       '-a',
       '--filter',
-      'label=com.docker.compose.project=codeproctor',
+      `label=com.docker.compose.project=${project}`,
       '--format',
       '{{.Names}}\t{{.Label "com.docker.compose.project.config_files"}}\t{{.Ports}}',
     ],
     { encoding: 'utf8' },
   );
   if (r.status !== 0) return [];
-  return parseDockerPs(r.stdout);
+  return parseDockerPs(r.stdout).map((c) => ({ ...c, project }));
 }
 
 /** Pure: `docker ps` lines to containers with the host ports they publish. */
@@ -65,7 +84,7 @@ export function parseDockerPs(text) {
 }
 
 /**
- * Pure: containers of the shared `codeproctor` compose project that belong to ANOTHER checkout, running or
+ * Pure: containers of the demo's compose project that belong to ANOTHER checkout, running or
  * stopped. `docker compose up` here would recreate them and reuse their named volumes, which is taking
  * another stack over, so any such container is a clash even when its ports are free.
  */
@@ -73,11 +92,11 @@ export function foreignContainers(containers, ourCompose) {
   return containers.filter((c) => c.configFiles.length > 0 && !c.configFiles.includes(ourCompose));
 }
 
-export function foreignMessage(foreign) {
+export function foreignMessage(foreign, project = DEMO_PROJECT) {
   const names = foreign.map((c) => c.name).join(', ');
   const where = foreign[0]?.configFiles[0] ?? 'another checkout';
   return (
-    `The compose project "codeproctor" already has containers from another checkout (${names}; ${where}). ` +
+    `The compose project "${project}" already has containers from another checkout (${names}; ${where}). ` +
     `They share this project's name and volumes, so starting the stack here would recreate them and reuse their data. ` +
     `demo:up never stops or reuses another stack's containers. Fix: from that checkout run \`pnpm dev:infra:down\` ` +
     `(this keeps its data), then run demo:up again.`
@@ -90,11 +109,20 @@ export function foreignMessage(foreign) {
  * an app of ours already answers its health URL on that port.
  * Returns { ok: true, note? } or { ok: false, message }.
  */
-export function judgePort({ spec, free, containers, ourCompose, ourAppUp }) {
+export function judgePort({
+  spec,
+  free,
+  containers,
+  ourCompose,
+  ourAppUp,
+  project = DEMO_PROJECT,
+}) {
   if (free) return { ok: true };
   const holder = containers.find((c) => c.ports.includes(spec.port));
   if (holder !== undefined) {
-    if (holder.configFiles.includes(ourCompose)) {
+    // Ours only in the demo's own project: this checkout's dev stack (project `codeproctor`) holds the same
+    // ports and `docker compose up` for the demo would fail on them.
+    if (holder.configFiles.includes(ourCompose) && (holder.project ?? project) === project) {
       return {
         ok: true,
         note: `${spec.name} (port ${spec.port}) is held by this checkout's own stack.`,
