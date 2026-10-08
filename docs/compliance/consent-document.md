@@ -82,7 +82,7 @@ Only these people and companies can see your data:
 - **Our staff with the Super Admin role** manage the system and handle requests about your data.
 - **Our service providers**, under contract and only on our instructions: Amazon Web Services (hosting and storage, plus Amazon Simple Email Service for sending your invitation, one-time codes and a copy of this document, and Amazon CloudWatch for system logs, which never contain your recordings, images, codes or passwords), and Cloudflare (delivering the web pages). They may not use your data for their own purposes.
 
-Every time a staff member opens your recordings or images, it is logged. Your scores and status may also be sent to [our applicant tracking system] through an export or automatic notification. We don't share your data with anyone else unless the law requires it.
+Every time a staff member opens one of your recordings or images, it is logged. Your scores and status may also be sent to [our applicant tracking system] through an export or automatic notification. We don't share your data with anyone else unless the law requires it.
 
 ### 7. Where your data is stored
 
@@ -143,4 +143,4 @@ We record the document version, your age confirmation, your typed name, the date
 12. **Legitimate interests (C-29).** Section 5a states the basis. The full legitimate interests assessment is in the DPIA, section 3a. Objections from EU/UK candidates are handled case by case, like accommodations.
 13. **Age (C-30).** The 18+ confirmation is a required tick box. A candidate who doesn't tick it can't sign, and sees the recruiter contact.
 14. **The privacy email** privacy@example.com is a demo address and must be replaced before the pilot.
-10. **Changes to who can see data or how it is secured (F5, compliance review 2026-10-08).** Once a version is approved and served, any change to a statement about who can see candidate data or how it is secured needs a new version number and a fresh signature from candidates who have not yet signed. If the change weakens a promise that signed candidates saw, they also get a notice. v0.4 (D-73) needs neither, because no version has been approved or served. Backend to confirm that opening an ID image or selfie is audited (only `REVIEW_PLAYBACK_ISSUED` was found); if it is not, section 6 says "recordings" only until it is.
+15. **Changes to who can see data or how it is secured (F5, compliance review 2026-10-08).** Once a version is approved and served, any change to a statement about who can see candidate data or how it is secured needs a new version number and a fresh signature from candidates who have not yet signed. If the change weakens a promise that signed candidates saw, they also get a notice. v0.4 (D-73) needs neither, because no version has been approved or served. Backend to confirm that opening an ID image or selfie is audited (only `REVIEW_PLAYBACK_ISSUED` was found); if it is not, section 6 says "recordings" only until it is.
