@@ -111,7 +111,7 @@ describe('demo-invite against a throwaway database (local demo)', { skip }, () =
     pg.psql('demo', "UPDATE sessions SET status = 'EXPIRED'");
     const hashBefore = hashOf();
     const r = await run(env);
-    assert.equal(r.status, 1);
+    assert.equal(r.status, 3, 'a distinct status, which demo:up treats as "carry on"');
     assert.match(r.stderr, /no seeded invitation is still INVITED/);
     assert.equal(hashOf(), hashBefore);
   });
