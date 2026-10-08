@@ -726,14 +726,28 @@ describe('S3: the CS-4.4 READ allowlist (NFR-04, TC-008)', () => {
       ).not.toHaveProperty('omit');
     });
 
-    it('TC-008 a caller omit is merged and ours wins: omit: { hmacKeyEnc: false } cannot bring a hidden column back', () => {
-      const omit = omitOf('Session', 'findMany', {
-        omit: { hmacKeyEnc: false, deviceInfo: false, status: true, invitationId: undefined },
-      });
+    it('TC-008 a caller omit of scalar columns, each true, is merged and ours wins (the caller may hide more)', () => {
+      const omit = omitOf('Session', 'findMany', { omit: { status: true } });
       expect(omit).toMatchObject({ hmacKeyEnc: true, deviceInfo: true, invitationId: true });
-      // The caller may hide more.
       expect(omit?.status).toBe(true);
     });
+
+    it.each([
+      ['false on a hidden column', { hmacKeyEnc: false }],
+      ['undefined on a column', { invitationId: undefined }],
+      ['false on a readable column', { status: false }],
+      ['a relation key, even true', { invitation: true }],
+      ['_count', { _count: false }],
+      ['_count: true', { _count: true }],
+      ['a key that is no column of the model', { notAColumn: true }],
+    ])(
+      'TC-008 S3 of the #314 review: a CANDIDATE omit with %s is refused (scalar columns of the model only, each true; ADR 0013 CS-4.5)',
+      (_what, omit) => {
+        expect(() => omitOf('Session', 'findMany', { omit })).toThrow(
+          /a CANDIDATE omit names scalar columns of the model only, each true/,
+        );
+      },
+    );
 
     it('TC-008 select with omit, a select or an omit that is not an object, and an empty omit of nothing hidden: refused or merged', () => {
       expect(() =>
