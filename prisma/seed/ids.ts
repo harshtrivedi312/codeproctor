@@ -43,6 +43,9 @@ export const ID = {
   refreshToken: (name: string): string => seedId(`refresh-token:${name}`),
   refreshFamily: (name: string): string => seedId(`refresh-family:${name}`),
   consentText: seedId('consent-text:placeholder-v0'),
+  // The dev-only approved demo consent text (D-69). Written and made current only when
+  // APP_ENV is exactly "development" (prisma/seed/apply.ts: applyApprovedDemoConsent).
+  approvedConsentText: seedId('consent-text:local-demo-approved-v0'),
   question: (slug: string): string => seedId(`question:${slug}`),
   questionVersion: (slug: string): string => seedId(`question-version:${slug}:1`),
   testCase: (slug: string, index: number): string => seedId(`test-case:${slug}:${index}`),
