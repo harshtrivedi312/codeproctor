@@ -12,14 +12,14 @@ Updated 2026-10-06 (ADR 0017, C-43..C-48, C-49). Added: TC-101..TC-114 (and TC-1
 | --- | --- | --- | --- | --- | --- | --- |
 | TC-001 | FR-101 | Valid staff login | Enter correct email and password | 2FA prompt (if enabled) or dashboard | F | P1 |
 | TC-002 | FR-101 | Lockout after failures | Enter wrong password 5 times | Account locked 15 min; 6th correct attempt refused; audit entry written | S | P1 |
-| TC-003 | FR-102 | 2FA required for reviewer | Log in as reviewer without TOTP set up | Forced TOTP enrollment before any page loads | S | P1 |
+| TC-003 | FR-102 | 2FA optional and recommended for every staff role (D-70; was: required for reviewer) | Log in as a reviewer without TOTP set up, then enrol TOTP and log in again, then turn it off with the password and a current code | The first login succeeds with the password only and shows the set-up prompt, no page is blocked; after enrolment every login asks for the code; turning it off needs the password and a current code; a user with TOTP is never signed in without the code | S | P1 |
 | TC-004 | FR-103 | RBAC enforcement | Recruiter calls PATCH /questions/:id directly | 403; no change in DB | S | P1 |
 | TC-005 | FR-104 | Refresh token reuse | Use a refresh token twice | Second use rejected; whole token family revoked | S | P1 |
 | TC-006 | FR-105 | Audit on data access | Reviewer opens a session review | audit\_logs row with actor, entity, IP | F | P1 |
 | TC-007 | FR-106 | Candidate OTP before the test starts | Open invite link (test not started), enter wrong OTP 5 times | Link blocked for 30 min; recruiter notified. (No block once the test is in progress: see TC-097.) | S | P2 |
 | TC-008 | NFR-04 | Cross-org access | User from org A requests session from org B | 404 (no data leak) | S | P1 |
 | TC-097 | FR-106 | Wrong OTP during a test (added 2026-10-01, D-21) | Start a test, close the browser, reopen the link on another browser, enter a wrong OTP 6 times | No 30-min block; each failure logs RESUME\_OTP\_FAILED and alerts the proctor on the live view; a retry inside the 30 s cooldown is refused with the wait time; the correct OTP then resumes the session; the server clock kept running | S | P2 |
-| TC-098 | FR-107 | Staff password reset (added 2026-10-01, D-22) | Request a reset for a reviewer account and for an unknown email; use the link; use the same link again; use a link older than 30 min | Same response for both requests; the valid link sets a new password and revokes all refresh tokens; the second use and the expired link are refused; the next login still asks for TOTP; no token appears in logs | S | P1 |
+| TC-098 | FR-107 | Staff password reset (added 2026-10-01, D-22) | Request a reset for a reviewer account that has TOTP enrolled and for an unknown email; use the link; use the same link again; use a link older than 30 min | Same response for both requests; the valid link sets a new password and revokes all refresh tokens; the second use and the expired link are refused; the next login still asks for TOTP; no token appears in logs | S | P1 |
 
 ## Question bank (M2)
 
