@@ -358,7 +358,7 @@ describe('counters from the key response (ADR 0013 section 2; FR-601, FR-608, TC
     await run(KeystrokeQueue, ks);
   });
 
-  it('the time-seeded high fallback is not used when the server gave the counter, even if IndexedDB cannot be read', async () => {
+  it('an unreadable counter still takes the time seed (holes, no collisions) even when the server gave one; the server counter only raises', async () => {
     const key = await importSessionKey(KEY2_B64);
     const broken = newStore();
     vi.spyOn(broken, 'entries').mockRejectedValue(new Error('idb'));
@@ -370,9 +370,28 @@ describe('counters from the key response (ADR 0013 section 2; FR-601, FR-608, TC
     await s.start(r.cfg);
     r.fire();
     await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
-    expect(r.sent[0]?.seq).toBe(12);
-    expect(flags).not.toContain('event-seq');
+    // Batches of an earlier load may sit above the server's counter: the time seed wins, which is
+    // above any plausible value; the keystroke queue in this rig takes it too.
+    expect(r.sent[0]?.seq).toBeGreaterThan(10_000_000);
+    expect(flags).toContain('event-seq');
     await s.stop();
+  });
+
+  it('server counters of 2^31 - 1 or more are ignored (the next cut would be an invalid counter)', async () => {
+    const q = new EventQueue({
+      sessionId: 'sess',
+      key: await importSessionKey(KEY2_B64),
+      store: newStore(),
+      transport: { sendBatch: () => Promise.resolve<SendResult>('OK') },
+      initialSeq: 2 ** 31 - 1,
+    });
+    await q.start();
+    expect(q.stats().nextSeq).toBe(0);
+    await q.seedSeq(2 ** 31 - 1);
+    expect(q.stats().nextSeq).toBe(0);
+    await q.seedSeq(2 ** 31 - 2);
+    expect(q.stats().nextSeq).toBe(2 ** 31 - 2);
+    await q.stop();
   });
 
   it('the media counters of the response are exactly what pipeline.seedCounters takes', async () => {
@@ -507,5 +526,233 @@ describe('setKey with epoch and counters; purge; sweep (FR-702, TC-063, TC-065)'
     const all = seen.join(' ');
     expect(all).not.toContain(KEY2_B64);
     expect(all).not.toContain(TOKEN);
+  });
+});
+
+describe('the key is never written after a purge, never extractable (ADR 0013 section 2; FR-702, TC-063)', () => {
+  const deferred = <T>() => {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+  const rowOf = (store: IdbStore) => store.get(STORES.meta, hmacKeyName('sess'));
+
+  it('(i) a refresh that resolves during the finish drain re-signs in memory but stores nothing', async () => {
+    const key1 = await importSessionKey(TEST_KEY_B64);
+    const key2 = await importSessionKey(KEY2_B64);
+    const store = newStore();
+    const later = deferred<{ key: CryptoKey; epoch: number }>();
+    const r = sessionRig({
+      store,
+      signingKey: { key: key1, epoch: 1 },
+      keyProvider: { getKey: () => later.promise },
+    });
+    r.cfg.transport.sendBatch = (b) => {
+      r.sent.push(b);
+      return Promise.resolve(
+        b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' },
+      );
+    };
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    r.fire();
+    await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    const finishing = s.finish(3000);
+    await new Promise((x) => setTimeout(x, 30));
+    later.resolve({ key: key2, epoch: 4 }); // the provider answers while finish() drains
+    const res = await finishing;
+    expect(res.lostBatches).toBe(0); // the tail was re-signed and sent
+    expect(await rowOf(store)).toBeUndefined();
+  });
+
+  it('(ii) a provider answer after TAKEN_OVER and a setKey() after the purge store nothing', async () => {
+    const key1 = await importSessionKey(TEST_KEY_B64);
+    const key2 = await importSessionKey(KEY2_B64);
+    const store = newStore();
+    const later = deferred<{ key: CryptoKey; epoch: number }>();
+    const r = sessionRig({
+      store,
+      signingKey: { key: key1, epoch: 1 },
+      keyProvider: { getKey: () => later.promise },
+    });
+    r.cfg.transport.sendBatch = (b) => {
+      r.sent.push(b);
+      return Promise.resolve({ kind: 'KEY_STALE' });
+    };
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    r.fire();
+    await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' } as never));
+    await vi.waitFor(async () => expect(await rowOf(store)).toBeUndefined(), { timeout: 3000 });
+    later.resolve({ key: key2, epoch: 4 });
+    await new Promise((x) => setTimeout(x, 50));
+    await s.setKey(key2, 5);
+    expect(await rowOf(store)).toBeUndefined();
+    await s.stop();
+  });
+
+  it('(iii) forget() while the helper request is in flight: the late answer is not stored', async () => {
+    const store = newStore();
+    const gate = deferred<Response>();
+    const { p } = provider(() => gate.promise, { store });
+    const pending = p.fetchKey();
+    await new Promise((x) => setTimeout(x, 10));
+    await p.forget();
+    gate.resolve(reply(200, keyBody()));
+    const res = await pending;
+    expect(res.persisted).toBe(false);
+    expect(await rowOf(store)).toBeUndefined();
+  });
+
+  it('(iv) the helper has its own store: the session purge reaches it through forget()', async () => {
+    const helperStore = newStore();
+    const { p } = provider(() => Promise.resolve(reply(200, keyBody())), {
+      store: helperStore,
+    });
+    const got = await p.fetchKey();
+    expect(await rowOf(helperStore)).toBeDefined();
+    const r = sessionRig({ signingKey: got, keyProvider: p }); // session uses ANOTHER IdbStore
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    await s.finish(500);
+    expect(await rowOf(helperStore)).toBeUndefined();
+  });
+
+  it('B2: an extractable or non-HMAC key is refused by start, setKey and the store, and a provider that returns one gets no adoption', async () => {
+    const extractable = await crypto.subtle.importKey(
+      'raw',
+      Buffer.from(KEY2_B64, 'base64'),
+      { name: 'HMAC', hash: 'SHA-256' },
+      true,
+      ['sign'],
+    );
+    const store = newStore();
+    await expect(
+      new IdbKeyStore(store).put('sess', { key: extractable, epoch: 1 }),
+    ).rejects.toThrow();
+    const s = new ProctorSession();
+    await expect(
+      s.start(sessionRig({ signingKey: { key: extractable, epoch: 1 } }).cfg),
+    ).rejects.toThrow(/non-extractable/);
+    const ok = await importSessionKey(KEY2_B64);
+    const r = sessionRig({ signingKey: { key: ok } });
+    const s2 = new ProctorSession();
+    await s2.start(r.cfg);
+    await expect(s2.setKey(extractable, 2)).rejects.toThrow(/non-extractable/);
+    await s2.stop();
+
+    // A provider that hands out an extractable CryptoKey is not adopted: the queue holds.
+    const em = sessionRig({
+      hmacKeyBase64: TEST_KEY_B64,
+      keyProvider: { getKey: () => Promise.resolve(extractable) },
+    });
+    em.cfg.transport.sendBatch = (b) => {
+      em.sent.push(b);
+      return Promise.resolve({ kind: 'KEY_STALE' });
+    };
+    const flags: string[] = [];
+    const s3 = new ProctorSession();
+    s3.on('capability', (f) => flags.push(f.id));
+    await s3.start(em.cfg);
+    em.fire();
+    await vi.waitFor(() => expect(flags).toContain('signing-key'), { timeout: 6000 });
+    expect(s3.getQueueStats()?.unsentBatches).toBe(1);
+    await s3.stop();
+  });
+
+  it('S3: a key that cannot be stored raises the ADR flag idb: UNSUPPORTED', async () => {
+    const key = await importSessionKey(KEY2_B64);
+    const flags: { id: string; status: string }[] = [];
+    const s = new ProctorSession();
+    s.on('capability', (f) => flags.push(f));
+    await s.start(sessionRig({ signingKey: { key, epoch: 1, persisted: false } }).cfg);
+    expect(flags).toContainEqual(expect.objectContaining({ id: 'idb', status: 'UNSUPPORTED' }));
+    await s.stop();
+    const failing: KeyStore = {
+      get: () => Promise.resolve(null),
+      put: () => Promise.reject(new Error('quota')),
+      delete: () => Promise.resolve(),
+    };
+    const flags2: string[] = [];
+    const s2 = new ProctorSession();
+    s2.on('capability', (f) => flags2.push(f.id));
+    await s2.start(sessionRig({ signingKey: { key, epoch: 1 }, keyStore: failing }).cfg);
+    expect(flags2).toContain('idb');
+    await s2.stop();
+  });
+
+  it('a provider of another session is refused at start', async () => {
+    const { p } = provider(() => Promise.resolve(reply(200, keyBody())), {
+      sessionId: 'someone-else',
+    });
+    const key = await importSessionKey(KEY2_B64);
+    const s = new ProctorSession();
+    await expect(s.start(sessionRig({ signingKey: { key }, keyProvider: p }).cfg)).rejects.toThrow(
+      /another session/,
+    );
+  });
+});
+
+describe('cross-tab lock and helper nits (ADR 0013 section 2; FR-601, TC-063)', () => {
+  /** A lock manager stub that runs requests of one name one after the other. */
+  function lockStub() {
+    let tail: Promise<unknown> = Promise.resolve();
+    const names: string[] = [];
+    return {
+      names,
+      locks: {
+        request<T>(name: string, cb: () => Promise<T>): Promise<T> {
+          names.push(name);
+          const run = tail.then(cb);
+          tail = run.catch(() => undefined);
+          return run;
+        },
+      },
+    };
+  }
+
+  it('S1: two tabs asking at once make ONE request; the second finds the key the first stored', async () => {
+    const store = newStore();
+    const l = lockStub();
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 20));
+      return reply(200, keyBody());
+    }) as unknown as typeof fetch;
+    const a = provider(fetchFn, { store, locks: l.locks }).p;
+    const b = provider(fetchFn, { store, locks: l.locks }).p;
+    const [ra, rb] = await Promise.all([a.fetchKey(), b.fetchKey()]);
+    expect(calls).toBe(1);
+    expect(ra.source).toBe('NETWORK');
+    expect(rb).toMatchObject({ source: 'STORE', epoch: 3 });
+    expect(l.names).toEqual(['cp-key:sess', 'cp-key:sess']);
+  });
+
+  it('a getToken() that throws is final (UNAUTHENTICATED), not retried', async () => {
+    const fetchFn = vi.fn();
+    const { p } = provider(fetchFn, {
+      getToken: () => {
+        throw new Error('no token');
+      },
+    });
+    const err = (await p.fetchKey().catch((e: unknown) => e)) as ProctorKeyError;
+    expect(err.kind).toBe('UNAUTHENTICATED');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('a throwing KeyStore.get becomes a ProctorKeyError without detail', async () => {
+    const broken: KeyStore = {
+      get: () => Promise.reject(new Error(`secret ${TOKEN}`)),
+      put: () => Promise.resolve(),
+      delete: () => Promise.resolve(),
+    };
+    const { p } = provider(() => Promise.resolve(reply(200, keyBody())), {
+      store: broken,
+    });
+    const err = (await p.loadStoredKey().catch((e: unknown) => e)) as ProctorKeyError;
+    expect(err).toBeInstanceOf(ProctorKeyError);
+    expect(`${err.message}${err.stack ?? ''}`).not.toContain(TOKEN);
   });
 });

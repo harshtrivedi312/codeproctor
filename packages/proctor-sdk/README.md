@@ -20,13 +20,16 @@ The host app owns the token and calls the route; the SDK helper only needs a `ge
 
 ```ts
 const keys = new ProctorKeyProvider({ baseUrl, sessionId, getToken: () => token });
-const { key, epoch, counters } = await keys.ensureKey(); // IndexedDB first, else POST /candidate/session/proctor-key
-await session.start({ sessionId, signingKey: { key, epoch, counters } /* ... */ });
+const result = await keys.ensureKey(tokenEpoch); // IndexedDB first (this epoch only), else POST /candidate/session/proctor-key
+const { counters } = result;
+await session.start({ sessionId, signingKey: result, keyProvider: keys /* ... */ });
 pipeline.seedCounters(counters?.media ?? {}); // media streams continue at max(local, server)
 ```
 
 - `ensureKey()` returns the key stored for this session (`<sessionId>:hmacKey`, non-extractable CryptoKey with its epoch) without a network call; `fetchKey()` always asks (after an OTP resume the epoch is new). The server issues a key once per epoch, so concurrent fetches share one request. Pass the token epoch to `ensureKey(epoch)` so a key of another epoch is not reused.
 - 409 `KEY_ALREADY_ISSUED` is final: `onKeyUnavailable('ALREADY_ISSUED')` runs and the app starts the OTP resume (a new epoch). 429, 503, network errors and timeouts back off (Retry-After wins) for a few attempts, then `ProctorKeyError('UNAVAILABLE')`. A request that timed out may still have been served; the next call then answers KEY_ALREADY_ISSUED and the OTP resume is the way out.
-- Counters: `eventSeqStart` and `keystrokeSeqStart` raise the event and keystroke sequences to max(local, server) before anything is cut (also through `setKey(key, epoch, counters)` later); media counters go to `pipeline.seedCounters`. A new device therefore no longer restarts at 0. The time-seeded fallback and the localStorage backup only apply when no server counter was given.
+- Counters: `eventSeqStart` and `keystrokeSeqStart` raise the event and keystroke sequences to max(local, server) before anything is cut (also through `setKey(key, epoch, counters)` later); media counters go to `pipeline.seedCounters`. A new device therefore no longer restarts at 0. The server counter only raises the sequence: when IndexedDB and the localStorage backup are both unreadable the time-seeded high fallback still applies (holes, no collisions) and the `event-seq` flag is raised.
+- The fetch runs inside the Web Lock `cp-key:<sessionId>` when `navigator.locks` exists, and a key another tab stored meanwhile is used instead of a second POST (a second POST would get KEY_ALREADY_ISSUED and force an OTP resume that kills the other tab's epoch).
+- Only a non-extractable HMAC-SHA-256 signing key is stored, accepted by `start`/`setKey`, or adopted from a provider. If IndexedDB refuses it the session raises `idb: UNSUPPORTED` (every reload then costs an OTP resume).
 - `finish()` and the end of a session (taken over, session not active) delete the stored key with the data; `stop()` keeps it for the reload. The retention sweep never touches a live session: its mark is refreshed by the heartbeat, also during a long outage.
-- The helper never stores or logs the token; errors carry a kind and a problem code only. As pull alias `keyProvider: keys` lets the session fetch the key itself after KEY_EPOCH_STALE.
+- The helper never stores or logs the token; errors carry a kind and a problem code only. As pull alias `keyProvider: keys` lets the session fetch the key itself after KEY_EPOCH_STALE; the session also calls `keys.forget()` when it purges, so the helper's store is cleaned and an in-flight request stores nothing afterwards.

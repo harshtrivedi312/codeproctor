@@ -2,7 +2,7 @@ import type { RecordingStream } from '../recording/types';
 import { importSessionKey } from './hmac';
 import { timedFetch } from './http';
 import { IdbStore } from './idb';
-import { IdbKeyStore, type KeyStore } from './key-store';
+import { IdbKeyStore, isSigningKey, type KeyStore } from './key-store';
 import { parseRetryAfter } from './transport';
 
 /** Where each sequence continues (ADR 0013 section 2, "Sequence numbers across devices"). */
@@ -45,6 +45,10 @@ export interface ProctorKeyProviderOptions {
   /** API origin plus prefix, as for the transport. */
   baseUrl: string;
   sessionId: string;
+  /** Test seam for `navigator.locks` (default: the browser's, when present). */
+  locks?: { request<T>(name: string, callback: () => Promise<T>): Promise<T> };
+  /** IndexedDB refused the key: it works in memory, but every reload will cost an OTP resume. */
+  onStorageUnavailable?: () => void;
   /**
    * The candidate token, read per request. The helper never stores, copies or logs it: it only
    * puts it in the Authorization header.
@@ -69,7 +73,8 @@ export interface ProctorKeyProviderOptions {
   onKeyUnavailable?: (why: 'ALREADY_ISSUED' | 'NOT_ACTIVE' | 'UNAUTHENTICATED') => void;
 }
 
-const MAX_SEQ = 2 ** 31 - 1;
+// Below 2^31 - 1: the next cut stores seq + 1, which must stay a valid (< 2^31) counter on reload.
+const MAX_SEQ = 2 ** 31 - 2;
 const isSeq = (v: unknown): v is number =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && v <= MAX_SEQ;
 
@@ -116,8 +121,12 @@ function problemCode(text: string): string {
 export class ProctorKeyProvider {
   private readonly store: KeyStore;
   private inflight: Promise<ProctorKeyResult> | null = null;
+  /** Bumped by forget(): a request that started earlier must not store its key afterwards. */
+  private gen = 0;
+  readonly sessionId: string;
 
   constructor(private readonly o: ProctorKeyProviderOptions) {
+    this.sessionId = o.sessionId;
     this.store =
       o.store === undefined
         ? new IdbKeyStore(new IdbStore())
@@ -131,7 +140,12 @@ export class ProctorKeyProvider {
    * app knows) a key of another epoch is not returned.
    */
   async loadStoredKey(expectedEpoch?: number): Promise<ProctorKeyResult | null> {
-    const stored = await this.store.get(this.o.sessionId);
+    let stored: Awaited<ReturnType<KeyStore['get']>>;
+    try {
+      stored = await this.store.get(this.o.sessionId);
+    } catch {
+      throw new ProctorKeyError('UNAVAILABLE'); // a faulty store: no detail, never the key
+    }
     if (!stored) return null;
     if (expectedEpoch !== undefined && stored.epoch !== expectedEpoch) return null;
     return {
@@ -150,10 +164,41 @@ export class ProctorKeyProvider {
 
   /** Always asks the server (after an OTP resume the epoch is new). Concurrent calls share one request. */
   fetchKey(): Promise<ProctorKeyResult> {
-    this.inflight ??= this.run().finally(() => {
+    this.inflight ??= this.lockedFetch().finally(() => {
       this.inflight = null;
     });
     return this.inflight;
+  }
+
+  /**
+   * Check-then-fetch inside the Web Lock `cp-key:<sessionId>` (ADR 0013 section 2): two tabs must
+   * not both POST (the second would get KEY_ALREADY_ISSUED, run an OTP resume and kill the first
+   * tab's epoch). Inside the lock a key that another tab stored while we waited is used instead
+   * of going to the network.
+   */
+  private async lockedFetch(): Promise<ProctorKeyResult> {
+    const before = (await this.safeGet())?.epoch;
+    const run = async (): Promise<ProctorKeyResult> => {
+      const now = await this.safeGet();
+      if (now && (before === undefined || now.epoch > before)) {
+        return { key: now.key, epoch: now.epoch, counters: null, source: 'STORE', persisted: true };
+      }
+      return this.run();
+    };
+    const locks =
+      this.o.locks ??
+      (typeof navigator !== 'undefined'
+        ? (navigator as { locks?: ProctorKeyProviderOptions['locks'] }).locks
+        : undefined);
+    return locks ? locks.request(`cp-key:${this.o.sessionId}`, run) : run();
+  }
+
+  private async safeGet(): Promise<{ key: CryptoKey; epoch: number } | null> {
+    try {
+      return await this.store.get(this.o.sessionId);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -171,29 +216,37 @@ export class ProctorKeyProvider {
 
   /** Remove the stored key (finish and purge do this too). */
   async forget(): Promise<void> {
+    this.gen++; // a request in flight will not store its key
     await this.store.delete(this.o.sessionId);
   }
 
   private async run(): Promise<ProctorKeyResult> {
     const f = this.o.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
     const sleep = this.o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const gen = this.gen;
     const attempts = Math.max(1, this.o.maxAttempts ?? 4);
     const base = this.o.backoffBaseMs ?? 1000;
     const max = this.o.backoffMaxMs ?? 15_000;
     for (let attempt = 0; ; attempt++) {
       let retryAfterMs: number | undefined;
+      let token: string;
+      try {
+        token = this.o.getToken();
+      } catch {
+        this.fail('UNAUTHENTICATED'); // no token: final, nothing to retry
+      }
       try {
         const a = await timedFetch(
           f,
           `${this.o.baseUrl}${this.o.path ?? '/candidate/session/proctor-key'}`,
           {
             method: 'POST',
-            headers: { Authorization: `Bearer ${this.o.getToken()}` },
+            headers: { Authorization: `Bearer ${token}` },
             cache: 'no-store',
           },
           this.o.timeoutMs ?? 15_000,
         );
-        if (a.ok) return await this.accept(a.text);
+        if (a.ok) return await this.accept(a.text, gen);
         const code = problemCode(a.text);
         if (code === 'KEY_ALREADY_ISSUED') this.fail('ALREADY_ISSUED', code);
         if (code === 'SESSION_NOT_ACTIVE') this.fail('NOT_ACTIVE', code);
@@ -222,7 +275,7 @@ export class ProctorKeyProvider {
     throw new ProctorKeyError(kind, code);
   }
 
-  private async accept(text: string): Promise<ProctorKeyResult> {
+  private async accept(text: string, gen: number): Promise<ProctorKeyResult> {
     let j: Record<string, unknown>;
     try {
       j = JSON.parse(text) as Record<string, unknown>;
@@ -242,11 +295,25 @@ export class ProctorKeyProvider {
       throw new ProctorKeyError('BAD_RESPONSE');
     }
     const key = await importSessionKey(keyB64); // non-extractable
+    if (!isSigningKey(key)) throw new ProctorKeyError('BAD_RESPONSE');
     let persisted = true;
-    try {
-      await this.store.put(this.o.sessionId, { key, epoch });
-    } catch {
-      persisted = false; // IndexedDB unusable: the key works in memory, a reload needs an OTP resume
+    if (gen !== this.gen) {
+      persisted = false; // forgotten (finish or purge) while the request was in flight: do not store
+    } else {
+      try {
+        await this.store.put(this.o.sessionId, { key, epoch });
+        if (gen !== this.gen) {
+          await this.store.delete(this.o.sessionId); // forgotten while the put was running
+          persisted = false;
+        }
+      } catch {
+        persisted = false; // IndexedDB unusable: the key works in memory, a reload needs an OTP resume
+        try {
+          this.o.onStorageUnavailable?.();
+        } catch {
+          // ignore
+        }
+      }
     }
     return { key, epoch, counters: parseCounters(j['counters']), source: 'NETWORK', persisted };
   }

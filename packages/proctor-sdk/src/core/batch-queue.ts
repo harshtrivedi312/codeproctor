@@ -131,8 +131,9 @@ export interface BatchQueueOptions {
   onSeqUntrusted?: () => void;
   /**
    * Where the server says this stream continues (`proctor-key` counters, ADR 0013 section 2). The
-   * queue starts at max(local, this). With it the time-seeded high fallback is not needed; the
-   * localStorage backup stays a pure fallback.
+   * queue starts at max(local, this). It only RAISES the counter: when IndexedDB and the
+   * localStorage backup are both unreadable the time-seeded high fallback still applies (holes, no
+   * collisions), because batches of an earlier load may sit above the server's counter.
    */
   initialSeq?: number;
   /** While degraded, try IndexedDB again at most this often (default 30 s). */
@@ -358,12 +359,13 @@ export class BatchQueue<TItem> {
     this.sweepBackups();
     this.nextSeq = Math.max(maxSaved, stored ?? 0, backup);
     const server = this.opts.initialSeq;
-    if (server !== undefined && validSeq(server) && server > this.nextSeq) {
+    // Below 2^31 - 1: the next cut stores seq + 1, which must stay a valid counter on reload.
+    if (server !== undefined && validSeq(server) && server < 2 ** 31 - 1 && server > this.nextSeq) {
       this.nextSeq = server;
       await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
       this.writeBackup();
     }
-    if (readFailed && backup === 0 && stored === null && server === undefined) {
+    if (readFailed && backup === 0 && stored === null) {
       // The counter is unknowable: seed above anything plausible and say so.
       this.nextSeq = Math.max(this.nextSeq, this.seqSeed());
       this.opts.onSeqUntrusted?.();
@@ -387,7 +389,8 @@ export class BatchQueue<TItem> {
    * counter, never reuses a seq; a jump leaves a hole, not a collision.
    */
   async seedSeq(serverStart: number): Promise<void> {
-    if (!validSeq(serverStart) || serverStart <= this.nextSeq || this.closed) return;
+    if (!validSeq(serverStart) || serverStart >= 2 ** 31 - 1) return;
+    if (serverStart <= this.nextSeq || this.closed) return;
     this.nextSeq = serverStart;
     await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
     this.writeBackup();

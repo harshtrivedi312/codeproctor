@@ -20,14 +20,34 @@ export interface KeyStore {
 /** Meta-store key `<sessionId>:hmacKey`: the retention sweep reads the session id before the first colon. */
 export const hmacKeyName = (sessionId: string): string => `${sessionId}:hmacKey`;
 
+/**
+ * ADR 0013 section 2: only a non-extractable HMAC-SHA-256 secret key that can sign may be kept or
+ * used as the batch key.
+ */
+export function isSigningKey(key: unknown): key is CryptoKey {
+  if (typeof key !== 'object' || key === null) return false;
+  const k = key as {
+    type?: unknown;
+    extractable?: unknown;
+    algorithm?: { name?: unknown; hash?: { name?: unknown } };
+    usages?: unknown;
+  };
+  return (
+    k.type === 'secret' &&
+    k.extractable === false &&
+    k.algorithm?.name === 'HMAC' &&
+    k.algorithm.hash?.name === 'SHA-256' &&
+    Array.isArray(k.usages) &&
+    k.usages.includes('sign')
+  );
+}
+
 function isUsable(v: unknown): v is StoredKey {
   if (typeof v !== 'object' || v === null) return false;
   const { key, epoch } = v as { key?: unknown; epoch?: unknown };
   if (typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch < 0) return false;
-  if (typeof key !== 'object' || key === null) return false;
-  const k = key as { type?: unknown; extractable?: unknown };
-  // Only a non-extractable secret key is accepted back: anything else is not ours.
-  return k.type === 'secret' && k.extractable === false;
+  // Only a non-extractable HMAC signing key is accepted back: anything else is not ours.
+  return isSigningKey(key);
 }
 
 export class IdbKeyStore implements KeyStore {
@@ -43,6 +63,8 @@ export class IdbKeyStore implements KeyStore {
   }
 
   async put(sessionId: string, value: StoredKey): Promise<void> {
+    if (!isSigningKey(value.key))
+      throw new Error('refusing to store an extractable or non-HMAC key');
     await this.store.put(STORES.meta, hmacKeyName(sessionId), {
       key: value.key,
       epoch: value.epoch,
