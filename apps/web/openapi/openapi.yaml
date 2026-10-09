@@ -1938,9 +1938,8 @@ paths:
 
   # ---------------------------------------------------------------------------------------------
   # Review workspace (FR-901, FR-902, FR-703). REAL for the three read routes (apps/api/src/review,
-  # PR 297). The answer scoring PATCH (docs/api-contract.md section 7) and the verdict POST are
-  # contract only: the API does not implement them yet, so their shapes are the contract's and the
-  # verdict body and 409 codes are ASSUMED. Roles: REVIEWER and SUPER_ADMIN. Cross-organisation
+  # PR 297). The answer scoring PATCH and the verdict POST follow docs/api-contract.md section 7
+  # (BE-13). Roles: REVIEWER and SUPER_ADMIN. Cross-organisation
   # ids are 404.
   # ---------------------------------------------------------------------------------------------
   /v1/review/queue:
@@ -2057,7 +2056,7 @@ paths:
   /v1/review/sessions/{sessionId}/verdict:
     post:
       operationId: setReviewVerdict
-      summary: Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED.
+      summary: Final verdict (review_verdict:set). 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). The request body (SetVerdict) is the web's; it is not defined in section 7 yet.
       parameters:
         - { name: sessionId, in: path, required: true, schema: { type: string } }
       requestBody:
@@ -2607,6 +2606,7 @@ components:
           BUSY,
           REASON_NOT_ENABLED,
           ANSWER_NOT_MANUAL,
+          MANUAL_PENDING,
           SESSION_NOT_UNDER_REVIEW,
           VERDICT_ALREADY_SET,
         ]

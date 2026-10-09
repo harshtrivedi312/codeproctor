@@ -96,8 +96,14 @@ const SRC = resolve(__dirname, '..');
  */
 export const CALL_SITES: CallSiteList = {
   'database/org-context.ts': {
-    names: ['withGrant', 'claimCandidateFactsSetter', 'detachForSessionJob'],
-    why: 'defines them: the grant entry, the claim-once setter closure and the session detach',
+    names: ['withGrant', 'claimCandidateFactsSetter', 'detachForSessionJob', 'SCHEDULE_CAPACITY'],
+    why: 'defines them: the grant entry, the claim-once setter closure, the session detach and the SCHEDULE_CAPACITY system reason',
+  },
+  // C-53 (ADR 0017 section 4.7): the checker of the SCHEDULE_CAPACITY shape names the reason. No file outside
+  // database/ may enter it yet; the schedule service (backend track) adds its entry in its own reviewed PR.
+  'database/schedule-capacity.ts': {
+    names: ['SCHEDULE_CAPACITY'],
+    why: 'checks the SCHEDULE_CAPACITY read: ScheduledWindow only, five columns, no write (ADR 0017 4.7)',
   },
   'database/candidate-facts.ts': {
     names: ['claimCandidateFactsSetter', 'setCandidateFacts'],
@@ -204,7 +210,7 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     }
   });
 
-  it('TC-008 the names are the ones CS-4.4 and ADR 0006 section 8.5 call private, and the three session locks', () => {
+  it('TC-008 the names are the ones CS-4.4 and ADR 0006 section 8.5 call private, the three session locks, and the SCHEDULE_CAPACITY reason (ADR 0017 4.7, C-53)', () => {
     expect([...GUARDED_NAMES]).toEqual([
       'withGrant',
       'claimCandidateFactsSetter',
@@ -213,6 +219,7 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
       'guardLive',
       'lockForAccommodation',
       'lockAnySession',
+      'SCHEDULE_CAPACITY',
     ]);
   });
 
@@ -224,15 +231,23 @@ describe('call-site guard: the private entries of the database layer (FU-DB-67 s
     expect(findStaleEntries(files, CALL_SITES)).toEqual([]);
   });
 
-  it('TC-008 the list holds the three database files (the two private entries and the lock core), the BE-07 guard path (candidate/candidate-scope.ts) the session-job base class (session/session-job.processor.ts) and SessionStateService (session/session-state.service.ts), and nothing else', () => {
+  it('TC-008 the list holds the four database files (the two private entries, the lock core and the SCHEDULE_CAPACITY checker), the BE-07 guard path (candidate/candidate-scope.ts) the session-job base class (session/session-job.processor.ts) and SessionStateService (session/session-state.service.ts), and nothing else', () => {
     expect(Object.keys(CALL_SITES).sort()).toEqual([
       'candidate/candidate-scope.ts',
       'database/candidate-facts.ts',
       'database/org-context.ts',
+      'database/schedule-capacity.ts',
       'database/session-locks.ts',
       'session/session-job.processor.ts',
       'session/session-state.service.ts',
     ]);
+    // C-53: no file outside database/ may enter the SCHEDULE_CAPACITY reason yet (TC-111).
+    expect(
+      Object.entries(CALL_SITES)
+        .filter(([, entry]) => entry.names.includes('SCHEDULE_CAPACITY'))
+        .map(([path]) => path)
+        .sort(),
+    ).toEqual(['database/org-context.ts', 'database/schedule-capacity.ts']);
     // The only file that may use the three locks is the one that defines them.
     expect(CALL_SITES['database/session-locks.ts']?.names).toEqual([
       'guardLive',

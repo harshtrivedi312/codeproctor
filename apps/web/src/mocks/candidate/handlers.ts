@@ -32,6 +32,8 @@ export const MOCK_TOKENS = {
   waived: 'mock-waived-identity-token-0009',
   /** First identity attempt asks for one retry. */
   lowConfidence: 'mock-lowconfidence-token-0010',
+  /** The face check ends in manual review (the candidate only sees "received"). */
+  manualReview: 'mock-manualreview-token-0021',
   /** Test already running: the OTP resumes it (ADR 0002, TC-097). */
   resume: 'mock-resume-invitation-token-0011',
   /** A second code within 30 s is refused (OTP_COOLDOWN). */
@@ -89,6 +91,7 @@ interface SessionRecord {
   scenario: string;
   status: SessionStatus | 'DECLINED';
   identityAttempts: number;
+  identityPolls: number;
   uploads: number;
   roomScans: number;
   /** Chunks by stream and seq, like UNIQUE(session_id, stream, seq) (database.md). */
@@ -244,6 +247,7 @@ export function createCandidateHandlers() {
         scenario,
         status,
         identityAttempts: 0,
+        identityPolls: 0,
         uploads: 0,
         roomScans: 0,
         roomChunks: new Map(),
@@ -326,33 +330,80 @@ export function createCandidateHandlers() {
       return HttpResponse.json({ passed: blocking.length === 0, blocking });
     }),
 
-    http.post(`${base}/evidence/presign`, async ({ request }) => {
+    // Identity routes (apps/api identity.dto.ts, D-61). PROVISIONAL mock: a submit answers PENDING,
+    // the next GETs answer the result (PASSED, or LOW_CONFIDENCE once for the lowConfidence token).
+    http.post(`${base}/identity/presign`, async ({ request }) => {
       const s = bearer(request);
       if (!s) return problem(401, 'UNAUTHENTICATED');
       if (s.scenario === 'waived') return problem(409, 'IDENTITY_CHECK_WAIVED');
       const body = (await request.json()) as { purpose: string };
       s.uploads += 1;
+      const attempt = Math.min(2, s.identityAttempts + 1);
+      const kind = body.purpose === 'SELFIE' ? 'selfie' : 'id';
       return HttpResponse.json({
         url: `${apiBaseUrl}/mock-upload/${s.uploads}`,
         method: 'PUT',
         headers: { 'Content-Type': 'image/jpeg' },
-        evidenceKey: `${body.purpose.toLowerCase()}-name-${s.uploads}`,
+        name: `identity/${attempt}/${kind}-01J9ZZZZZZZZZZZZZZZZZZZ${String(s.uploads).padStart(3, '0')}.jpg`,
+        attempt,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       });
     }),
 
     http.put(`${apiBaseUrl}/mock-upload/:id`, () => new HttpResponse(null, { status: 200 })),
 
-    http.post(`${base}/identity`, ({ request }) => {
+    http.post(`${base}/identity`, async ({ request }) => {
       const s = bearer(request);
       if (!s) return problem(401, 'UNAUTHENTICATED');
+      if (s.scenario === 'waived') return problem(409, 'IDENTITY_CHECK_WAIVED');
+      const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      const keys = body ? Object.keys(body).sort().join(',') : '';
+      // Unknown fields are refused (the API validates with forbidNonWhitelisted).
+      if (keys !== 'idImageName,livenessConfirmed,selfieName') {
+        return problem(400, 'VALIDATION_FAILED');
+      }
+      if (
+        typeof body?.idImageName !== 'string' ||
+        typeof body.selfieName !== 'string' ||
+        typeof body.livenessConfirmed !== 'boolean'
+      ) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
+      const pattern = /^identity\/([12])\/(id|selfie)-[0-9A-Z]{26}\.jpg$/;
+      const idMatch = pattern.exec(body.idImageName);
+      const selfieMatch = pattern.exec(body.selfieName);
+      if (!idMatch || !selfieMatch || idMatch[1] !== selfieMatch[1]) {
+        return problem(400, 'IDENTITY_NAME_INVALID');
+      }
       s.identityAttempts += 1;
-      // The candidate only ever learns "received". The retry hint carries no score (ADR 0004).
-      return HttpResponse.json({
-        status: 'RECEIVED',
-        attempt: Math.min(2, s.identityAttempts),
-        retrySuggested: s.scenario === 'lowConfidence' && s.identityAttempts === 1,
-      });
+      s.identityPolls = 0;
+      return HttpResponse.json(
+        { attempt: Math.min(2, s.identityAttempts), status: 'PENDING', canRetry: false },
+        { status: 202 },
+      );
+    }),
+
+    http.get(`${base}/identity`, ({ request }) => {
+      const s = bearer(request);
+      if (!s) return problem(401, 'UNAUTHENTICATED');
+      if (s.scenario === 'waived') {
+        return HttpResponse.json({ attempt: 0, status: 'WAIVED', canRetry: false });
+      }
+      if (s.identityAttempts === 0) {
+        return HttpResponse.json({ attempt: 0, status: 'NOT_STARTED', canRetry: false });
+      }
+      s.identityPolls += 1;
+      const attempt = Math.min(2, s.identityAttempts);
+      // The first read after a submit is still PENDING, the next ones carry the result.
+      if (s.identityPolls < 2)
+        return HttpResponse.json({ attempt, status: 'PENDING', canRetry: false });
+      if (s.scenario === 'lowConfidence' && attempt === 1) {
+        return HttpResponse.json({ attempt, status: 'LOW_CONFIDENCE', canRetry: true });
+      }
+      if (s.scenario === 'manualReview') {
+        return HttpResponse.json({ attempt, status: 'MANUAL_REVIEW', canRetry: false });
+      }
+      return HttpResponse.json({ attempt, status: 'PASSED', canRetry: false });
     }),
 
     http.post(`${base}/media/presign`, async ({ request }) => {
