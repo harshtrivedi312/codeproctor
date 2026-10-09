@@ -185,23 +185,19 @@ psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -c 'BEGIN; UPDATE session
 if [ "$reapply" = yes ]; then
   sh "$here/erasure-list.sh" list > "$WORK/erasures.txt" ||
     die "cannot read the erasure list. Do not use database $target: erased candidates may be back in it."
-  sh "$here/erasure-list.sh" completed > "$WORK/completed.txt" ||
-    die "cannot read the erasure list. Do not use database $target: erased candidates may be back in it."
   n=$(wc -l < "$WORK/erasures.txt" | tr -d ' ')
   {
-    printf 'CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL, completed boolean NOT NULL DEFAULT false);\n'
+    printf 'CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL);\n'
     while read -r stamp id; do
       if ! is_uuid "$id" || ! is_stamp "$stamp"; then die "the erasure list holds a malformed entry."; fi
       iso=$(printf '%s' "$stamp" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3T\4:\5:\6Z/')
-      done=false
-      if grep -q -- " $id\$" "$WORK/completed.txt"; then done=true; fi
-      printf "INSERT INTO _reapply_erasures VALUES ('%s', '%s', %s) ON CONFLICT DO NOTHING;\n" "$id" "$iso" "$done"
+      printf "INSERT INTO _reapply_erasures VALUES ('%s', '%s') ON CONFLICT DO NOTHING;\n" "$id" "$iso"
     done < "$WORK/erasures.txt"
     cat "$here/reapply-erasures.sql"
   } > "$WORK/reapply.sql"
   psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -f "$WORK/reapply.sql" > /dev/null ||
     die "erasures were NOT re-applied. Do not use database $target: it holds personal data that was erased."
-  log "re-applied $n erasure(s) from the erasure list."
+  log "re-applied $n erasure(s) from the erasure list. The erasure sweep must run before this database serves traffic (it finishes the purge, the notice and the completion; runbook 'Restoring for real')."
 fi
 log "restore finished: database $target."
 [ "$status" -eq 0 ] || deliberate=1

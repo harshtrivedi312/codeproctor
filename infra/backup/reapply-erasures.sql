@@ -1,17 +1,20 @@
 -- Re-applies erasures after a restore (ADR 0004 R-7 and 9.7, DB-07). restore.sh runs this in one
 -- psql session after it created the temp table
---   _reapply_erasures (candidate_id uuid, erased_at timestamptz, completed boolean)
+--   _reapply_erasures (candidate_id uuid, erased_at timestamptz)
 -- from the erasure list kept outside the backup. Idempotent, except that sessions.auth_epoch only ever increases.
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
 -- Follows ADR 0004 9.7 and the erasure service (FU-DBB-01, FU-DBB-23): the FULL fence (every session
--- ERASED, open appeals CLOSED_ERASED, epoch bumped; the review/appeal hold is not applied on a re-application,
--- since the erasure was already requested), and the candidate row is anonymised at once only when the
--- erasure had finished (`completed`: the list's completion marker) or day 28 has passed; otherwise the
--- request is recorded (erasure_requested_at) so the daily erasure sweep resumes it (notice, day 25 alert,
--- day 28 anonymisation, completion). Known limit: the list does not record whether the candidate was
--- told, so a resumed erasure may send the notice mail again.
+-- ERASED, open appeals CLOSED_ERASED, epoch bumped; the review/appeal hold is not applied on a
+-- re-application, since the erasure was already requested), the accommodations reduced as the service
+-- does (ADR 0015 section 7), and the candidate row anonymised AT ONCE for every listed candidate. The list
+-- cannot say whether the service had anonymised the candidate before the backup (it marks an erasure
+-- complete only after the whole run), so anonymising early is the privacy-safe reading of "only if it had
+-- already happened". The request is recorded (erasure_requested_at) so the erasure sweep still finishes the
+-- purge. Known limits: the notice mail that would have gone out at the end of the run is not sent
+-- (the candidate row is already anonymised), and a candidate's pending erasure shows no ERASURE_* audit rows
+-- (a restore wipes them).
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -69,13 +72,32 @@ SET device_info = '{}',
       WHERE i.id = sessions.invitation_id))
 WHERE id IN (SELECT id FROM _reapply_sessions);
 
--- Record the request, so the erasure service finds the candidate on its next daily sweep.
+-- Record the request, so the erasure service finds the candidate on its next sweep (the purge, the
+-- completion row and the list completion).
 UPDATE candidates c
 SET erasure_requested_at = e.erased_at
 FROM _reapply_erasures e
 WHERE c.id = e.candidate_id AND c.erasure_requested_at IS NULL;
 
--- Anonymise now only if the erasure had finished or day 28 (ERASURE_ANONYMISE_DAY) has passed.
+-- Accommodations (ADR 0015 section 7, mirrors reduceAccommodations in apps/api/src/retention): keep which
+-- settings were used and the fact of a waiver; drop the free-text notes and the waiver's reason.
+CREATE TEMP TABLE _reapply_accommodations ON COMMIT DROP AS
+SELECT i.id,
+       (SELECT coalesce(jsonb_object_agg(t.k, t.v), '{}'::jsonb)
+          FROM jsonb_each(i.accommodations) AS t(k, v)
+         WHERE t.k IN ('extraTimePct', 'disabledDetectors', 'allowedAssistiveTools'))
+       || CASE WHEN jsonb_typeof(i.accommodations -> 'identityCheckWaiver') = 'object'
+                 OR i.accommodations -> 'identityCheckWaived' = 'true'::jsonb
+               THEN '{"identityCheckWaived": true}'::jsonb ELSE '{}'::jsonb END AS reduced
+FROM invitations i
+JOIN _reapply_erasures e ON e.candidate_id = i.candidate_id
+WHERE jsonb_typeof(i.accommodations) = 'object';
+
+UPDATE invitations i
+SET accommodations = a.reduced
+FROM _reapply_accommodations a
+WHERE i.id = a.id AND i.accommodations <> a.reduced;
+
 UPDATE candidates c
 SET email = 'erased+' || c.id || '@invalid',
     full_name = 'Erased',
@@ -83,7 +105,6 @@ SET email = 'erased+' || c.id || '@invalid',
     erased_at = COALESCE(c.erased_at, e.erased_at)
 FROM _reapply_erasures e
 WHERE c.id = e.candidate_id
-  AND (e.completed OR now() >= e.erased_at + interval '28 days' OR c.erased_at IS NOT NULL)
   AND (c.email <> 'erased+' || c.id || '@invalid' OR c.full_name <> 'Erased'
        OR c.external_ref IS NOT NULL OR c.erased_at IS NULL);
 

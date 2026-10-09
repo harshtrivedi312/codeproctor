@@ -73,13 +73,15 @@ The erasure service (DB-06) calls, in this order:
 A zero-byte "folder" object at `<prefix>erasure-list/` (some consoles create one) makes every restore stop, by design: any key there that is not `<stamp>-<uuid>.json` could be an erasure. Delete the folder object.
 
 What the re-application does (FU-DBB-01, ADR 0004 9.7): the full fence for every session of each listed
-candidate (`ERASED`, open appeals `CLOSED_ERASED`, epoch raised, keys cleared) and the data deletes. The
-review/appeal hold is not applied: the erasure was already requested, and a restore must not bring data
-back. The candidate row is anonymised at once only if the list holds a completion marker for it
-(`erasure-list.sh completed`) or day 28 since the request has passed; otherwise `erasure_requested_at` is
-set from the list so the daily erasure sweep resumes it (notice, day-25 alert, day-28 anonymisation,
-completion). Limit: the list does not record whether the candidate was told, so a resumed erasure may send
-the notice mail a second time.
+candidate (`ERASED`, open appeals `CLOSED_ERASED`, epoch raised, keys cleared), the data deletes, the
+accommodations reduced as the service does (ADR 0015 section 7), and the candidate row anonymised **at
+once**. The review/appeal hold is not applied: the erasure was already requested, and a restore must not
+bring data back. The ADR says to anonymise at once only if the candidate had already been anonymised or
+day 28 has passed; the list cannot tell (the completion marker is written only after the whole run, which
+can come after the anonymisation), so this restores the privacy-safe reading for every entry. The cost: the
+completion notice mail that would have gone out at the end of a resumed erasure is not sent (FU-DBB-31b
+tracks recording anonymisation on the list). `erasure_requested_at` is set from the list when the backup
+did not have it, so the erasure sweep finishes the purge and the completion row.
 
 ### Restore drill (run on a throwaway server)
 
@@ -110,7 +112,8 @@ Run on the server or in a manually triggered workflow in the affected environmen
    role the owner of every object, and later migrations run as the migration owner). The role needs
    `CREATEDB`. `--skip-erasures` is refused here. `app_user` must already exist on the
    server (ADR 0006 section 7.5); the script stops if not.
-3. Exit code 0: restored, counts match, erasures re-applied. Exit code 2 (only this): restored, but the row
+3. Exit code 0: restored, counts match, erasures re-applied (the erasure sweep must still run before the
+   database serves traffic, to finish the purge of the listed candidates). Exit code 2 (only this): restored, but the row
    counts differ from the backup; inspect before using it. Any other failure is exit code 1. If the output says
    the erasures were NOT re-applied, do not use that database: it holds personal data that was erased.
 4. Check the application against the new database (`app_user` grants, `audit_logs` append-only), then
