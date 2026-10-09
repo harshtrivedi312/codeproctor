@@ -990,6 +990,42 @@ describe('purge hygiene and stop (FR-702, TC-063)', () => {
   });
 });
 
+describe('purge accounting (FR-702, TC-063)', () => {
+  it('a put that races the purge is removed again and the batch is counted lost once', async () => {
+    class GatedStore extends IdbStore {
+      gate: Promise<void> | null = null;
+      override async put<T>(name: Parameters<IdbStore['put']>[0], key: string, value: T) {
+        if (name === STORES.eventBatches && this.gate) {
+          const g = this.gate;
+          this.gate = null;
+          await g;
+        }
+        return super.put(name, key, value);
+      }
+    }
+    const store = new GatedStore(indexedDB, `gated-${++db}`);
+    let release!: () => void;
+    store.gate = new Promise<void>((r) => (release = r));
+    const q = new EventQueue({
+      sessionId: 's',
+      key: await importSessionKey(TEST_KEY_B64),
+      store,
+      transport: scripted(['OK']).transport,
+      flushIntervalMs: 10_000,
+    });
+    await q.start();
+    q.enqueue(ev(1));
+    const flushing = q.flush();
+    await new Promise((r) => setTimeout(r, 30)); // the cut is waiting in store.put
+    await q.end('SESSION_NOT_ACTIVE');
+    release();
+    await flushing;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await stored(store)).toEqual([]);
+    expect(q.stats().lostBatches).toBe(1);
+  });
+});
+
 describe('end of session and stop() (FR-702, TC-063)', () => {
   it('SESSION_TAKEN_OVER arriving after stop() does not delete the outbox kept for the next load', async () => {
     let release!: () => void;
@@ -1307,6 +1343,23 @@ describe('session wiring (FR-601, FR-609, FR-702, TC-063)', { timeout: 15_000 },
     await s.stop();
   });
 
+  it('a heartbeat TAKEN_OVER reports the losses of BOTH queues in the ended payload', async () => {
+    const em = emitter();
+    const r = rig({ detectors: [em.detector] }, () => 'RETRY');
+    const s = new ProctorSession();
+    const ended: number[] = [];
+    s.on('ended', (e) => ended.push(e.lostBatches));
+    await s.start(r.cfg);
+    em.fire();
+    s.keystrokes?.reset(Q1, 'python', 'a');
+    await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    await vi.waitFor(() => expect(r.ksSent.length).toBeGreaterThan(0), { timeout: 6000 });
+    r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' as const }));
+    await vi.waitFor(() => expect(ended).toHaveLength(1), { timeout: 3000 });
+    expect(ended[0]).toBe(2); // one event batch and one keystroke batch
+    await s.stop();
+  });
+
   it('S-A: a TAKEN_OVER after a 401 episode still raises onReauthRequired(SESSION_TAKEN_OVER)', async () => {
     const reasons: string[] = [];
     const r = rig({ authLostAfter: 1, onReauthRequired: (x) => reasons.push(x) }, () => ({
@@ -1346,12 +1399,17 @@ describe('session wiring (FR-601, FR-609, FR-702, TC-063)', { timeout: 15_000 },
     await s.stop();
   });
 
-  it('S-D: a session instance that is stopped and started again does not reuse a hung key refresh', async () => {
+  it('S-D: a session instance that is stopped and started again does not reuse a hung key refresh, and the late answer changes nothing', async () => {
+    const late = (() => {
+      let resolve!: (v: string | null) => void;
+      const promise = new Promise<string | null>((r) => (resolve = r));
+      return { promise, resolve };
+    })();
     const em = emitter();
     const hung = rig({
       detectors: [em.detector],
       keyProviderTimeoutMs: 150,
-      keyProvider: { getKey: () => new Promise<string | null>(() => undefined) },
+      keyProvider: { getKey: () => late.promise },
     });
     hung.cfg.transport.sendBatch = () => Promise.resolve({ kind: 'KEY_STALE' });
     const s = new ProctorSession();
@@ -1376,7 +1434,10 @@ describe('session wiring (FR-601, FR-609, FR-702, TC-063)', { timeout: 15_000 },
     await s.start(ok.cfg);
     em2.fire();
     await vi.waitFor(() => expect(s.getQueueStats()?.sentBatches).toBe(1), { timeout: 6000 });
+    late.resolve(TEST_KEY_B64); // the first session's provider answers very late
+    await new Promise((x) => setTimeout(x, 30));
     expect(asked).toBe(1);
+    expect(s.getQueueStats()?.sentBatches).toBe(1);
     await s.stop();
   });
 

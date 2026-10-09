@@ -32,11 +32,6 @@ export interface SignedBatch {
   signature: string;
 }
 
-/**
- * OK: acknowledged (also for an idempotent replay of the same seq).
- * RETRY: network or 5xx, keep the batch and back off.
- * REJECTED: the server refused it for good (4xx); drop it so one bad batch cannot block the rest.
- */
 /** The key provider did not answer in time. */
 export class ProviderTimeoutError extends Error {
   constructor() {
@@ -45,6 +40,11 @@ export class ProviderTimeoutError extends Error {
   }
 }
 
+/**
+ * OK: acknowledged (also for an idempotent replay of the same seq).
+ * RETRY: network or 5xx, keep the batch and back off.
+ * REJECTED: the server refused it for good (4xx); drop it so one bad batch cannot block the rest.
+ */
 export type SendResult = 'OK' | 'RETRY' | 'REJECTED' | SendOutcome;
 
 /** Why the server will accept nothing more from this session. */
@@ -129,6 +129,13 @@ export interface BatchQueueOptions {
   onStorageRecovered?: () => void;
   /** Called when the sequence counter could not be read and the queue seeded it high (holes, no collisions). */
   onSeqUntrusted?: () => void;
+  /**
+   * Where the server says this stream continues (`proctor-key` counters, ADR 0013 section 2). The
+   * queue starts at max(local, this). It only RAISES the counter: when IndexedDB and the
+   * localStorage backup are both unreadable the time-seeded high fallback still applies (holes, no
+   * collisions), because batches of an earlier load may sit above the server's counter.
+   */
+  initialSeq?: number;
   /** While degraded, try IndexedDB again at most this often (default 30 s). */
   storageProbeMs?: number;
 }
@@ -146,6 +153,8 @@ export interface BatchQueueStats {
   lostBatches: number;
   /** IndexedDB is unusable; unsent batches live in memory only (lost on reload). */
   storageDegraded: boolean;
+  /** Held: no usable signing key (stale and no provider, or the key could not be issued). */
+  keyBlocked: boolean;
 }
 
 /**
@@ -349,6 +358,13 @@ export class BatchQueue<TItem> {
     const backup = this.readBackup();
     this.sweepBackups();
     this.nextSeq = Math.max(maxSaved, stored ?? 0, backup);
+    const server = this.opts.initialSeq;
+    // Below 2^31 - 1: the next cut stores seq + 1, which must stay a valid counter on reload.
+    if (server !== undefined && validSeq(server) && server < 2 ** 31 - 1 && server > this.nextSeq) {
+      this.nextSeq = server;
+      await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
+      this.writeBackup();
+    }
     if (readFailed && backup === 0 && stored === null) {
       // The counter is unknowable: seed above anything plausible and say so.
       this.nextSeq = Math.max(this.nextSeq, this.seqSeed());
@@ -366,6 +382,18 @@ export class BatchQueue<TItem> {
     }
     this.started = true;
     if (this.outbox.length > 0) void this.drain();
+  }
+
+  /**
+   * Continue at max(local, server) when the counters arrive after start (setKey). Never lowers the
+   * counter, never reuses a seq; a jump leaves a hole, not a collision.
+   */
+  async seedSeq(serverStart: number): Promise<void> {
+    if (!validSeq(serverStart) || serverStart >= 2 ** 31 - 1) return;
+    if (serverStart <= this.nextSeq || this.closed) return;
+    this.nextSeq = serverStart;
+    await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
+    this.writeBackup();
   }
 
   enqueue(item: unknown): boolean {
@@ -598,7 +626,7 @@ export class BatchQueue<TItem> {
         } catch {
           return false; // the rest is re-signed on the next KEY_EPOCH_STALE (the head check catches it)
         }
-        if (this.ended || this.finished) return false;
+        if (this.ended || this.finished || this.closed) return false;
         const again: SignedBatch = { seq: b.seq, body: b.body, signature };
         this.signedWith.set(again, k);
         const at = this.outbox.indexOf(b);
@@ -608,6 +636,7 @@ export class BatchQueue<TItem> {
           await this.opts.store
             .put(STORES.eventBatches, this.batchKey(again.seq), again)
             .catch(() => undefined);
+          await this.dropIfClosed(again.seq); // a put that raced the purge is removed again
         }
       }
       if (this.key === k) return true;
@@ -640,9 +669,8 @@ export class BatchQueue<TItem> {
     let failed = false;
     try {
       fresh = await this.withTimeout(provider(askedWith), this.opts.keyProviderTimeoutMs ?? 10_000);
-    } catch (err) {
-      void err;
-      failed = true; // timeout (ProviderTimeoutError) or error: both count toward the hold
+    } catch {
+      failed = true; // timeout (ProviderTimeoutError) or error: both count as a provider failure
     }
     if (this.ended || this.finished || (!this.started && !this.finishing)) return false; // stopped: no flag, no hook
     if (this.key !== askedWith) {
@@ -779,6 +807,7 @@ export class BatchQueue<TItem> {
       ended: this.ended,
       lostBatches: this.lostAtEnd + this.lostAtClose,
       storageDegraded: this.storageDegraded,
+      keyBlocked: this.keyBlocked,
     };
   }
 
