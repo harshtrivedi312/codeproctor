@@ -43,9 +43,9 @@ def _declared_fields(request: Request) -> frozenset[str]:
     if not isinstance(fields, dict):
         return frozenset()
     names: set[str] = set()
-    for name, info in fields.items():
+    for name, finfo in fields.items():
         names.add(str(name))
-        alias = getattr(info, "alias", None)
+        alias = getattr(finfo, "alias", None)
         if isinstance(alias, str):
             names.add(alias)
     return frozenset(names)

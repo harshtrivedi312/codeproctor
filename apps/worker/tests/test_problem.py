@@ -6,7 +6,7 @@ import asyncio
 
 import httpx
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from worker.problem import install_problem_handlers
 
@@ -14,6 +14,11 @@ from worker.problem import install_problem_handlers
 class Body(BaseModel):
     model_config = ConfigDict(extra="forbid")
     count: int
+
+
+class Aliased(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    session_id: int = Field(alias="sessionId")
 
 
 def make() -> FastAPI:
@@ -99,3 +104,33 @@ def test_fr403_a_caller_chosen_key_is_never_echoed_even_when_the_body_is_a_dict_
         r = asyncio.run(go(path, payload))
         assert r.status_code == 400 and "SENTINEL" not in r.text
         assert r.json()["fields"] == ["*"]
+
+
+def test_fr403_a_declared_alias_is_echoed_and_two_body_parameters_echo_only_declared_names() -> (
+    None
+):
+    app = FastAPI()
+
+    @app.post("/v1/alias")
+    async def alias(body: Aliased) -> dict[str, int]:
+        return {"n": body.session_id}
+
+    @app.post("/v1/two")
+    async def two(a: Body, b: Body) -> dict[str, int]:
+        return {"n": a.count + b.count}
+
+    install_problem_handlers(app)
+
+    async def go(path: str, payload: object) -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://w"
+        ) as c:
+            return await c.post(path, json=payload)
+
+    r = asyncio.run(go("/v1/alias", {"sessionId": "not-an-int"}))
+    assert r.status_code == 400 and r.json()["fields"] == ["sessionId"]
+    r = asyncio.run(go("/v1/two", {"a": {"count": "x-SENTINEL"}, "b": {"count": 1}}))
+    assert r.status_code == 400 and "SENTINEL" not in r.text
+    # With two body parameters FastAPI builds one model of the declared parameter names (a, b):
+    # route-declared names, never the caller's, so they may be echoed, and the depth stays ".*".
+    assert r.json()["fields"] == ["a.*"]

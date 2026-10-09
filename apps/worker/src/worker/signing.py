@@ -227,7 +227,7 @@ class SigningMiddleware:
             await self._reject(send)
             return
         expected = sign(key, message)
-        # Bytes, not str: compare_digest raises TypeError on non-ASCII str, which must be a 401.
+        # Bytes, not str, as defence in depth: compare_digest raises TypeError on non-ASCII str.
         if not hmac.compare_digest(expected.encode(), signature.encode("ascii")):
             await self._reject(send)
             return
