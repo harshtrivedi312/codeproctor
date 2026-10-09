@@ -502,6 +502,15 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
   });
 
   it('TC-094, ADR 0004 R-7: a restore re-applies an erasure made after the backup, and keeps the consent proof (C-17)', async () => {
+    // The erasure had finished (the candidate row anonymised): the completion marker is on the list.
+    assert.equal((await run(ERASURES, ['complete', ERASED_ID], env)).status, 0);
+    assert.deepEqual(
+      (await run(ERASURES, ['completed'], env)).stdout
+        .trim()
+        .split('\n')
+        .map((l) => l.split(' ')[1]),
+      [ERASED_ID],
+    );
     const r = await run(RESTORE, ['--target-db', 'restored_erased'], env);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /re-applied 1 erasure/);
@@ -551,6 +560,24 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
       'Erased|true',
     );
     assert.equal(q(`SELECT device_info::text FROM sessions WHERE id IN (${erasedSessions})`), '{}');
+    // The full fence (ADR 0004 9.7; FU-DBB-01, FU-DBB-23): the sessions are ERASED, an open appeal is
+    // CLOSED_ERASED, and the other candidate's sessions are not touched.
+    assert.equal(
+      q(
+        `SELECT string_agg(DISTINCT status::text, ',') FROM sessions WHERE id IN (${erasedSessions})`,
+      ),
+      'ERASED',
+    );
+    assert.equal(
+      q(
+        `SELECT status::text FROM appeals WHERE session_review_id IN (SELECT id FROM session_reviews WHERE session_id IN (${erasedSessions}))`,
+      ),
+      'CLOSED_ERASED',
+    );
+    assert.equal(
+      q(`SELECT count(*) FROM sessions WHERE status = 'ERASED' AND id NOT IN (${erasedSessions})`),
+      '0',
+    );
     // Session credentials fenced (ADR 0004 9.7): the epoch jumps past anything issued between the
     // backup and the erasure, and the HMAC key does not come back.
     assert.equal(
@@ -564,6 +591,13 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
         `SELECT auth_epoch || '|' || (hmac_key_enc IS NULL) FROM sessions WHERE id NOT IN (${erasedSessions})`,
       ),
       '1000000|false',
+    );
+    // FU-DBB-23 (a): the restored app_user cannot delete or truncate sessions (sessions end ERASED, never deleted).
+    assert.equal(
+      q(
+        "SELECT has_table_privilege('app_user', 'sessions', 'DELETE') || '|' || has_table_privilege('app_user', 'sessions', 'TRUNCATE')",
+      ),
+      'false|false',
     );
     // staff refresh tokens are revoked by the restore (a restore un-revokes and un-rotates them)
     assert.equal(q('SELECT count(*) FROM refresh_tokens WHERE revoked_at IS NULL'), '0');
@@ -589,8 +623,8 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
   it('ADR 0004 R-7: re-applying the erasures is idempotent', async () => {
     const q = (sql) => pg.psql('restored_erased', sql);
     const before = q("SELECT md5(string_agg(t::text, ',' ORDER BY id)) FROM candidates t");
-    const sql = `CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL);
-      INSERT INTO _reapply_erasures VALUES ('${ERASED_ID}', now());
+    const sql = `CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL, completed boolean NOT NULL DEFAULT false);
+      INSERT INTO _reapply_erasures VALUES ('${ERASED_ID}', now(), true);
       \\i ${REPO_ROOT}infra/backup/reapply-erasures.sql`;
     const r = spawnSync(
       'psql',
@@ -603,6 +637,45 @@ describe('DB-07 backup then restore drill (NFR-03, FR-704, ADR 0004 R-7)', { ski
     );
     assert.equal(r.status, 0, r.stderr);
     assert.equal(q("SELECT md5(string_agg(t::text, ',' ORDER BY id)) FROM candidates t"), before);
+  });
+
+  it('ADR 0004 9.7, FU-DBB-01: an erasure that had not finished is fenced and recorded, and anonymised only after day 28', async () => {
+    const run2 = (name, completed, ageDays) => {
+      const sql = `CREATE TEMP TABLE _reapply_erasures (candidate_id uuid PRIMARY KEY, erased_at timestamptz NOT NULL, completed boolean NOT NULL DEFAULT false);
+        INSERT INTO _reapply_erasures VALUES ('${ERASED_ID}', now() - interval '${ageDays} days', ${completed});
+        \\i ${REPO_ROOT}infra/backup/reapply-erasures.sql`;
+      const r = spawnSync(
+        'psql',
+        ['--no-psqlrc', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-d', name],
+        { input: sql, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...pg.env } },
+      );
+      assert.equal(r.status, 0, r.stderr);
+    };
+    // A fresh copy of the source, not the one the TC-094 test already erased.
+    const r0 = await run(RESTORE, ['--target-db', 'restored_resume', '--skip-erasures'], env);
+    assert.equal(r0.status, 0, r0.stderr);
+    const q = (sql) => pg.psql('restored_resume', sql);
+    run2('restored_resume', false, 3);
+    // Fenced, data gone, request recorded for the daily sweep, but the name is still there (day 3, not completed).
+    assert.equal(
+      q(
+        `SELECT status::text FROM sessions WHERE invitation_id IN (SELECT id FROM invitations WHERE candidate_id = '${ERASED_ID}') LIMIT 1`,
+      ),
+      'ERASED',
+    );
+    assert.equal(
+      q(
+        `SELECT (erasure_requested_at IS NOT NULL) || '|' || (erased_at IS NULL) || '|' || (full_name <> 'Erased') FROM candidates WHERE id = '${ERASED_ID}'`,
+      ),
+      'true|true|true',
+    );
+    run2('restored_resume', false, 29);
+    assert.equal(
+      q(
+        `SELECT full_name || '|' || (erased_at IS NOT NULL) FROM candidates WHERE id = '${ERASED_ID}'`,
+      ),
+      'Erased|true',
+    );
   });
 
   it('ADR 0004 R-7: only COMPLETED erasures are pruned, and only once older than the oldest backup', async () => {

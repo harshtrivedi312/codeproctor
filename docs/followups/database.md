@@ -241,8 +241,8 @@ DB-07 and DB-08 items from the Database B (ops) session. IDs are FU-DBB-NN. Rows
 
 | Item | Why it blocks the pilot | Next step |
 | ---- | ----------------------- | --------- |
-| FU-DBB-02 | Without `erasure-list.sh append` before the first fence, a restore silently brings erased candidates back (C-06; candidate data). | Built in the erasure slice (#144, Database B): an `ErasureListPort` (append before the first fence, complete after anonymisation); Backend B binds the S3 adapter. |
-| FU-DBB-01, FU-DBB-23 | `reapply-erasures.sql` does not follow the hold, `ERASED` or the day-28 rule, so a restore re-applies erasure differently from the service. | After #91 merges: align the SQL with the service, add the TC-094 checks and the `sessions` DELETE assertion to the restore drill. |
+| FU-DBB-02 | Service side DONE (#144: `append` before the first fence, `complete` after anonymisation). OPEN: `retention.module.ts` still binds `UnconfiguredErasureList`, which throws, so an erasure fails closed (safe) until a real adapter writing the same objects as `erasure-list.sh` (if-none-match) is bound. | The S3 adapter (Database B proposes a small PR) before the pilot. |
+| FU-DBB-01, FU-DBB-23 | DONE (PR for the re-check): `reapply-erasures.sql` sets `ERASED` and `CLOSED_ERASED`, anonymises only for a finished erasure or after day 28, and records `erasure_requested_at` so the sweep resumes; the drill asserts it and that `app_user` has no DELETE/TRUNCATE on `sessions`. Left: the list does not record whether the candidate was told (the notice mail may repeat). | None. |
 | FU-DBB-03, FU-DBB-22 | CI skips the backup and schema tests when a tool is missing, and shellchecks no backup script. | Hub (CI config): `REQUIRE_DB_DRILL=1`, `postgres:16`, `redis:8.8`, `shellcheck -x infra/backup/*.sh` (full list in FU-DBB-03). |
 | FU-DBB-04, FU-DBB-07 | Dropped by owner decision C-63: no staging backup workflow and no staging backup secrets. Pilot backups are `BACKUP_MODE=versioned` on the pilot host (DEP-03). | None (kept for history). |
 | FU-DBB-06 | Pilot backups are not scheduled anywhere. | DEP-03. |

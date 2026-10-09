@@ -1,13 +1,17 @@
 -- Re-applies erasures after a restore (ADR 0004 R-7 and 9.7, DB-07). restore.sh runs this in one
 -- psql session after it created the temp table
---   _reapply_erasures (candidate_id uuid, erased_at timestamptz)
+--   _reapply_erasures (candidate_id uuid, erased_at timestamptz, completed boolean)
 -- from the erasure list kept outside the backup. Idempotent, except that sessions.auth_epoch only ever increases.
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
--- docs/followups/database.md FU-DBB-01: keep this in step with DB-06's erasure service. Known gaps
--- until then: it ignores the review/appeal hold, anonymises at once instead of at day 28, and sets no
--- ERASED status (the value does not exist yet).
+-- Follows ADR 0004 9.7 and the erasure service (FU-DBB-01, FU-DBB-23): the FULL fence (every session
+-- ERASED, open appeals CLOSED_ERASED, epoch bumped; the review/appeal hold is not applied on a re-application,
+-- since the erasure was already requested), and the candidate row is anonymised at once only when the
+-- erasure had finished (`completed`: the list's completion marker) or day 28 has passed; otherwise the
+-- request is recorded (erasure_requested_at) so the daily erasure sweep resumes it (notice, day 25 alert,
+-- day 28 anonymisation, completion). Known limit: the list does not record whether the candidate was
+-- told, so a resumed erasure may send the notice mail again.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -39,10 +43,13 @@ WHERE session_question_id IN (
 UPDATE session_reviews SET notes = NULL
 WHERE session_id IN (SELECT id FROM _reapply_sessions) AND notes IS NOT NULL;
 
-UPDATE appeals SET resolution_note = NULL, reason = 'Erased'
+UPDATE appeals
+SET resolution_note = NULL,
+    reason = 'Erased',
+    status = CASE WHEN status = 'OPEN' THEN 'CLOSED_ERASED'::appeal_status ELSE status END
 WHERE session_review_id IN (
         SELECT id FROM session_reviews WHERE session_id IN (SELECT id FROM _reapply_sessions))
-  AND (resolution_note IS NOT NULL OR reason <> 'Erased');
+  AND (resolution_note IS NOT NULL OR reason <> 'Erased' OR status = 'OPEN');
 
 -- Session credentials (ADR 0004 9.7 fence): a restore brings back the old epoch and HMAC key. Every
 -- OTP success raises auth_epoch (ADR 0002, ADR 0013), so a token issued after the backup carries an
@@ -52,6 +59,7 @@ WHERE session_review_id IN (
 -- the bump is kept here deliberately so this file is safe to run on its own.
 UPDATE sessions
 SET device_info = '{}',
+    status = 'ERASED',
     auth_epoch = auth_epoch + 1000000,
     hmac_key_enc = NULL,
     report_key = NULL,
@@ -61,6 +69,13 @@ SET device_info = '{}',
       WHERE i.id = sessions.invitation_id))
 WHERE id IN (SELECT id FROM _reapply_sessions);
 
+-- Record the request, so the erasure service finds the candidate on its next daily sweep.
+UPDATE candidates c
+SET erasure_requested_at = e.erased_at
+FROM _reapply_erasures e
+WHERE c.id = e.candidate_id AND c.erasure_requested_at IS NULL;
+
+-- Anonymise now only if the erasure had finished or day 28 (ERASURE_ANONYMISE_DAY) has passed.
 UPDATE candidates c
 SET email = 'erased+' || c.id || '@invalid',
     full_name = 'Erased',
@@ -68,6 +83,7 @@ SET email = 'erased+' || c.id || '@invalid',
     erased_at = COALESCE(c.erased_at, e.erased_at)
 FROM _reapply_erasures e
 WHERE c.id = e.candidate_id
+  AND (e.completed OR now() >= e.erased_at + interval '28 days' OR c.erased_at IS NOT NULL)
   AND (c.email <> 'erased+' || c.id || '@invalid' OR c.full_name <> 'Erased'
        OR c.external_ref IS NOT NULL OR c.erased_at IS NULL);
 

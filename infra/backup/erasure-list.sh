@@ -11,6 +11,7 @@
 #   erasure-list.sh append <candidate-uuid> [<UTC stamp>]    record an erasure request (idempotent)
 #   erasure-list.sh complete <candidate-uuid>                   record that the erasure is finished
 #   erasure-list.sh list                                      print "<stamp> <uuid>" per entry
+#   erasure-list.sh completed                                 print "<stamp> <uuid>" per COMPLETED entry
 #   erasure-list.sh prune <UTC stamp>                         drop COMPLETED entries finished before the stamp
 #
 # An erasure can finish long after it was requested (a review or appeal hold, the re-run after the
@@ -75,6 +76,14 @@ case "$cmd" in
       die "a key under $ERASURE_PREFIX is not named <stamp>-<lower-case uuid>.json."
     cat "$WORK/parsed"
     ;;
+  completed)
+    # Which erasures were finished (the candidate row anonymised): restore.sh anonymises those at once
+    # and resumes the others the way the erasure service does (ADR 0004 9.7).
+    load_keys "$COMPLETED_PREFIX"
+    [ -n "$KEYS" ] || exit 0
+    printf '%s\n' "$KEYS" |
+      sed -n "s#^$COMPLETED_PREFIX\\($STAMP_RE\\)-\\([0-9a-f-]\\{36\\}\\)\\.json\$#\\1 \\2#p" | sort
+    ;;
   prune)
     [ "$BACKUP_MODE" = timestamped ] || die "prune is for BACKUP_MODE=timestamped only; in versioned mode the owner-applied expiry function prunes the list."
     before=${2:-}
@@ -97,6 +106,6 @@ case "$cmd" in
     done < "$WORK/completed"
     ;;
   *)
-    die "usage: erasure-list.sh append|complete <uuid> [stamp] | list | prune <stamp>"
+    die "usage: erasure-list.sh append|complete <uuid> [stamp] | list | completed | prune <stamp>"
     ;;
 esac

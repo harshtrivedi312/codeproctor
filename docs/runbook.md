@@ -72,9 +72,14 @@ The erasure service (DB-06) calls, in this order:
 
 A zero-byte "folder" object at `<prefix>erasure-list/` (some consoles create one) makes every restore stop, by design: any key there that is not `<stamp>-<uuid>.json` could be an erasure. Delete the folder object.
 
-Known gaps until DB-06 lands (FU-DBB-01): re-application erases every session of the candidate even if a
-review or appeal hold still protects it, anonymises the candidate at once instead of at day 28, and sets
-no `ERASED` status.
+What the re-application does (FU-DBB-01, ADR 0004 9.7): the full fence for every session of each listed
+candidate (`ERASED`, open appeals `CLOSED_ERASED`, epoch raised, keys cleared) and the data deletes. The
+review/appeal hold is not applied: the erasure was already requested, and a restore must not bring data
+back. The candidate row is anonymised at once only if the list holds a completion marker for it
+(`erasure-list.sh completed`) or day 28 since the request has passed; otherwise `erasure_requested_at` is
+set from the list so the daily erasure sweep resumes it (notice, day-25 alert, day-28 anonymisation,
+completion). Limit: the list does not record whether the candidate was told, so a resumed erasure may send
+the notice mail a second time.
 
 ### Restore drill (run on a throwaway server)
 
