@@ -10,18 +10,17 @@
 // pause. The projection is computed per request from the published version the session is pinned
 // to; the Redis `qview` cache and the render-question job of the ADR are an optimisation not built
 // yet (FU-BEB-156). Content is read in the org scope until the CS-4 PR 2 grants exist (P-24, D-68).
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import type { CodeLanguage } from '@codeproctor/shared';
 import { CandidateScope } from '../candidate/candidate-scope';
 import type { CandidateContext } from '../candidate/candidate.types';
-import { candidateOptionId } from '../grading/option-ids';
+import { OptionIdService } from '../grading/option-ids';
 import { loadCases } from '../grading/test-data';
 import { PrismaService } from '../database/prisma.service';
-import { mcqAnswerSpecSchema } from '../questions/answer-spec';
+import { InvalidAnswerSpecError, toCandidateQuestion } from '../questions/candidate-view';
+import type { Limits } from '../questions/question-content';
 import { paramsFromStored, renderContent } from '../questions/variant-template';
 import { QuestionGateService } from './question-gate.service';
-
-const CODE_LANGUAGES: readonly string[] = ['python', 'javascript', 'java'];
 
 export interface QuestionView {
   readonly sessionQuestionId: string;
@@ -29,7 +28,7 @@ export interface QuestionView {
   readonly title: string;
   readonly statementMd: string;
   readonly languages: readonly CodeLanguage[];
-  readonly limits: unknown;
+  readonly limits: Limits;
   readonly starterCode: Readonly<Record<string, string>>;
   readonly samples: readonly { input: string; expectedOutput: string }[];
   readonly mcq?: {
@@ -37,13 +36,6 @@ export interface QuestionView {
     readonly options: readonly { id: string; text: string }[];
   };
 }
-
-const asRecord = (value: unknown): Record<string, string> => {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value).filter((e): e is [string, string] => typeof e[1] === 'string'),
-  );
-};
 
 @Injectable()
 export class QuestionViewService {
@@ -53,6 +45,7 @@ export class QuestionViewService {
     private readonly prisma: PrismaService,
     private readonly scope: CandidateScope,
     private readonly gate: QuestionGateService,
+    private readonly optionIds: OptionIdService,
   ) {}
 
   async view(
@@ -67,10 +60,7 @@ export class QuestionViewService {
         where: { id: open.questionVersionId },
         select: { title: true, statementMd: true, starterCode: true, allowedLanguages: true },
       });
-      if (version === null) {
-        this.logger.error('A session question points at a missing question version');
-        throw new Error('question version missing');
-      }
+      if (version === null) throw this.bad('A session question points at a missing version', open);
       const variant =
         open.variantId === null
           ? null
@@ -79,68 +69,88 @@ export class QuestionViewService {
               select: { params: true, renderedStatement: true },
             });
 
-      if (open.type === 'MCQ') {
-        const spec = mcqAnswerSpecSchema.safeParse(open.answerSpec);
-        if (!spec.success) {
-          this.logger.error('An MCQ question has an invalid answer spec');
-          throw new Error('mcq answer spec invalid');
+      // A variant must render: a bad stored params value or a failed template is a data bug that
+      // fails closed (500, ids in the log), never the raw template with its {{placeholders}}.
+      let starterCode: unknown = version.starterCode;
+      if (variant !== null && open.type === 'CODING') {
+        const params = paramsFromStored(variant.params);
+        const rendered =
+          params === null
+            ? null
+            : renderContent(
+                { statementMd: '', starterCode: version.starterCode, referenceSolution: {} },
+                params,
+              );
+        if (rendered === null || !rendered.ok) {
+          throw this.bad('A variant does not render', open);
         }
-        return {
-          sessionQuestionId: open.sessionQuestionId,
-          type: 'MCQ',
-          title: version.title,
-          statementMd: variant?.renderedStatement ?? version.statementMd,
-          languages: [],
-          limits: undefined,
-          starterCode: {},
-          samples: [],
-          // The options and their order; the correct ids are never read into the projection.
-          mcq: {
-            multiple: spec.data.multiple,
-            options: spec.data.options.map((o) => ({
-              id: candidateOptionId(ctx.sessionId, o.id),
-              text: o.text,
-            })),
-          },
-        };
+        starterCode = rendered.content.starterCode;
       }
 
-      if (open.type === 'SHORT_ANSWER') {
-        return {
-          sessionQuestionId: open.sessionQuestionId,
-          type: 'SHORT_ANSWER',
-          title: version.title,
-          statementMd: variant?.renderedStatement ?? version.statementMd,
-          languages: [],
-          limits: undefined,
-          starterCode: {},
-          samples: [],
-        };
-      }
-
-      const params = variant === null ? null : paramsFromStored(variant.params);
-      let starterCode = asRecord(version.starterCode);
-      if (params !== null) {
-        const rendered = renderContent(
-          { statementMd: version.statementMd, starterCode, referenceSolution: {} },
-          params,
-        );
-        if (rendered.ok) starterCode = rendered.content.starterCode;
-      }
       // Sample cases only (is_hidden = false); the variant's own row overrides the base case.
-      const samples = await loadCases(db, open.questionVersionId, open.variantId, false);
+      const cases =
+        open.type === 'CODING'
+          ? (await loadCases(db, open.questionVersionId, open.variantId, false)).map((c, i) => ({
+              input: c.input,
+              expectedOutput: c.expectedOutput,
+              isHidden: false,
+              position: i,
+            }))
+          : [];
+      let projected;
+      try {
+        // The one candidate-safe projection (TC-011): an allowlist, shared with the preview.
+        projected = toCandidateQuestion(
+          {
+            type: open.type,
+            title: version.title,
+            statementMd: version.statementMd,
+            allowedLanguages: version.allowedLanguages,
+            limits: open.limits,
+            starterCode,
+            answerSpec: open.type === 'MCQ' ? open.answerSpec : null,
+          },
+          cases,
+          { statementMd: variant?.renderedStatement ?? version.statementMd },
+        );
+      } catch (e) {
+        if (e instanceof InvalidAnswerSpecError)
+          throw this.bad('An MCQ answer spec is invalid', open);
+        throw e;
+      }
       return {
         sessionQuestionId: open.sessionQuestionId,
-        type: 'CODING',
-        title: version.title,
-        statementMd: variant?.renderedStatement ?? version.statementMd,
-        languages: version.allowedLanguages.filter((l): l is CodeLanguage =>
-          CODE_LANGUAGES.includes(l),
-        ),
-        limits: open.limits,
-        starterCode,
-        samples: samples.map((c) => ({ input: c.input, expectedOutput: c.expectedOutput })),
+        type: projected.type,
+        title: projected.title,
+        statementMd: projected.statementMd,
+        languages: projected.languages as CodeLanguage[],
+        limits: projected.limits,
+        starterCode: projected.starterCode,
+        samples: projected.samples,
+        ...(projected.mcq === undefined
+          ? {}
+          : {
+              mcq: (() => {
+                // Opaque per-session ids, collision-checked over this question's options.
+                const ids = this.optionIds.mapAll(
+                  ctx.sessionId,
+                  projected.mcq.options.map((o) => o.id),
+                );
+                return {
+                  multiple: projected.mcq.multiple,
+                  options: projected.mcq.options.map((o) => ({
+                    id: ids.get(o.id) as string,
+                    text: o.text,
+                  })),
+                };
+              })(),
+            }),
       };
     });
+  }
+
+  private bad(message: string, open: { sessionQuestionId: string }): InternalServerErrorException {
+    this.logger.error(`${message} (session question ${open.sessionQuestionId})`);
+    return new InternalServerErrorException();
   }
 }

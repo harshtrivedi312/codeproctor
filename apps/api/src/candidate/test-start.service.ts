@@ -20,6 +20,11 @@ import { SessionStateConflictError } from '../session/session-state.errors';
 import { SessionStateService } from '../session/session-state.service';
 import { SYSTEM_CHECK_MAX_AGE_MS, isSystemCheckFresh } from '../session/system-check';
 import { LIVE_STATUSES, PRE_START_STATUSES } from '../session/session-transitions';
+import {
+  effectiveSectionDeadline,
+  effectiveSessionDeadline,
+  proctorPauseCapMs,
+} from '../session/deadlines';
 import { sessionNotActive } from '../session/session-write-gate';
 import { parseRandomRule, ruleKey } from '../tests/random-rule';
 import type { RandomRule } from '../tests/random-rule';
@@ -403,7 +408,15 @@ export class TestStartService {
   ): Promise<TestStartView> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: sessionId },
-      select: { status: true, startedAt: true, deadlineAt: true },
+      select: {
+        status: true,
+        startedAt: true,
+        deadlineAt: true,
+        orgId: true,
+        pausedMs: true,
+        proctorPausedAt: true,
+        pauseReasons: true,
+      },
     });
     if (session === null || session.startedAt === null || session.deadlineAt === null) {
       throw sessionNotActive(session?.status ?? 'INVITED');
@@ -431,17 +444,31 @@ export class TestStartService {
       select: { id: true, sectionId: true },
     });
     const sectionOfTq = new Map(testQuestions.map((t) => [t.id, t.sectionId]));
+    // The GET route shows the EFFECTIVE deadlines: during a PROCTOR pause the stored ones are stale
+    // (ADR 0013 CS-4.6, ADR 0002 P-3), so a reload while paused must not show a shorter timer than
+    // the gate and the heartbeat enforce. POST test/start has no pause to account for.
+    let cap = 0;
+    if (requireRunning) {
+      const org = await this.prisma.client.organization.findUnique({
+        where: { id: session.orgId },
+        select: { settings: true },
+      });
+      cap = proctorPauseCapMs(org?.settings);
+    }
+    const sessionDeadline = requireRunning
+      ? (effectiveSessionDeadline(session, now, cap) ?? session.deadlineAt)
+      : session.deadlineAt;
     return {
       status: session.status === 'PAUSED' ? 'PAUSED' : 'IN_PROGRESS',
       serverTime: now,
       startedAt: session.startedAt,
-      deadlineAt: session.deadlineAt,
+      deadlineAt: sessionDeadline,
       sections: sessionSections.map((s) => ({
         position: s.position,
         title: titles.find((t) => t.id === s.sectionId)?.title ?? '',
         timeLimitMs: s.timeLimitMs === null ? null : Number(s.timeLimitMs),
         startedAt: s.startedAt,
-        deadlineAt: s.deadlineAt,
+        deadlineAt: requireRunning ? effectiveSectionDeadline(s, session, now, cap) : s.deadlineAt,
         questions: questions
           .filter((q) => sectionOfTq.get(q.testQuestionId) === s.sectionId)
           .map((q) => ({

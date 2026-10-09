@@ -137,6 +137,9 @@ export const envSchema = z
     JWT_CANDIDATE_SECRET: secret.optional(),
     // Keys the HMAC that protects the 6-digit email OTP in Redis (ADR 0003 section 2).
     OTP_PEPPER: secret.optional(),
+    // Keys the per-session opaque MCQ option ids (ADR 0013 CS-4.6): opt_ + HMAC(this, sessionId:optionId).
+    // Required in pilot and production; a placeholder is refused in shared environments.
+    QUESTION_OPTION_ID_SECRET: secret.optional(),
     // kid of the AES-256-GCM key (SESSION_KEY_ENC_KEY_<kid>, 32 bytes base64) that wraps the
     // per-session HMAC master key (ADR 0013 section 2). Older kids stay configured until their rows
     // are destroyed; the key itself is read from the environment by SessionKeyService.
@@ -277,6 +280,7 @@ export const envSchema = z
         'COOKIE_SECRET',
         'JWT_CANDIDATE_SECRET',
         'OTP_PEPPER',
+        'QUESTION_OPTION_ID_SECRET',
         'JUDGE0_AUTH_TOKEN',
         'JUDGE0_AUTHZ_TOKEN',
       ] as const) {
@@ -394,7 +398,11 @@ export const envSchema = z
     // Staging is not listed: the candidate routes answer 503 there until the secrets are set.
     const deployed = live || env.NODE_ENV === 'production';
     if (deployed) {
-      for (const key of ['JWT_CANDIDATE_SECRET', 'OTP_PEPPER'] as const) {
+      for (const key of [
+        'JWT_CANDIDATE_SECRET',
+        'OTP_PEPPER',
+        'QUESTION_OPTION_ID_SECRET',
+      ] as const) {
         if (env[key] === undefined) {
           ctx.addIssue({ code: 'custom', path: [key], message: 'is required outside development' });
         }

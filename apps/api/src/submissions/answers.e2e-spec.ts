@@ -6,10 +6,11 @@
 import { INestApplication } from '@nestjs/common';
 import { RedisContainer, StartedRedisContainer } from '@testcontainers/redis';
 import { Redis } from 'ioredis';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { createInvitation, createTenant } from '../candidate/testing/fixtures';
+import { deriveOptionId } from '../grading/option-ids';
 import type { InvitationFixture, Tenant } from '../candidate/testing/fixtures';
 import { createPrismaClient } from '../database/create-prisma-client';
 import { startMigratedDatabase } from '../database/testing/migrated-postgres';
@@ -26,6 +27,10 @@ import type { GradingQueue } from '../grading/grading-queue';
 import type { SubmitFlowService } from '../grading/submit-flow.service';
 
 const API = '/api/v1/candidate';
+const OPTION_SECRET = 'o'.repeat(48);
+/** The id the candidate is shown for an author option id (ADR 0013 CS-4.6). */
+const opt = (sessionId: string, optionId: string): string =>
+  deriveOptionId(OPTION_SECRET, sessionId, optionId);
 const FINISH_PATH = '/session/section/finish';
 const FINISH = FINISH_PATH;
 const SECRET_MARKER = 'SECRET-SOURCE-MARKER';
@@ -134,6 +139,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       THROTTLE_AUTH_LIMIT: '100000',
       THROTTLE_CANDIDATE_LIMIT: '100000',
       REQUIRE_LEGAL_APPROVED_CONSENT: 'false',
+      QUESTION_OPTION_ID_SECRET: OPTION_SECRET,
     });
     jest.resetModules();
     const { AppModule } = jest.requireActual<typeof import('../app.module')>('../app.module');
@@ -157,6 +163,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       slug: string,
       type: 'CODING' | 'MCQ' | 'SHORT_ANSWER',
       answerSpec: object | null,
+      extra: object = {},
     ): Promise<string> {
       const q = await owner.question.create({
         data: { orgId: org, slug: `${slug}-${tenant.label}`, type },
@@ -171,6 +178,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
           allowedLanguages: type === 'CODING' ? ['python'] : [],
           isPublished: true,
           ...(answerSpec === null ? {} : { answerSpec }),
+          ...extra,
         },
       });
       await owner.question.update({ where: { id: q.id }, data: { currentVersionId: v.id } });
@@ -204,7 +212,12 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       }
       return ids;
     }
-    const code = await question('code', 'CODING', null);
+    // Content that must never reach a candidate (TC-011): a reference solution, a validation report.
+    const code = await question('code', 'CODING', null, {
+      starterCode: { python: 'n = {{n}}  # STARTER' },
+      referenceSolution: { python: 'print(REFSECRET-{{n}})' },
+      validationReport: { note: 'VALREPORT-SECRET' },
+    });
     const caseIds = await cases(code, [
       ['h1', 1],
       ['h2', 1],
@@ -237,6 +250,15 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
         testCaseId: caseIds[0] as string,
         input: 'vs1',
         expectedOutput: 'vs1',
+      },
+    });
+    // The variant also overrides a HIDDEN case: it must not appear anywhere either.
+    await owner.variantTestCase.create({
+      data: {
+        variantId: variant.id,
+        testCaseId: caseIds[1] as string,
+        input: 'vhidden-secret',
+        expectedOutput: 'vhidden-secret',
       },
     });
 
@@ -525,14 +547,24 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
     it('FR-504, FR-205: MCQ ids and short answer text are saved per type and checked against it', async () => {
       const s = await live();
       await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
-        answer: { optionIds: ['b'] },
+        answer: { optionIds: [opt(s.inv.sessionId, 'b')] },
       }).expect(200);
-      expect((await questionRow(s.q.mcq)).answer).toEqual({ optionIds: ['b'] });
+      expect((await questionRow(s.q.mcq)).answer).toEqual({
+        optionIds: [opt(s.inv.sessionId, 'b')],
+      });
       await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
         answer: { optionIds: ['zzz'] },
       }).expect(400);
+      // The author id, another session's id for the same option, and two options for a single choice.
       await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
-        answer: { optionIds: ['a', 'b'] },
+        answer: { optionIds: ['b'] },
+      }).expect(400);
+      const other = await live();
+      await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
+        answer: { optionIds: [opt(other.inv.sessionId, 'b')] },
+      }).expect(400);
+      await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
+        answer: { optionIds: [opt(s.inv.sessionId, 'a'), opt(s.inv.sessionId, 'b')] },
       }).expect(400);
       await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
         code: 'x',
@@ -714,7 +746,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
         language: 'python',
       }).expect(200);
       await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
-        answer: { optionIds: ['b'] },
+        answer: { optionIds: [opt(s.inv.sessionId, 'b')] },
       }).expect(200);
       await call('put', `/answers/${s.q.short}/draft`, s.token, {
         answer: { text: '  PHOTOSYNTHESIS ' },
@@ -813,7 +845,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       ] as const) {
         await call('put', `/answers/${s.q.short}/draft`, s.token, { answer: { text } }).expect(200);
         await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
-          answer: { optionIds: ['a'] },
+          answer: { optionIds: [opt(s.inv.sessionId, 'a')] },
         }).expect(200);
         await call('post', '/session/finish', s.token).expect(200);
         await grading.grade(main.tenant.orgId, s.inv.sessionId);
@@ -2073,7 +2105,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
         language: 'python',
       }).expect(200);
       await call('put', `/answers/${s.q.mcq}/draft`, s.token, {
-        answer: { optionIds: ['b'] },
+        answer: { optionIds: [opt(s.inv.sessionId, 'b')] },
       }).expect(200);
       await call('post', '/session/finish', s.token).expect(200);
       const seen: unknown[] = [];
@@ -2194,9 +2226,13 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
           'type',
         ].sort(),
       );
-      expect(JSON.stringify(res.body)).not.toMatch(
-        /h1|h2|h3|h4|h5|referenceSolution|REFERENCE|answerSpec/,
+      const text = JSON.stringify(res.body);
+      expect(text).not.toMatch(
+        /h1|h2|h3|h4|h5|referenceSolution|REFSECRET|VALREPORT|vhidden|answerSpec|validationReport/,
       );
+      // The starter code is rendered with the variant params: no placeholder is left.
+      expect(res.body).toMatchObject({ starterCode: { python: 'n = 1  # STARTER' } });
+      expect(text).not.toContain('{{');
     });
 
     it('TC-011: an MCQ shows the options in the author order and never the correct ids; a short answer shows no accepted answer', async () => {
@@ -2207,12 +2243,22 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
         mcq: {
           multiple: false,
           options: [
-            { id: 'a', text: 'A' },
-            { id: 'b', text: 'B' },
+            { id: opt(l.inv.sessionId, 'a'), text: 'A' },
+            { id: opt(l.inv.sessionId, 'b'), text: 'B' },
           ],
         },
       });
       expect(JSON.stringify(mcq.body)).not.toMatch(/correct/i);
+      // No raw author option id: the ids are opaque, per session, and differ between sessions.
+      expect(
+        (mcq.body as { mcq: { options: Array<{ id: string }> } }).mcq.options.map((o) => o.id),
+      ).toEqual([
+        expect.stringMatching(/^opt_[a-z2-7]{10}$/),
+        expect.stringMatching(/^opt_[a-z2-7]{10}$/),
+      ]);
+      const other = await live();
+      const otherMcq = await get(`/questions/${other.q.mcq}`, other.token).expect(200);
+      expect(JSON.stringify(otherMcq.body)).not.toContain(opt(l.inv.sessionId, 'a'));
       const short = await get(`/questions/${l.q.short}`, l.token).expect(200);
       expect(short.body).toMatchObject({ type: 'SHORT_ANSWER' });
       expect(JSON.stringify(short.body)).not.toMatch(/photosynthesis|canonical|accepted/i);
@@ -2228,6 +2274,62 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       await get(`/questions/${foreignLive.q.code}`, l.token).expect(404);
       await get('/questions/not-a-uuid', l.token).expect(400);
       await get(`/questions/${l.q.code}`, null).expect(401);
+    });
+
+    it('TC-011: the MCQ and short-answer views are exactly the allowlisted keys', async () => {
+      const l = await live();
+      const mcq = await get(`/questions/${l.q.mcq}`, l.token).expect(200);
+      expect(Object.keys(mcq.body as object).sort()).toEqual(
+        [
+          'languages',
+          'mcq',
+          'samples',
+          'sessionQuestionId',
+          'starterCode',
+          'statementMd',
+          'title',
+          'type',
+          'limits',
+        ].sort(),
+      );
+      const short = await get(`/questions/${l.q.short}`, l.token).expect(200);
+      expect(Object.keys(short.body as object).sort()).toEqual(
+        [
+          'languages',
+          'limits',
+          'samples',
+          'sessionQuestionId',
+          'starterCode',
+          'statementMd',
+          'title',
+          'type',
+        ].sort(),
+      );
+    });
+
+    it('CS-4.6: a read on a session that is not running is 409 SESSION_NOT_ACTIVE', async () => {
+      const over = await createInvitation(owner, main.tenant, {
+        testId: main.testId,
+        status: 'SUBMITTED',
+        session: { authEpoch: 1 },
+      });
+      const token = tokens.sign({ sid: over.sessionId, oid: main.tenant.orgId, epoch: 1 }).token;
+      const res = await get(`/questions/${randomUUID()}`, token).expect(409);
+      expect(res.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE' });
+    });
+
+    it('CS-4.6, ADR 0002 P-3: a layout read during a PROCTOR pause shows the effective deadlines, not the stale stored ones', async () => {
+      const l = await live({ status: 'PAUSED', pause: ['PROCTOR'] });
+      const pausedFor = 120_000;
+      await owner.session.update({
+        where: { id: l.inv.sessionId },
+        data: { proctorPausedAt: new Date(Date.now() - pausedFor) },
+      });
+      const stored = await sessionRow(l.inv.sessionId);
+      const res = await get('/session/test', l.token).expect(200);
+      const shown = Date.parse((res.body as { deadlineAt: string }).deadlineAt);
+      expect(shown - (stored.deadlineAt as Date).getTime()).toBeGreaterThan(pausedFor - 5_000);
+      expect(shown - (stored.deadlineAt as Date).getTime()).toBeLessThan(pausedFor + 5_000);
     });
 
     it('CS-4.6: reads stay allowed in every pause; past the section deadline on server time the read is 409', async () => {
