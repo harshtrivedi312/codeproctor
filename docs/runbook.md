@@ -75,13 +75,14 @@ A zero-byte "folder" object at `<prefix>erasure-list/` (some consoles create one
 What the re-application does (FU-DBB-01, ADR 0004 9.7): the full fence for every session of each listed
 candidate (`ERASED`, open appeals `CLOSED_ERASED`, epoch raised, keys cleared), the data deletes, the
 accommodations reduced as the service does (ADR 0015 section 7), and the candidate row anonymised **at
-once**. The review/appeal hold is not applied: the erasure was already requested, and a restore must not
-bring data back. The ADR says to anonymise at once only if the candidate had already been anonymised or
-day 28 has passed; the list cannot tell (the completion marker is written only after the whole run, which
-can come after the anonymisation), so this restores the privacy-safe reading for every entry. The cost: the
-completion notice mail that would have gone out at the end of a resumed erasure is not sent (FU-DBB-31b
-tracks recording anonymisation on the list). `erasure_requested_at` is set from the list when the backup
-did not have it, so the erasure sweep finishes the purge and the completion row.
+once**. This is ADR 0004 10.6 (accepted, D-83; it replaces the first sub-bullet of 9.7): the list does not
+record the stage, and an erasure request is a right already exercised. Not yet done (FU-DBB-32): the 10.6
+limits (a) active legal holds are respected (the off-database legal-hold list does not exist yet) and
+(b) a candidate in the 60-day hold window is re-applied as of the request (held sessions partially erased,
+anonymisation waits for the hold end). Until the legal-hold table exists no hold can be placed, so no
+held record can be erased by mistake today. The notice mail is not re-sent: the candidate row is already
+anonymised (the list records no notice; FU-DBB-31b). `erasure_requested_at` is set from the list when the
+backup did not have it, so the erasure sweep finishes the purge and the completion row.
 
 ### Restore drill (run on a throwaway server)
 
