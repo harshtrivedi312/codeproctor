@@ -389,14 +389,27 @@ export class TestStartService {
     return result;
   }
 
+  /** GET /candidate/session/test: the layout of a running session, read in the org scope (P-24 interim). */
+  layout(ctx: CandidateContext, now: Date = new Date()): Promise<TestStartView> {
+    return this.scope.asOrg(ctx, () => this.view(ctx.sessionId, now, true));
+  }
+
   /** The running session's outline: ids, positions, points and times; no question content. */
-  async view(sessionId: string, now: Date = new Date()): Promise<TestStartView> {
+  async view(
+    sessionId: string,
+    now: Date = new Date(),
+    /** The GET route: only a running (IN_PROGRESS or PAUSED) session has a layout to read. */
+    requireRunning = false,
+  ): Promise<TestStartView> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: sessionId },
       select: { status: true, startedAt: true, deadlineAt: true },
     });
     if (session === null || session.startedAt === null || session.deadlineAt === null) {
       throw sessionNotActive(session?.status ?? 'INVITED');
+    }
+    if (requireRunning && session.status !== 'IN_PROGRESS' && session.status !== 'PAUSED') {
+      throw sessionNotActive(session.status);
     }
     const [sessionSections, questions] = await Promise.all([
       this.prisma.client.sessionSection.findMany({

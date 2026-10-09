@@ -2160,4 +2160,112 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
     expect(text).not.toContain('Photosynthesis');
     expect(text).not.toMatch(/Bearer\s/i);
   });
+
+  // ---------- render projection (ADR 0013 CS-4.6; FR-301, FR-501, TC-011) ----------
+
+  describe('GET /candidate/session/test and GET /candidate/questions/:id (CS-4.6, TC-011, FR-301)', () => {
+    const get = (path: string, token: string | null): request.Test => {
+      const req = request(app.getHttpServer()).get(`${API}${path}`);
+      return token === null ? req : req.set('Authorization', `Bearer ${token}`);
+    };
+
+    it('TC-011, FR-501: a coding question shows the variant statement, languages, the variant sample and nothing hidden', async () => {
+      const l = await live();
+      const res = await get(`/questions/${l.q.code}`, l.token).expect(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toMatchObject({
+        sessionQuestionId: l.q.code,
+        type: 'CODING',
+        title: 'code',
+        statementMd: 'variant',
+        languages: ['python'],
+        samples: [{ input: 'vs1', expectedOutput: 'vs1' }],
+      });
+      // An allowlist: exactly these keys, no reference solution, no hidden case, no answer spec.
+      expect(Object.keys(res.body as object).sort()).toEqual(
+        [
+          'languages',
+          'limits',
+          'samples',
+          'sessionQuestionId',
+          'starterCode',
+          'statementMd',
+          'title',
+          'type',
+        ].sort(),
+      );
+      expect(JSON.stringify(res.body)).not.toMatch(
+        /h1|h2|h3|h4|h5|referenceSolution|REFERENCE|answerSpec/,
+      );
+    });
+
+    it('TC-011: an MCQ shows the options in the author order and never the correct ids; a short answer shows no accepted answer', async () => {
+      const l = await live();
+      const mcq = await get(`/questions/${l.q.mcq}`, l.token).expect(200);
+      expect(mcq.body).toMatchObject({
+        type: 'MCQ',
+        mcq: {
+          multiple: false,
+          options: [
+            { id: 'a', text: 'A' },
+            { id: 'b', text: 'B' },
+          ],
+        },
+      });
+      expect(JSON.stringify(mcq.body)).not.toMatch(/correct/i);
+      const short = await get(`/questions/${l.q.short}`, l.token).expect(200);
+      expect(short.body).toMatchObject({ type: 'SHORT_ANSWER' });
+      expect(JSON.stringify(short.body)).not.toMatch(/photosynthesis|canonical|accepted/i);
+    });
+
+    it('S-5, CS-2: a question of a section that has not opened is 409 SECTION_NOT_OPEN; another session, another org and a malformed id are 404 or 400; no token is 401', async () => {
+      const l = await live();
+      const res = await get(`/questions/${l.q.code2}`, l.token).expect(409);
+      expect(res.body).toMatchObject({ code: 'SECTION_NOT_OPEN' });
+      const other = await live();
+      await get(`/questions/${other.q.code}`, l.token).expect(404);
+      const foreignLive = await live({ world: foreign });
+      await get(`/questions/${foreignLive.q.code}`, l.token).expect(404);
+      await get('/questions/not-a-uuid', l.token).expect(400);
+      await get(`/questions/${l.q.code}`, null).expect(401);
+    });
+
+    it('CS-4.6: reads stay allowed in every pause; past the section deadline on server time the read is 409', async () => {
+      const paused = await live({ status: 'PAUSED', pause: ['PROCTOR'] });
+      await get(`/questions/${paused.q.code}`, paused.token).expect(200);
+      const late = await live({ sectionDeadlineInMs: -60_000 });
+      const res = await get(`/questions/${late.q.code}`, late.token).expect(409);
+      expect(res.body).toMatchObject({ code: 'SECTION_NOT_OPEN' });
+    });
+
+    it('FR-301: the layout lists sections, question ids, points and deadlines, no content; only a running session has one', async () => {
+      const l = await live();
+      const res = await get('/session/test', l.token);
+      expect(res.status).toBe(200);
+      const body = res.body as {
+        status: string;
+        sections: Array<{
+          position: number;
+          questions: Array<{ sessionQuestionId: string; points: string }>;
+        }>;
+      };
+      expect(body.status).toBe('IN_PROGRESS');
+      expect(body.sections.map((s) => s.position)).toEqual([1, 2]);
+      expect(body.sections[0]?.questions.map((q) => q.sessionQuestionId)).toEqual([
+        l.q.code,
+        l.q.mcq,
+        l.q.short,
+      ]);
+      expect(JSON.stringify(res.body)).not.toMatch(/statement|starterCode|samples/);
+      const over = await createInvitation(owner, main.tenant, {
+        testId: main.testId,
+        status: 'SUBMITTED',
+        session: { authEpoch: 1 },
+      });
+      const token = tokens.sign({ sid: over.sessionId, oid: main.tenant.orgId, epoch: 1 }).token;
+      const done = await get('/session/test', token).expect(409);
+      expect(done.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE' });
+      await get('/session/test', null).expect(401);
+    });
+  });
 });

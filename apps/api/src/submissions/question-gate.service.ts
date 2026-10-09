@@ -17,7 +17,8 @@ import {
   effectiveSessionDeadline,
   proctorPauseCapMs,
 } from '../session/deadlines';
-import { assertWritable } from '../session/session-write-gate';
+import { assertWritable, sessionNotActive } from '../session/session-write-gate';
+import { LIVE_STATUSES } from '../session/session-transitions';
 
 export interface OpenQuestion {
   readonly sessionQuestionId: string;
@@ -78,7 +79,13 @@ export class QuestionGateService {
     return section.endedAt === null ? section.sectionId : null;
   }
 
-  async open(ctx: CandidateContext, sessionQuestionId: string, now: Date): Promise<OpenQuestion> {
+  async open(
+    ctx: CandidateContext,
+    sessionQuestionId: string,
+    now: Date,
+    /** 'read' skips the pause write lock: reads stay allowed in every pause (ADR 0013 CS-4.6). */
+    mode: 'write' | 'read' = 'write',
+  ): Promise<OpenQuestion> {
     const db = this.prisma.client;
     const session = await db.session.findUnique({
       where: { id: ctx.sessionId },
@@ -91,7 +98,11 @@ export class QuestionGateService {
       },
     });
     if (session === null) throw new NotFoundException();
-    assertWritable(session);
+    if (mode === 'read') {
+      if (!LIVE_STATUSES.includes(session.status)) throw sessionNotActive(session.status);
+    } else {
+      assertWritable(session);
+    }
 
     const question = await db.sessionQuestion.findFirst({
       where: { id: sessionQuestionId, sessionId: ctx.sessionId },
