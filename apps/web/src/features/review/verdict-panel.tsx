@@ -20,7 +20,7 @@ import {
 } from './model';
 import { useSetVerdict } from './queries';
 
-/** Pending answers are 409 in the contract; the code name is ASSUMED until the route exists. */
+/** Pending manual answers are 409 with this problem code (docs/api-contract.md section 7, TC-099). */
 export const PENDING_CODE = 'MANUAL_PENDING';
 
 function verdictError(e: unknown): string {

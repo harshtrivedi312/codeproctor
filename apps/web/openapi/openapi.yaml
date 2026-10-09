@@ -1938,9 +1938,8 @@ paths:
 
   # ---------------------------------------------------------------------------------------------
   # Review workspace (FR-901, FR-902, FR-703). REAL for the three read routes (apps/api/src/review,
-  # PR 297). The answer scoring PATCH (docs/api-contract.md section 7) and the verdict POST are
-  # contract only: the API does not implement them yet, so their shapes are the contract's and the
-  # verdict body and 409 codes are ASSUMED. Roles: REVIEWER and SUPER_ADMIN. Cross-organisation
+  # PR 297). The answer scoring PATCH and the verdict POST follow docs/api-contract.md section 7
+  # (BE-13). Roles: REVIEWER and SUPER_ADMIN. Cross-organisation
   # ids are 404.
   # ---------------------------------------------------------------------------------------------
   /v1/review/queue:
@@ -2057,7 +2056,7 @@ paths:
   /v1/review/sessions/{sessionId}/verdict:
     post:
       operationId: setReviewVerdict
-      summary: Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED.
+      summary: Final verdict (review_verdict:set). 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). The request body (SetVerdict) is the web's; it is not defined in section 7 yet.
       parameters:
         - { name: sessionId, in: path, required: true, schema: { type: string } }
       requestBody:
@@ -2593,10 +2592,11 @@ components:
       description: >-
         The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff
         codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED,
-        IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added
-        here when the web starts branching on them. Guard 403s carry none. BUSY is the 503
+        IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are
+        added here when the web starts branching on them. Guard 403s carry none. BUSY is the 503
         with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a
-        client should retry it after Retry-After (the web retries it automatically, bounded). Candidate-route codes such as
+        client should retry it after Retry-After (the web retries it automatically, bounded, except
+        on the credential, re-auth and candidate routes). Candidate-route codes such as
         SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
       enum:
         [
@@ -2606,6 +2606,7 @@ components:
           BUSY,
           REASON_NOT_ENABLED,
           ANSWER_NOT_MANUAL,
+          MANUAL_PENDING,
           SESSION_NOT_UNDER_REVIEW,
           VERDICT_ALREADY_SET,
         ]
@@ -2613,9 +2614,9 @@ components:
       type: object
       description: >-
         RFC 7807 problem body of the question routes. 409 and 422 carry detail
-        and errors[]. `code` is present only where a route defines one:
-        VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference
-        rows). The UI branches on status and endpoint, and on that code.
+        and errors[]. `code` is present only where a route defines one (see ProblemCode; on these
+        routes mainly VARIANT_HAS_AI_REFERENCES, 409, deleting a variant that has AI reference
+        rows, and BUSY, 503). The UI branches on status and endpoint, and on that code.
       required: [type, title, status]
       properties:
         type: { type: string }

@@ -62,6 +62,7 @@ describe('Identity worker settings (FR-403, ADR 0014 4.3, 4.4)', () => {
       JUDGE0_AUTHZ_TOKEN: 'z'.repeat(40),
       JWT_CANDIDATE_SECRET: 'c'.repeat(40),
       OTP_PEPPER: 'o'.repeat(40),
+      QUESTION_OPTION_ID_SECRET: 'q'.repeat(40),
       S3_REGION: 'us-east-1',
       S3_MEDIA_BUCKET: 'cp-test-media',
       SESSION_KEY_ENC_ACTIVE_KID: 'k1',

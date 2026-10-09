@@ -94,6 +94,17 @@ export class ConsentService {
     }
   }
 
+  /** When the session's consent was signed (the floor of an unsigned system-check finding's time). */
+  async signedAtOf(ctx: CandidateContext): Promise<Date | null> {
+    const row = await this.scope.asOrg(ctx, () =>
+      this.prisma.client.consent.findUnique({
+        where: { sessionId: ctx.sessionId },
+        select: { signedAt: true },
+      }),
+    );
+    return row?.signedAt ?? null;
+  }
+
   private async currentTextId(orgId: string): Promise<string | null> {
     const org = await this.prisma.client.organization.findUnique({
       where: { id: orgId },

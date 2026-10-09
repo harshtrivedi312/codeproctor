@@ -1606,10 +1606,15 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/consent/sign', permission: 'candidate_consent:sign' },
   { key: 'POST /candidate/session/consent/decline', permission: 'candidate_consent:decline' },
   { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+  // Render projection (Backend B): the running test's layout and one question of the open section.
+  { key: 'GET /candidate/session/test', permission: 'candidate_session:read' },
+  { key: 'GET /candidate/questions/:questionId', permission: 'candidate_session:read' },
   // BE-08 accommodations projection (Backend A, PR #339): read-only, reuses the session read permission.
   { key: 'GET /candidate/session/accommodations', permission: 'candidate_session:read' },
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
+  // System check (Backend B, PR #340): reuses the heartbeat permission (FU-BEB-152).
+  { key: 'POST /candidate/session/system-check', permission: 'candidate_session:heartbeat' },
   { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
   // BE-09 media (Backend B, PR #119): confirm reuses the presign permission.
   { key: 'POST /candidate/session/media/presign', permission: 'candidate_media:presign' },

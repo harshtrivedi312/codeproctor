@@ -1,6 +1,7 @@
 // BE-10 end to end: signed event and keystroke batches over HTTP against real Postgres 16 (app_user,
 // real grants and migrations) and real Redis (Testcontainers). Covers FR-608, FR-801, NFR-04,
 // TC-050, TC-055, TC-063, TC-065 and the verification order of ADR 0013 section 2.
+import { assertWritable } from '../session/session-write-gate';
 import { INestApplication } from '@nestjs/common';
 import { RedisContainer, StartedRedisContainer } from '@testcontainers/redis';
 import { Redis } from 'ioredis';
@@ -454,9 +455,11 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
         'SIDE_CAMERA_LOST',
       ]);
       await sendEvents(r, 1, [event('FULLSCREEN_RESTORED')]).expect(200);
-      // One reason is still active (derived from the events), so the session stays paused. The stored
-      // reason list is not edited while PAUSED (no PAUSED to PAUSED edge in SessionStateService yet).
-      expect((await sessionRow(r)).status).toBe('PAUSED');
+      // One reason is still active (derived from the events), so the session stays paused and the stored
+      // list follows through the PAUSED to PAUSED edge (stale pause_reasons gap, FU-BEB-161).
+      const stillPaused = await sessionRow(r);
+      expect(stillPaused.status).toBe('PAUSED');
+      expect(stillPaused.pauseReasons).toEqual(['SIDE_CAMERA_LOST']);
       await sendEvents(r, 2, [event('SIDE_CAMERA_RECONNECTED')]).expect(200);
       const resumed = await sessionRow(r);
       expect(resumed.status).toBe('IN_PROGRESS');
@@ -482,7 +485,7 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
       await sendEvents(r, 0, [event('FULLSCREEN_RESTORED')]).expect(200);
       const row = await sessionRow(r);
       expect(row.status).toBe('PAUSED');
-      expect(row.pauseReasons).toContain('PROCTOR');
+      expect(row.pauseReasons).toEqual(['PROCTOR']);
       expect(row.proctorPausedAt?.getTime()).toBe(pausedAt.getTime());
     });
 
@@ -505,8 +508,8 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
         spy.mockRestore();
       }
       const row = await sessionRow(r);
-      expect(row.status).toBe('PAUSED'); // the stale lift lost, the retry saw PROCTOR and did nothing
-      expect(row.pauseReasons).toContain('PROCTOR');
+      expect(row.status).toBe('PAUSED'); // the stale lift lost; the retry kept PROCTOR and wrote [PROCTOR]
+      expect(row.pauseReasons).toEqual(['PROCTOR']);
       expect(row.proctorPausedAt).not.toBeNull();
     });
 
@@ -529,8 +532,80 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
       }
       const row = await sessionRow(r);
       expect(row.status).toBe('PAUSED');
-      expect(row.pauseReasons).toEqual(['PROCTOR']);
+      // The proctor pause is kept, and the retry stores the candidate reason beside it (the edge).
+      expect(row.pauseReasons).toEqual(['SCREEN_SHARE_STOPPED', 'PROCTOR']);
       expect(row.proctorPausedAt).not.toBeNull();
+    });
+
+    it('FR-609, DL-17: a second candidate reason while PAUSED is stored (the write gate sees it), the clock and PROCTOR are untouched', async () => {
+      const pausedAt = new Date(Date.now() - 60_000);
+      const r = await running(tenant, { pauseReasons: ['PROCTOR', 'FULLSCREEN_EXIT'] }, 'PAUSED');
+      await owner.session.update({
+        where: { id: r.inv.sessionId },
+        data: { proctorPausedAt: pausedAt },
+      });
+      const before = await sessionRow(r);
+      await sendEvents(r, 0, [
+        event('FULLSCREEN_EXIT'),
+        event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } }),
+      ]).expect(200);
+      const row = await sessionRow(r);
+      expect(row.status).toBe('PAUSED');
+      expect([...row.pauseReasons].sort()).toEqual(
+        ['FULLSCREEN_EXIT', 'PROCTOR', 'SCREEN_SHARE_STOPPED'].sort(),
+      );
+      expect(row.proctorPausedAt?.getTime()).toBe(pausedAt.getTime());
+      expect(row.deadlineAt).toEqual(before.deadlineAt);
+      expect(row.pausedMs).toBe(before.pausedMs);
+    });
+
+    it('DL-17, FR-609: a screen-share stop while PAUSED for another reason closes the write gate, and its resume opens it again', async () => {
+      const r = await running(tenant, { pauseReasons: ['FULLSCREEN_EXIT'] }, 'PAUSED');
+      // FULLSCREEN_EXIT alone does not block writes (DL-17).
+      const asWritable = async () => assertWritable(await sessionRow(r));
+      await sendEvents(r, 0, [event('FULLSCREEN_EXIT')]).expect(200);
+      await expect(asWritable()).resolves.toBeUndefined();
+      await sendEvents(r, 1, [
+        event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } }),
+      ]).expect(200);
+      const stopped = await sessionRow(r);
+      expect([...stopped.pauseReasons].sort()).toEqual(['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED']);
+      expect(() => assertWritable(stopped)).toThrow();
+      await sendEvents(r, 2, [event('SCREEN_SHARE_RESUMED')]).expect(200);
+      const resumed = await sessionRow(r);
+      expect(resumed.pauseReasons).toEqual(['FULLSCREEN_EXIT']);
+      expect(() => assertWritable(resumed)).not.toThrow();
+    });
+
+    it('FR-801 / CS-4.4a: a proctor resume that lands between the read and the edge is not undone (PROCTOR is never put back, the clock is left alone)', async () => {
+      const r = await running(tenant, { pauseReasons: ['FULLSCREEN_EXIT', 'PROCTOR'] }, 'PAUSED');
+      await owner.session.update({
+        where: { id: r.inv.sessionId },
+        data: { proctorPausedAt: new Date(Date.now() - 30_000) },
+      });
+      const before = await sessionRow(r);
+      const original = states.transition.bind(states);
+      const spy = jest.spyOn(states, 'transition').mockImplementationOnce(async (req) => {
+        // A proctor resumes (PROCTOR lifted, pause cleared) right before the candidate's reason is written.
+        await owner.session.update({
+          where: { id: r.inv.sessionId },
+          data: { pauseReasons: ['FULLSCREEN_EXIT'], proctorPausedAt: null },
+        });
+        return original(req);
+      });
+      try {
+        await sendEvents(r, 0, [
+          event('FULLSCREEN_EXIT'),
+          event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } }),
+        ]).expect(200);
+      } finally {
+        spy.mockRestore();
+      }
+      const row = await sessionRow(r);
+      expect([...row.pauseReasons].sort()).toEqual(['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED']);
+      expect(row.proctorPausedAt).toBeNull();
+      expect(row.deadlineAt).toEqual(before.deadlineAt);
+      expect(row.pausedMs).toBe(before.pausedMs);
     });
 
     it('FR-801: a duplicate resend re-applies a pause that was missed', async () => {

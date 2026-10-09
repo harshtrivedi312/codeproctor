@@ -1,5 +1,5 @@
 'use client';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { api, type Schemas } from '@/lib/api/client';
 import { BUSY_CODE } from '@/lib/api/busy';
 import { getGeneration } from '@/lib/auth-session';
@@ -67,6 +67,43 @@ export function useStaffUsers() {
     },
   });
 }
+
+/**
+ * The fixed 500 on a staff invite (or re-issue) means the outcome is unknown (api-contract section
+ * 8, FU-BE-208): the user row may exist and the mail may or may not have gone out. Reads the user
+ * list (never sends again) and says whether the address is in it. 'unknown': the list could not be read.
+ */
+/** The API's default page size (api-contract section 6); the web contract has no paging parameters yet. */
+const LIST_PAGE_SIZE = 50;
+
+export async function checkInviteOutcome(
+  qc: QueryClient,
+  email: string,
+): Promise<'found' | 'missing' | 'unknown'> {
+  const startedIn = getGeneration();
+  try {
+    const { data } = await api.GET('/v1/admin/users');
+    // The session changed meanwhile: this answer is about someone else's organisation.
+    if (!data || startedIn !== getGeneration()) return 'unknown';
+    qc.setQueryData(adminKeys.users, data.items);
+    const wanted = email.trim().toLowerCase();
+    if (data.items.some((u) => u.email.toLowerCase() === wanted)) return 'found';
+    // The list is paged (the API's default page is 50) and this call reads the first page only:
+    // a full page may hide the person, so "missing" is only claimed for a short list.
+    return data.items.length >= LIST_PAGE_SIZE ? 'unknown' : 'missing';
+  } catch {
+    return 'unknown';
+  }
+}
+/** What to tell the user after the unknown-outcome 500 on an invite, given what the list says. */
+export const INVITE_UNKNOWN_TEXT = {
+  found:
+    'The invitation may have been sent. The person is now in the list, so the account exists, but we could not confirm the email went out. Ask them to check their inbox before you send anything again.',
+  missing:
+    'We could not confirm the invitation. The person is not in the list yet, so it probably was not created. Check the list, then send it again if they are still missing.',
+  unknown:
+    'We could not confirm the invitation, and could not read the list to check. Reload the page and look for the person before you send it again.',
+} as const;
 
 export function useInviteUser() {
   const qc = useQueryClient();

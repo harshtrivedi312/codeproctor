@@ -4,6 +4,21 @@ import type { EmailJob } from './mail-templates';
 const URL_WITH_TOKEN = 'https://app.example.com/candidate/start#token=abc123SECRET';
 
 const allJobs: EmailJob[] = [
+  {
+    template: 'two-factor-enabled',
+    to: 'a@example.com',
+    params: { occurredAt: '2026-10-07T09:05:30.000Z' },
+  },
+  {
+    template: 'two-factor-disabled',
+    to: 'a@example.com',
+    params: { occurredAt: '2026-10-07T09:05:30.000Z' },
+  },
+  {
+    template: 'two-factor-reset',
+    to: 'a@example.com',
+    params: { occurredAt: '2026-10-07T09:05:30.000Z' },
+  },
   { template: 'password-reset', to: 'a@example.com', params: { resetUrl: URL_WITH_TOKEN } },
   { template: 'staff-invite', to: 'a@example.com', params: { inviteUrl: URL_WITH_TOKEN } },
   {
@@ -148,5 +163,26 @@ describe('FR-303 / C-31 mail templates', () => {
 
   it('C-31: stripHeader removes C1 controls, U+0085, U+2028 and U+2029', () => {
     expect(stripHeader('a\u0085b\u2028c\u2029d\u0080e\u009ff\u007fg')).toBe('a b c d e f g');
+  });
+
+  it('D-76, FR-107: the two-factor mails have the fixed subjects, the time, a plain-text part and no address, link or name', () => {
+    const subjects = {
+      'two-factor-enabled': 'Two-factor sign-in was turned on for your account',
+      'two-factor-disabled': 'Two-factor sign-in was turned off for your account',
+      'two-factor-reset': 'Two-factor sign-in was reset on your account',
+    } as const;
+    for (const template of Object.keys(subjects) as (keyof typeof subjects)[]) {
+      const r = renderMail({
+        template,
+        to: 'a@example.com',
+        params: { occurredAt: '2026-10-07T09:05:30.000Z' },
+      });
+      expect(r.subject).toBe(subjects[template]);
+      expect(r.text).toContain('2026-10-07 09:05 UTC');
+      expect(r.html).toContain('2026-10-07 09:05 UTC');
+      expect(`${r.html}${r.text}`).not.toMatch(/https?:|@|<a /);
+      // Turning 2FA on says nothing about sessions; the other two say they were signed out.
+      expect(/session/i.test(r.text)).toBe(template !== 'two-factor-enabled');
+    }
   });
 });

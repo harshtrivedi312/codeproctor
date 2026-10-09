@@ -5,8 +5,10 @@ import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, isAuthRequest } from '@/lib/api/client';
 import {
+  LOGOUT_LOCK_WAIT_MS,
   REQUEST_TIMEOUT_MS,
   getSessionUserId,
+  trackLogout,
   invalidateRefreshes,
   refreshSession,
   resetInMemorySignOutFlagForTests,
@@ -822,17 +824,21 @@ describe('settleSession limit', () => {
     // this test, so the finally block invalidates it: a late abort must not sign out a later test.
     server.use(http.post('*/v1/auth/refresh', () => new Promise(() => undefined)));
     void refreshSession();
+    // And a logout that never settles: the bound covers a queued logout (lock wait + request).
+    let endLogout: () => void = () => undefined;
+    trackLogout(new Promise<void>((resolve) => (endLogout = resolve)));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       let done = false;
       const waiting = settleSession().then(() => (done = true));
-      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+      await vi.advanceTimersByTimeAsync(LOGOUT_LOCK_WAIT_MS + REQUEST_TIMEOUT_MS - 1);
       expect(done).toBe(false);
       await vi.advanceTimersByTimeAsync(2);
       await waiting;
       expect(done).toBe(true);
     } finally {
       vi.useRealTimers();
+      endLogout(); // do not leave a never-settling logout for the next test
       invalidateRefreshes();
     }
   });
