@@ -57,7 +57,8 @@ describe('phone step on the computer (FR-405)', () => {
   });
 
   it('FR-405: when the server has no side-camera route (404) the step moves on and asks for nothing', async () => {
-    await signIn(MOCK_TOKENS.consented);
+    // A STRICT session: without the 404 override the step would show the QR screen.
+    await signIn(MOCK_TOKENS.strict);
     server.use(
       http.get(`${apiBaseUrl}/v1/candidate/session/side-camera`, () =>
         HttpResponse.json({ code: 'NOT_FOUND' }, { status: 404 }),
@@ -69,6 +70,7 @@ describe('phone step on the computer (FR-405)', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
     expect(known).toHaveBeenCalledWith(false);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('phone-paired')).not.toBeInTheDocument();
   });
 
   it('FR-405: a server error (500) or a network error still shows the retry, not a silent skip', async () => {

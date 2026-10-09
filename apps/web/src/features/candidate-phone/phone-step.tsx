@@ -41,6 +41,10 @@ export function PhoneStep({
   // 404 means "this server has no side-camera feature", so there is nothing to connect: do not
   // block the candidate behind a retry that can never succeed. Network errors and 5xx still show
   // the retry (the server may only be unreachable); a 401 still ends the session.
+  // Skipping here is acceptable only because the server fails closed: for a STRICT test
+  // verify-conditions always lists SIDE_CAMERA as unmet, so the session never becomes VERIFIED and
+  // Start answers 409 (apps/api session/verify-conditions.port.ts, candidate/test-start.service.ts).
+  // When the real route ships (BE-10 / ARC-03 part 2) remove this branch or narrow it (FU-FEB-62).
   const r = status.data;
   const notAvailable = r !== undefined && !r.ok && r.kind === 'problem' && r.status === 404;
 
