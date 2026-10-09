@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import type { Schemas } from '@/lib/api/client';
 import { TestLoadError } from './adr-source';
 import { demoSource } from './demo-source';
-import type { DraftBody, DraftResult, TestSource } from './source';
+import type { DraftBody, DraftResult, RunResultView, TestSource } from './source';
 import type { ProctorBridge } from './proctor/bridge';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
@@ -265,7 +265,7 @@ function TestScreenInner({
   const [now, setNow] = React.useState(0);
   // Run output is kept per question, so a slow run never shows under another question.
   const [runningId, setRunningId] = React.useState<string | null>(null);
-  const [results, setResults] = React.useState<Record<string, Schemas['RunResult']>>({});
+  const [results, setResults] = React.useState<Record<string, RunResultView>>({});
   const [runErrors, setRunErrors] = React.useState<Record<string, string>>({});
 
   const clock = useServerClock(() => source.serverNow(), source.isDemo ? 'demo' : 'candidate');
