@@ -762,4 +762,51 @@ describe('stream lifetime of the monitor (FR-604, TC-054, NFR-05)', () => {
     expect(held.stops).toHaveLength(1);
     releaseScreenShare({ ok: false, reason: 'DENIED' }); // nothing to release
   });
+
+  it('DENIED is cleared by a later successful accept; a dead extra stream never flags or unlocks a live share', () => {
+    const dead = mk('monitor', 'ended');
+    const live = mk('monitor');
+    const r = startMonitor();
+    r.m.adopt({ ok: true, stream: dead.value, surface: 'monitor' });
+    expect(r.caps).toContain('screen-share:DENIED');
+    r.m.adopt({ ok: true, stream: live.value, surface: 'monitor' });
+    expect(r.caps[r.caps.length - 1]).toBe('screen-share:SUPPORTED');
+    expect(r.locks).toEqual([true, false]);
+    const dead2 = mk('monitor', 'ended');
+    const capsBefore = r.caps.length;
+    expect(r.m.adopt({ ok: true, stream: dead2.value, surface: 'monitor' })).toEqual({
+      ok: false,
+      reason: 'DENIED',
+    });
+    expect(r.caps.length).toBe(capsBefore); // no DENIED while a live share is held
+    expect(r.m.currentStream).toBe(live.value);
+    expect(r.locks).toEqual([true, false]);
+  });
+
+  it('stop() then start() while the picker is open: the late stream is stopped, the new start stays locked', async () => {
+    const late = mk('monitor');
+    let resolve!: (s: MediaStream) => void;
+    const media = { getDisplayMedia: () => new Promise<MediaStream>((r) => (resolve = r)) };
+    const m = new ScreenShareMonitor(media);
+    const locks: boolean[] = [];
+    const ctx = () => ({
+      emit: () => undefined,
+      root: document.body,
+      setCapability: () => undefined,
+      setLock: (l: { locked: boolean }) => locks.push(l.locked),
+      assertConsent: () => undefined,
+      measure: <R>(_l: string, fn: () => R) => fn(),
+      isDisabled: () => false,
+    });
+    m.start(ctx());
+    const pending = m.request();
+    await Promise.resolve();
+    m.stop();
+    m.start(ctx()); // a new run
+    resolve(late.value);
+    expect(await pending).toEqual({ ok: false, reason: 'UNSUPPORTED' });
+    expect(late.stops).toHaveLength(1);
+    expect(locks).toEqual([true, true]); // both starts locked, nothing unlocked
+    expect(m.currentStream).toBeNull();
+  });
 });
