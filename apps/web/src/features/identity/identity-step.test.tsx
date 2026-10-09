@@ -364,7 +364,7 @@ describe('identity step (FR-403, ADR 0004)', () => {
     expect(submits[1]).toEqual(submits[0]);
   });
 
-  it('FR-403 D-61: names the server cannot use (IDENTITY_NAME_INVALID) ask for both photos again', async () => {
+  it('FR-403 D-61: expired or spent names (IDENTITY_NAME_INVALID) keep the photos and ask to press Send again', async () => {
     await signIn();
     server.use(
       http.post(`${apiBaseUrl}/v1/candidate/session/identity`, () =>
@@ -378,8 +378,174 @@ describe('identity step (FR-403, ADR 0004)', () => {
     );
     await capturePhotos(user);
     await user.click(await screen.findByRole('button', { name: /send my photos/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/press "send my photos" again/i);
+    expect(screen.getByRole('button', { name: /send my photos/i })).toBeEnabled();
+  });
+
+  it('FR-403 D-61: photos the server cannot use (IDENTITY_IMAGE_REJECTED) ask for both photos again', async () => {
+    await signIn();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/identity`, () =>
+        HttpResponse.json({ code: 'IDENTITY_IMAGE_REJECTED' }, { status: 400 }),
+      ),
+    );
+    const { deps } = fakeDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await capturePhotos(user);
+    await user.click(await screen.findByRole('button', { name: /send my photos/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/take both photos again/i);
     expect(await screen.findByRole('heading', { name: /photo of your id/i })).toBeInTheDocument();
+  });
+
+  it('FR-403 D-61: a check that stays PENDING is "still checking" with a way to look again, never "received, continue"', async () => {
+    await signIn();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/identity`, () =>
+        HttpResponse.json({ attempt: 1, status: 'PENDING', canRetry: false }),
+      ),
+    );
+    const { deps } = fakeDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <IdentityStep
+        pollMs={2}
+        maxPolls={3}
+        deps={deps}
+        onDone={vi.fn()}
+        onSessionEnded={vi.fn()}
+      />,
+    );
+    expect(await screen.findByTestId('identity-still-checking')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^continue$/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('identity-received')).not.toBeInTheDocument();
+    // The result arrives later: "Check again" picks it up, and a late LOW_CONFIDENCE gets its retake.
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/identity`, () =>
+        HttpResponse.json({ attempt: 1, status: 'LOW_CONFIDENCE', canRetry: true }),
+      ),
+    );
+    await user.click(screen.getByRole('button', { name: /check again/i }));
+    expect(await screen.findByTestId('identity-retry')).toBeInTheDocument();
+  });
+
+  it('FR-403 D-61: coming back after a LOW_CONFIDENCE first attempt shows the retake screen', async () => {
+    await signIn();
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/identity`, () =>
+        HttpResponse.json({ attempt: 1, status: 'LOW_CONFIDENCE', canRetry: true }),
+      ),
+    );
+    const { deps } = fakeDeps();
+    renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    expect(await screen.findByTestId('identity-retry')).toBeInTheDocument();
+    expect(screen.getByText(/second try/i)).toBeInTheDocument();
+  });
+
+  it('FR-403 D-61: IDENTITY_ATTEMPTS_EXHAUSTED shows "received" (a person looks)', async () => {
+    await signIn();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/identity/presign`, () =>
+        HttpResponse.json({ code: 'IDENTITY_ATTEMPTS_EXHAUSTED' }, { status: 409 }),
+      ),
+    );
+    const { deps } = fakeDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await capturePhotos(user);
+    await user.click(await screen.findByRole('button', { name: /send my photos/i }));
+    expect(await screen.findByTestId('identity-received')).toBeInTheDocument();
+  });
+
+  it('FR-403 D-61: IDENTITY_CHECK_PENDING on the presign goes to polling', async () => {
+    await signIn();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/identity/presign`, () =>
+        HttpResponse.json({ code: 'IDENTITY_CHECK_PENDING' }, { status: 409 }),
+      ),
+    );
+    const { deps } = fakeDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await capturePhotos(user);
+    await user.click(await screen.findByRole('button', { name: /send my photos/i }));
+    expect(await screen.findByTestId('identity-checking')).toBeInTheDocument();
+  });
+
+  it('FR-403 D-61: too many tries (429) says to wait; a session that is not active ends the step; a 401 while polling ends it', async () => {
+    await signIn();
+    const { deps } = fakeDeps();
+    const user = userEvent.setup();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/identity/presign`, () =>
+        HttpResponse.json({ code: 'RATE_LIMITED' }, { status: 429 }),
+      ),
+    );
+    const first = renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await capturePhotos(user);
+    await user.click(await screen.findByRole('button', { name: /send my photos/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/wait a moment/i);
+    first.unmount();
+
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/identity/presign`, () =>
+        HttpResponse.json({ code: 'SESSION_NOT_ACTIVE' }, { status: 409 }),
+      ),
+    );
+    const ended = vi.fn();
+    const second = renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={ended} />,
+    );
+    await capturePhotos(user);
+    await user.click(await screen.findByRole('button', { name: /send my photos/i }));
+    await waitFor(() => expect(ended).toHaveBeenCalled());
+    second.unmount();
+
+    let reads = 0;
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/identity`, () => {
+        reads += 1;
+        return reads === 1
+          ? HttpResponse.json({ attempt: 1, status: 'PENDING', canRetry: false })
+          : HttpResponse.json({ code: 'UNAUTHENTICATED' }, { status: 401 });
+      }),
+    );
+    const endedByPoll = vi.fn();
+    renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={endedByPoll} />,
+    );
+    await waitFor(() => expect(endedByPoll).toHaveBeenCalled());
+  });
+
+  it('FR-403 D-61: leaving the step stops the polling', async () => {
+    await signIn();
+    let reads = 0;
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/identity`, () => {
+        reads += 1;
+        return HttpResponse.json({ attempt: 1, status: 'PENDING', canRetry: false });
+      }),
+    );
+    const { deps } = fakeDeps();
+    const view = renderWithQuery(
+      <IdentityStep pollMs={5} deps={deps} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await screen.findByTestId('identity-checking');
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3));
+    view.unmount();
+    const after = reads;
+    await new Promise((r) => setTimeout(r, 120));
+    expect(reads).toBeLessThanOrEqual(after + 1);
   });
 
   it('FR-403 D-61: coming back while the check is PENDING shows "checking" and then the result, without asking for photos', async () => {

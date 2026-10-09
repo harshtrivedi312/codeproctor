@@ -13,7 +13,7 @@ import {
   type IdentityDeps,
 } from './capture';
 
-type Phase = 'id' | 'selfie' | 'review' | 'sending' | 'checking' | 'received';
+type Phase = 'id' | 'selfie' | 'review' | 'sending' | 'checking' | 'stillChecking' | 'received';
 
 /** A captured image and the object URL used to preview it. Both live in memory only. */
 interface Shot {
@@ -51,20 +51,34 @@ export const IDENTITY_COPY = {
  * manual review). In-browser face landmark detection would need WebAssembly, which the stepper's
  * CSP does not allow (D-45), so it is a follow-up that needs an owner decision.
  */
-/** How often and how long the page asks for the result of the background face match. */
+/**
+ * How often and how long the page asks for the result of the background face match. The server's own
+ * worst case is a few minutes (a busy worker can delay the job for up to 5 minutes), so the page
+ * keeps asking with a growing pause: 10 reads every 1.5 s, 20 every 3 s, then every 5 s, about 5.5
+ * minutes in all, well under the API's 60 reads per minute. After that it says it is still checking
+ * and offers "Check again": it never says "received, continue" while the server has not finished
+ * (the session cannot start until the check is done), and a late LOW_CONFIDENCE still gets its retake.
+ */
 const STATUS_POLL_MS = 1500;
-const STATUS_POLL_TRIES = 20;
+const STATUS_POLL_MAX = 80;
+function pollDelay(i: number, base: number): number {
+  if (i < 10) return base;
+  if (i < 30) return base * 2;
+  return Math.round(base * 3.34);
+}
 /** A submit whose upload had not landed yet is repeated with the same names, a few times. */
 const UPLOAD_NOT_FOUND_TRIES = 3;
 
 export function IdentityStep({
   deps: injected,
   pollMs = STATUS_POLL_MS,
+  maxPolls = STATUS_POLL_MAX,
   onDone,
   onSessionEnded,
 }: {
   deps?: Partial<IdentityDeps>;
   pollMs?: number;
+  maxPolls?: number;
   onDone: () => void;
   onSessionEnded: () => void;
 }): React.JSX.Element {
@@ -243,7 +257,7 @@ export function IdentityStep({
         return;
       case 'LOW_CONFIDENCE':
         releaseCapture();
-        if (result.canRetry && attempt === 1) {
+        if (result.canRetry) {
           // One retake, once. After that a person looks at the photos.
           setAttempt(2);
           setRetryHint(true);
@@ -268,12 +282,12 @@ export function IdentityStep({
     }
   }
 
-  /** Asks for the result until it leaves PENDING; a long wait ends as "received" (a person may look). */
+  /** Asks for the result until it leaves PENDING, with a growing pause; a long wait is "still checking". */
   async function pollResult(tries: number): Promise<void> {
     releaseCapture();
     setPhase('checking');
-    for (let i = tries; i < STATUS_POLL_TRIES; i += 1) {
-      await new Promise((r) => setTimeout(r, pollMs));
+    for (let i = tries; i < maxPolls; i += 1) {
+      await new Promise((r) => setTimeout(r, pollDelay(i, pollMs)));
       if (!alive.current) return;
       const r = await candidateApi.getIdentityStatus();
       if (!alive.current) return;
@@ -282,6 +296,12 @@ export function IdentityStep({
           onSessionEnded();
           return;
         }
+        if (r.kind === 'problem' && r.status === 429) {
+          // Too many reads: wait as long as the server asks, then go on.
+          await new Promise((res) =>
+            setTimeout(res, Math.max(pollMs, (r.retryAfterSeconds ?? 0) * 1000)),
+          );
+        }
         continue;
       }
       if (r.data.status !== 'PENDING' && r.data.status !== 'NOT_STARTED') {
@@ -289,8 +309,9 @@ export function IdentityStep({
         return;
       }
     }
-    // Still checking after a while: the photos are in; the server decides at Start.
-    setPhase('received');
+    // Still not finished: say so and let the candidate ask again. Not "received": the server will
+    // not let the test start before the check is done.
+    setPhase('stillChecking');
   }
 
   async function sendOnce(): Promise<void> {
@@ -306,13 +327,14 @@ export function IdentityStep({
       ['SELFIE', selfieBlob],
     ] as const) {
       const presign = await candidateApi.presignIdentityImage(purpose, blob.size);
+      if (!alive.current) return;
       if (!presign.ok) {
         if (presign.kind === 'problem' && presign.status === 401) {
           onSessionEnded();
           return;
         }
         if (presign.kind === 'problem' && presign.code === 'IDENTITY_CHECK_WAIVED') {
-          stopCamera();
+          releaseCapture();
           setForcedWaived(true);
           void accommodations.refetch();
           return;
@@ -326,6 +348,17 @@ export function IdentityStep({
           setPhase('received');
           return;
         }
+        if (presign.kind === 'problem' && presign.code === 'SESSION_NOT_ACTIVE') {
+          onSessionEnded();
+          return;
+        }
+        if (presign.kind === 'problem' && presign.status === 429) {
+          setProblem(
+            'Too many tries in a short time. Wait a moment, then press "Send my photos" again.',
+          );
+          setPhase('review');
+          return;
+        }
         setProblem(
           'We could not start the upload. Check your internet connection and press "Send my photos" again.',
         );
@@ -333,6 +366,7 @@ export function IdentityStep({
         return;
       }
       const uploaded = await deps.upload(presign.data.url, presign.data.headers, blob);
+      if (!alive.current) return;
       if (!uploaded) {
         setProblem(
           'The upload did not finish. Check your internet connection and press "Send my photos" again. Your photos are still here.',
@@ -381,7 +415,7 @@ export function IdentityStep({
       }
       if (result.kind === 'problem') {
         if (result.code === 'IDENTITY_CHECK_WAIVED') {
-          stopCamera();
+          releaseCapture();
           setForcedWaived(true);
           return;
         }
@@ -394,10 +428,28 @@ export function IdentityStep({
           setPhase('received');
           return;
         }
-        if (result.code === 'IDENTITY_NAME_INVALID' || result.code === 'IDENTITY_IMAGE_REJECTED') {
+        if (result.code === 'IDENTITY_IMAGE_REJECTED') {
           // The server could not use these photos: take both again (no reason is given or needed).
           restart();
           setProblem('We could not use those photos. Please take both photos again.');
+          return;
+        }
+        if (result.code === 'IDENTITY_NAME_INVALID') {
+          // The names (expired, spent, wrong attempt), not the photos: keep the photos, and the next
+          // Send asks for fresh names.
+          setProblem('The upload expired. Press "Send my photos" again.');
+          setPhase('review');
+          return;
+        }
+        if (result.code === 'SESSION_NOT_ACTIVE') {
+          onSessionEnded();
+          return;
+        }
+        if (result.status === 429) {
+          setProblem(
+            'Too many tries in a short time. Wait a moment, then press "Send my photos" again.',
+          );
+          setPhase('review');
           return;
         }
       }
@@ -436,6 +488,20 @@ export function IdentityStep({
         <p role="status" data-testid="identity-checking">
           Your photos were received. This takes a few seconds. Please keep this page open.
         </p>
+      </StepFrame>
+    );
+  }
+
+  if (phase === 'stillChecking') {
+    return (
+      <StepFrame title="Still checking your photos" focusKey="stillChecking">
+        <Alert tone="info" role="status" data-testid="identity-still-checking">
+          Your photos were received and the check is taking longer than usual. This can take a few
+          minutes. You can keep this page open and press the button to look again.
+        </Alert>
+        <Button size="lg" className="min-h-11" onClick={() => void pollResult(0)}>
+          Check again
+        </Button>
       </StepFrame>
     );
   }
