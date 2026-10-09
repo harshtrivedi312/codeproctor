@@ -527,6 +527,16 @@ export function localAdapterProblem(
   return `${value} is allowed only when APP_ENV is exactly development (local use only)`;
 }
 
+/**
+ * DL-72 development-only stopgap switch (see grade-session.service.ts and
+ * review-decisions.service.ts). True only when APP_ENV is exactly 'development' and NODE_ENV is not
+ * 'production'; staging, pilot, production, test, unset and any other value are false. Remove when
+ * BE-12 and FU-BEB-145 land.
+ */
+export function devReviewFlowEnabled(env: { APP_ENV?: string; NODE_ENV?: string }): boolean {
+  return env.APP_ENV === 'development' && env.NODE_ENV !== 'production';
+}
+
 /** Matches change-me anywhere, ignoring case, surrounding spaces and leading quotes. */
 function isPlaceholderText(value: string): boolean {
   return value
