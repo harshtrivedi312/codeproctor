@@ -34,10 +34,29 @@ def problem(status: int, code: str, title: str, headers: dict[str, str] | None =
     )
 
 
-def _safe_path(error: Mapping[str, object]) -> str:
+def _declared_fields(request: Request) -> frozenset[str]:
+    """Field names (and aliases) the matched route's body model declares; empty if unknown."""
+    route = request.scope.get("route")
+    info = getattr(getattr(route, "body_field", None), "field_info", None)
+    model = getattr(info, "annotation", None)  # the body model of a single body parameter
+    fields = getattr(model, "model_fields", None)
+    if not isinstance(fields, dict):
+        return frozenset()
+    names: set[str] = set()
+    for name, info in fields.items():
+        names.add(str(name))
+        alias = getattr(info, "alias", None)
+        if isinstance(alias, str):
+            names.add(alias)
+    return frozenset(names)
+
+
+def _safe_path(error: Mapping[str, object], declared: frozenset[str]) -> str:
+    """The declared top-level field only. A key the caller chose (an extra key, a dict key, a
+    wrong-shaped body) is never echoed, whatever the error type (ADR 0014 6.1)."""
     loc = [str(p) for p in error["loc"] if p != "body"]  # type: ignore[attr-defined]
-    if not loc or (error["type"] == "extra_forbidden" and len(loc) == 1):
-        return "*"  # the unknown key is the caller's own text
+    if not loc or loc[0] not in declared:
+        return "*"
     return loc[0] + (".*" if len(loc) > 1 else "")
 
 
@@ -49,7 +68,8 @@ def install_problem_handlers(app: FastAPI) -> None:
             return await request_validation_exception_handler(request, exc)
         # Only the declared top-level field, and ".*" when the error is deeper. Nested keys can be
         # chosen by the caller (starterCode, config), so they are never echoed (ADR 0014 6.1).
-        paths = sorted({_safe_path(e) for e in exc.errors()})
+        declared = _declared_fields(request)
+        paths = sorted({_safe_path(e, declared) for e in exc.errors()})
         body: dict[str, Any] = {
             "type": "about:blank",
             "title": "Validation failed",

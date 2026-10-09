@@ -71,3 +71,31 @@ def test_fr403_405_on_v1_keeps_the_allow_header() -> None:
 
     r = asyncio.run(go())
     assert r.status_code == 405 and "POST" in r.headers["allow"]
+
+
+def test_fr403_a_caller_chosen_key_is_never_echoed_even_when_the_body_is_a_dict_or_a_list() -> None:
+    app = FastAPI()
+
+    @app.post("/v1/map")
+    async def mapped(body: dict[str, int]) -> dict[str, int]:
+        return body
+
+    @app.post("/v1/list")
+    async def listed(body: list[int]) -> list[int]:
+        return body
+
+    install_problem_handlers(app)
+
+    async def go(path: str, payload: object) -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://w"
+        ) as c:
+            return await c.post(path, json=payload)
+
+    for path, payload in (
+        ("/v1/map", {"key-SENTINEL": "not-an-int"}),
+        ("/v1/list", ["x", {"k-SENTINEL": 1}]),
+    ):
+        r = asyncio.run(go(path, payload))
+        assert r.status_code == 400 and "SENTINEL" not in r.text
+        assert r.json()["fields"] == ["*"]
