@@ -619,6 +619,68 @@ describe('the key is never written after a purge, never extractable (ADR 0013 se
     expect(await rowOf(helperStore)).toBeUndefined();
   });
 
+  it('S2: the key part of the idb flag recovers when a later store succeeds', async () => {
+    const inner = new IdbKeyStore(newStore());
+    let fail = true;
+    const keyStore: KeyStore = {
+      get: (sid) => inner.get(sid),
+      put: (sid, v) => (fail ? Promise.reject(new Error('quota')) : inner.put(sid, v)),
+      delete: (sid) => inner.delete(sid),
+    };
+    const key = await importSessionKey(KEY2_B64);
+    const seen: string[] = [];
+    const s = new ProctorSession();
+    s.on('capability', (f) => {
+      if (f.id === 'idb') seen.push(f.status);
+    });
+    await s.start(sessionRig({ keyStore, signingKey: { key, epoch: 1 } }).cfg);
+    expect(seen).toEqual(['UNSUPPORTED']);
+    fail = false;
+    await s.setKey(key, 2);
+    expect(seen).toEqual(['UNSUPPORTED', 'SUPPORTED']);
+    await s.stop();
+  });
+
+  it('S-c (TC-063, FR-702): a store put still pending across purge, stop() and a new start() is removed when it lands', async () => {
+    const real = newStore();
+    const inner = new IdbKeyStore(real);
+    const gate = deferred<void>();
+    let gated = false;
+    const keyStore: KeyStore = {
+      get: (sid) => inner.get(sid),
+      put: async (sid, v) => {
+        if (!gated) {
+          gated = true;
+          await gate.promise; // the first put (setKey) hangs
+        }
+        return inner.put(sid, v);
+      },
+      delete: (sid) => inner.delete(sid),
+    };
+    const key = await importSessionKey(KEY2_B64);
+    const r = sessionRig({ store: real, keyStore, signingKey: { key } });
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    const pending = s.setKey(key, 9); // persistKey waits in the gated put
+    await vi.waitFor(() => expect(gated).toBe(true));
+    r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' } as never));
+    await new Promise((x) => setTimeout(x, 100)); // TAKEN_OVER -> purgeKey() while the put hangs
+    await s.stop();
+    const KEY3_B64 = btoa(String.fromCharCode(...Array.from({ length: 32 }, (_, i) => 50 + i)));
+    const key3 = await importSessionKey(KEY3_B64);
+    const again = sessionRig({ store: real, keyStore, signingKey: { key: key3 } }); // a NEW start()
+    await s.start(again.cfg);
+    gate.resolve(); // the old put lands now
+    await pending.catch(() => undefined);
+    await new Promise((x) => setTimeout(x, 30));
+    expect(await rowOf(real)).toBeUndefined();
+    // S4: the hung setKey of the OLD run must not re-key the NEW session.
+    again.fire();
+    await vi.waitFor(() => expect(again.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    expect(again.sent[0]?.signature).toBe(hmacHex(KEY3_B64, again.sent[0]?.body ?? ''));
+    await s.stop();
+  });
+
   it('B2: an extractable or non-HMAC key is refused by start, setKey and the store, and a provider that returns one gets no adoption', async () => {
     const extractable = await crypto.subtle.importKey(
       'raw',
@@ -750,6 +812,7 @@ describe('cross-tab lock and helper nits (ADR 0013 section 2; FR-601, TC-063)', 
     release(); // the lock is granted now
     const err = (await pending) as ProctorKeyError;
     expect(err).toBeInstanceOf(ProctorKeyError);
+    expect(err.kind).toBe('CANCELLED'); // final: nobody retries after finish or purge
     expect(fetchFn).not.toHaveBeenCalled(); // the one-time issuance is not burned
     expect(await store.get(STORES.meta, hmacKeyName('sess'))).toBeUndefined();
   });
@@ -792,8 +855,8 @@ describe('cross-tab lock and helper nits (ADR 0013 section 2; FR-601, TC-063)', 
       },
     };
     const f = (() => Promise.resolve(reply(200, keyBody()))) as unknown as typeof fetch;
-    const inner = provider(f, { locks: never, lock: 'none' }).p;
-    expect((await inner.fetchKey()).epoch).toBe(3); // no nested request, so no deadlock
+    const inner = provider(f, { locks: never }).p;
+    expect((await inner.fetchKey(undefined, { lock: 'none' })).epoch).toBe(3); // no nested request
     const frozen = provider(f, { locks: never, lockTimeoutMs: 30 }).p;
     const err = (await frozen.fetchKey().catch((e: unknown) => e)) as ProctorKeyError;
     expect(err.kind).toBe('UNAVAILABLE');
@@ -873,17 +936,46 @@ describe('cross-tab lock and helper nits (ADR 0013 section 2; FR-601, TC-063)', 
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it('a throwing KeyStore.get becomes a ProctorKeyError without detail', async () => {
-    const broken: KeyStore = {
-      get: () => Promise.reject(new Error(`secret ${TOKEN}`)),
-      put: () => Promise.resolve(),
-      delete: () => Promise.resolve(),
-    };
-    const { p } = provider(() => Promise.resolve(reply(200, keyBody())), {
-      store: broken,
+  it('an unreadable store is "unknown": loadStoredKey returns null, ensureKey falls through to the server, no detail leaks', async () => {
+    const real = newStore();
+    vi.spyOn(real, 'get').mockRejectedValue(new Error(`secret ${TOKEN}`));
+    const fetchFn = vi.fn(() => Promise.resolve(reply(200, keyBody())));
+    const { p } = provider(fetchFn, { store: real });
+    expect(await p.loadStoredKey()).toBeNull();
+    const r = await p.ensureKey();
+    expect(r.source).toBe('NETWORK');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    // IdbKeyStore itself rejects on a failed read (it is not "known empty"), and on a failed delete.
+    await expect(new IdbKeyStore(real).get('sess')).rejects.toThrow();
+    vi.spyOn(real, 'delete').mockRejectedValue(new Error('idb'));
+    await expect(new IdbKeyStore(real).delete('sess')).rejects.toThrow();
+    expect(await ProctorSession.loadStoredKey('sess', real)).toBeNull();
+  });
+
+  it('a 200 whose key import fails is final BAD_RESPONSE (the server already issued the key): one POST, no retry', async () => {
+    vi.spyOn(crypto.subtle, 'importKey').mockRejectedValue(new Error('no subtle'));
+    const fetchFn = vi.fn(() => Promise.resolve(reply(200, keyBody())));
+    const { p, sleeps } = provider(fetchFn);
+    const err = (await p.fetchKey().catch((e: unknown) => e)) as ProctorKeyError;
+    expect(err.kind).toBe('BAD_RESPONSE');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it('attempt 1 gets 429, another tab stores the key during the backoff: attempt 2 returns it from the store, no second POST', async () => {
+    const store = newStore();
+    const key = await importSessionKey(KEY2_B64);
+    const fetchFn = vi.fn(() =>
+      Promise.resolve(reply(429, { code: 'RATE_LIMITED' }, { 'Retry-After': '1' })),
+    );
+    const { p } = provider(fetchFn, {
+      store,
+      sleep: async () => {
+        await new IdbKeyStore(store).put('sess', { key, epoch: 6 }); // the other tab got it
+      },
     });
-    const err = (await p.loadStoredKey().catch((e: unknown) => e)) as ProctorKeyError;
-    expect(err).toBeInstanceOf(ProctorKeyError);
-    expect(`${err.message}${err.stack ?? ''}`).not.toContain(TOKEN);
+    const r = await p.fetchKey();
+    expect(r).toMatchObject({ source: 'STORE', epoch: 6 });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 });

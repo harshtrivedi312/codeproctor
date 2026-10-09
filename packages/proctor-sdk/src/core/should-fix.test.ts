@@ -69,7 +69,7 @@ describe('EventQueue IndexedDB failures (S3, NFR-08, TC-063)', () => {
     expect(attempts).toHaveLength(1);
   });
 
-  it('FR-609: ProctorSession.start succeeds without IndexedDB and raises an event-storage capability flag', async () => {
+  it('FR-609: ProctorSession.start succeeds without IndexedDB and raises the idb capability flag', async () => {
     const store = newStore();
     vi.spyOn(store, 'entries').mockRejectedValue(new Error('open failed'));
     const s = new ProctorSession();
@@ -84,7 +84,7 @@ describe('EventQueue IndexedDB failures (S3, NFR-08, TC-063)', () => {
       detectors: [],
       store,
     });
-    expect(caps).toContain('event-storage:UNVERIFIABLE');
+    expect(caps).toContain('idb:UNSUPPORTED');
     await s.stop();
   });
 });
