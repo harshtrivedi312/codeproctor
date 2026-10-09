@@ -77,10 +77,13 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
     if (hooks.isPurged?.()) return 'REJECTED';
     const token = getSessionToken();
     if (token === null) return 'RETRY';
-    let response: Response;
-    try {
-      await mockingReady;
-      response = await fetch(`${apiBaseUrl}/v1/candidate/session${path}`, {
+    // keepalive lets the last batch leave on pagehide, but the browser caps keepalive bodies at 64 KiB
+    // of BYTES (a request over the quota is a network error that would repeat for ever). Editor text
+    // is not ASCII, so measure bytes, not characters; and if a keepalive request fails, try once
+    // without it.
+    const keepalive = new TextEncoder().encode(batch.body).length < 60_000;
+    const send = (withKeepalive: boolean): Promise<Response> =>
+      fetch(`${apiBaseUrl}/v1/candidate/session${path}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -91,8 +94,17 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
         credentials: 'omit',
         cache: 'no-store',
         referrerPolicy: 'no-referrer',
-        keepalive: batch.body.length < 60_000,
+        keepalive: withKeepalive,
       });
+    let response: Response;
+    try {
+      await mockingReady;
+      try {
+        response = await send(keepalive);
+      } catch (err) {
+        if (!keepalive) throw err;
+        response = await send(false);
+      }
     } catch {
       return 'RETRY';
     }

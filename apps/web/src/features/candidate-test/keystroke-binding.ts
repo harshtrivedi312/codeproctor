@@ -57,6 +57,12 @@ export interface KeystrokeContext {
 export interface KeystrokeBinding {
   /** Re-checks the editor against the context and the recorder; resets the recording if they moved. */
   sync(): void;
+  /**
+   * The app is about to put `text` into the model itself (reset to starter code, a restored draft):
+   * the content event that does it is recorded as a RESET, not as one large edit the candidate never
+   * typed (FR-802 would read a whole-file insert as a paste). Cleared by the next content event.
+   */
+  expectExternalText(text: string): void;
   dispose(): void;
 }
 
@@ -85,6 +91,8 @@ export function bindKeystrokes(
     );
   };
 
+  let externalText: string | null = null;
+
   const reset = (): void => {
     const recorder = getRecorder();
     const model = editor.getModel();
@@ -98,6 +106,12 @@ export function bindKeystrokes(
   };
 
   const content = editor.onDidChangeModelContent((e) => {
+    const expected = externalText;
+    externalText = null;
+    if (expected !== null && editor.getModel()?.getValue() === expected) {
+      reset(); // the app set the text itself
+      return;
+    }
     if (e.isFlush || !inSync()) {
       // The whole model was set, or the recording was not in sync with it: the reset carries the
       // model as it is now, so this change is not also recorded as an edit.
@@ -111,11 +125,11 @@ export function bindKeystrokes(
       reset();
       return;
     }
-    const model = synced?.model;
-    if (!model) return;
-    synced?.recorder.recordSelection(
-      model.getOffsetAt(e.selection.getStartPosition()),
-      model.getOffsetAt(e.selection.getEndPosition()),
+    const current = synced;
+    if (!current) return;
+    current.recorder.recordSelection(
+      current.model.getOffsetAt(e.selection.getStartPosition()),
+      current.model.getOffsetAt(e.selection.getEndPosition()),
     );
   });
 
@@ -123,6 +137,9 @@ export function bindKeystrokes(
   return {
     sync(): void {
       if (!inSync()) reset();
+    },
+    expectExternalText(text: string): void {
+      externalText = text;
     },
     dispose(): void {
       content.dispose();

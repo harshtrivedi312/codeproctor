@@ -99,12 +99,37 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
   const keystrokesRef = React.useRef(getKeystrokes);
   const contextRef = React.useRef({ sessionQuestionId: questionId, language });
   const bindingRef = React.useRef<KeystrokeBinding | null>(null);
+  const editorRef = React.useRef<MonacoNs.editor.IStandaloneCodeEditor | null>(null);
+  // The last text this editor reported through onChange: a different `value` prop is the app
+  // setting the text itself (reset to starter code), which the recording must see as a RESET.
+  const lastEmittedRef = React.useRef(value);
   React.useLayoutEffect(() => {
     keystrokesRef.current = getKeystrokes;
     contextRef.current = { sessionQuestionId: questionId, language };
+    if (value !== lastEmittedRef.current) {
+      bindingRef.current?.expectExternalText(value);
+      lastEmittedRef.current = value;
+    }
   });
+  const ensureBinding = (): void => {
+    const editor = editorRef.current;
+    if (!editor || bindingRef.current || !keystrokesRef.current) return;
+    const binding = bindKeystrokes(
+      editor,
+      () => keystrokesRef.current?.() ?? null,
+      () => contextRef.current,
+    );
+    bindingRef.current = binding;
+    disposers.current.push(() => {
+      binding.dispose();
+      bindingRef.current = null;
+    });
+  };
   React.useEffect(() => {
-    // After Monaco swapped its model: re-check the recording against the new question and language.
+    // The recorder prop can arrive after the editor mounted: bind then. Otherwise, after Monaco
+    // swapped its model, re-check the recording against the new question and language. (The
+    // getter changes identity with the proctor state; sync() is cheap and does nothing in sync.)
+    ensureBinding();
     bindingRef.current?.sync();
   }, [questionId, language, getKeystrokes]);
 
@@ -142,18 +167,8 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       contentRef.current?.({ versionId: e.versionId, changes: e.changes });
     });
     disposers.current.push(() => content.dispose());
-    if (keystrokesRef.current) {
-      const binding = bindKeystrokes(
-        editor,
-        () => keystrokesRef.current?.() ?? null,
-        () => contextRef.current,
-      );
-      bindingRef.current = binding;
-      disposers.current.push(() => {
-        binding.dispose();
-        bindingRef.current = null;
-      });
-    }
+    editorRef.current = editor;
+    ensureBinding();
   };
 
   return (
@@ -165,7 +180,10 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       theme="codeproctor-dark"
       beforeMount={configureOnce}
       onMount={onMount}
-      onChange={(v) => onChange(v ?? '')}
+      onChange={(v) => {
+        lastEmittedRef.current = v ?? '';
+        onChange(v ?? '');
+      }}
       loading={<p className="p-4 text-sm text-neutral-200">Loading the editor…</p>}
       options={{
         readOnly,

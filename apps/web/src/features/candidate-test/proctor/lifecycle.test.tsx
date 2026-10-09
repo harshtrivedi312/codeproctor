@@ -46,6 +46,8 @@ vi.mock('next/dynamic', async () => {
 setupCandidateServer();
 const cand = `${apiBaseUrl}/v1/candidate`;
 const SID = '3f0e2a7c-6a52-4d5b-9a53-7e9b6a1c2d10';
+/** A session question id (a UUID like the API's), distinct from the session id. */
+const QUESTION = '8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => installFullscreen());
@@ -100,6 +102,10 @@ async function prefill(store: MemoryStore): Promise<void> {
     `codeproctor:eventseq:${SID}`,
     JSON.stringify({ seq: 8, seenAt: Date.now() }),
   );
+  localStorage.setItem(
+    `codeproctor:keystrokeseq:${SID}`,
+    JSON.stringify({ seq: 4, seenAt: Date.now() }),
+  );
 }
 
 function expectPurged(store: MemoryStore): void {
@@ -107,6 +113,7 @@ function expectPurged(store: MemoryStore): void {
   expect(store.count(STORES.chunks)).toBe(0);
   expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
   expect(localStorage.getItem(`codeproctor:eventseq:${SID}`)).toBeNull();
+  expect(localStorage.getItem(`codeproctor:keystrokeseq:${SID}`)).toBeNull();
 }
 
 const paste = (): void => {
@@ -126,7 +133,7 @@ describe('keystroke recording through the proctor session (FR-608, TC-062, FR-80
     await c.init();
     const recorder = c.keystrokes();
     expect(recorder).not.toBeNull();
-    expect(recorder?.reset(SID, 'python', 'x = 1\n')).toBe(true);
+    expect(recorder?.reset(QUESTION, 'python', 'x = 1\n')).toBe(true);
     recorder?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
     flush(); // pagehide asks the SDK to send what it has now
     // The mock verifies the HMAC of the exact bytes: a batch it stored was signed correctly.
@@ -144,11 +151,56 @@ describe('keystroke recording through the proctor session (FR-608, TC-062, FR-80
     await c.init();
     const recorder = c.keystrokes();
     await c.stop();
-    recorder?.reset(SID, 'python', 'late\n');
+    recorder?.reset(QUESTION, 'python', 'late\n');
     recorder?.recordChange({ offset: 0, deleteLength: 0, text: 'late' });
     flush();
     await wait(150);
     expect(testState(session).keystrokeBatches).toHaveLength(0);
+  });
+
+  it('TC-062 FR-608: a resumed session continues the keystroke sequence where the server is, so no batch is refused with SEQ_CONFLICT', async () => {
+    setupDevices();
+    const session = await startedSession();
+    // The server already holds keystroke batches 0..4 from an earlier device (other signatures).
+    testState(session).keystrokeBatches.push(
+      ...[0, 1, 2, 3, 4].map((seq) => ({ seq, signature: 'f'.repeat(64), events: [] })),
+    );
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    c.keystrokes()?.reset(QUESTION, 'python', 'x = 1\n');
+    c.keystrokes()?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
+    flush();
+    await waitFor(() => expect(testState(session).keystrokeBatches.length).toBe(6));
+    const added = testState(session).keystrokeBatches[5];
+    expect(added?.seq).toBeGreaterThanOrEqual(5);
+    expect(added?.events.map((e) => e.kind)).toEqual(['RESET', 'EDIT']);
+    await c.stop();
+  });
+
+  it('FR-608 ADR 0013 5.8: the heartbeat reports unsent and refused keystroke batches, not a fixed zero', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const bodies: { queue?: { pendingKeystrokeBatches: number; rejectedBatches: number } }[] = [];
+    server.use(
+      http.post(`${cand}/session/keystrokes`, () =>
+        HttpResponse.json({ code: 'PAYLOAD_TOO_LARGE' }, { status: 413 }),
+      ),
+      http.post(`${cand}/session/heartbeat`, async ({ request }) => {
+        bodies.push((await request.clone().json()) as (typeof bodies)[number]);
+        return undefined;
+      }),
+    );
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    c.keystrokes()?.reset(QUESTION, 'python', 'x = 1\n');
+    c.keystrokes()?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
+    flush();
+    // The server refuses the batch (413): it is dropped by the SDK and must show up as rejected.
+    await waitFor(() =>
+      expect(bodies.some((b) => (b.queue?.rejectedBatches ?? 0) >= 1)).toBe(true),
+    );
+    expect(testState(session).keystrokeBatches).toHaveLength(0);
+    await c.stop();
   });
 
   it('NFR-05: the editor text never appears in the console while recording and sending', async () => {
@@ -159,7 +211,7 @@ describe('keystroke recording through the proctor session (FR-608, TC-062, FR-80
     );
     const c = controllerFor(new MemoryStore());
     await c.init();
-    c.keystrokes()?.reset(SID, 'python', 'distinctive-secret-answer\n');
+    c.keystrokes()?.reset(QUESTION, 'python', 'distinctive-secret-answer\n');
     c.keystrokes()?.recordChange({ offset: 0, deleteLength: 0, text: 'more-secret-text' });
     flush();
     await wait(200);

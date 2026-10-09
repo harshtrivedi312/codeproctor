@@ -183,6 +183,39 @@ describe('Monaco keystroke binding (FR-608, TC-062, FR-802)', () => {
     expect(r.recordChanges).toHaveBeenCalledTimes(1);
   });
 
+  it('FR-802 FR-608: text the app sets itself (reset to starter code) is a reset, not one big edit', () => {
+    const e = fakeEditor('my answer\n');
+    const r = fakeRecorder();
+    const binding = bindKeystrokes(
+      e.editor,
+      () => asRecorder(r),
+      () => ({ sessionQuestionId: Q1, language: 'python' }),
+    );
+    binding.expectExternalText('# starter\n');
+    e.setText('# starter\n');
+    e.change([{ rangeOffset: 0, rangeLength: 10, text: '# starter\n' }]);
+    expect(r.reset).toHaveBeenLastCalledWith(Q1, 'python', '# starter\n');
+    expect(r.recordChanges).not.toHaveBeenCalled();
+    // Only that one event: the next change is an ordinary edit again.
+    e.setText('# starter\nx');
+    e.change([{ rangeOffset: 10, rangeLength: 0, text: 'x' }]);
+    expect(r.recordChanges).toHaveBeenCalledTimes(1);
+  });
+
+  it('FR-802 FR-608: a candidate edit after an expected app text that never came is recorded as an edit', () => {
+    const e = fakeEditor('a\n');
+    const r = fakeRecorder();
+    const binding = bindKeystrokes(
+      e.editor,
+      () => asRecorder(r),
+      () => ({ sessionQuestionId: Q1, language: 'python' }),
+    );
+    binding.expectExternalText('never applied\n');
+    e.setText('a\nb');
+    e.change([{ rangeOffset: 2, rangeLength: 0, text: 'b' }]);
+    expect(r.recordChanges).toHaveBeenCalledTimes(1);
+  });
+
   it('FR-702 FR-608: after dispose the listeners are gone and nothing more is recorded', () => {
     const e = fakeEditor();
     const r = fakeRecorder();

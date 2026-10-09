@@ -207,7 +207,11 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
           alg: 'HMAC-SHA256',
           key: MOCK_HMAC_KEY_B64,
           keyEpoch: 1,
-          counters: { eventSeqStart: 0, keystrokeSeqStart: 0 },
+          counters: {
+            eventSeqStart: 0,
+            // Where the keystroke stream continues: after every batch the server already holds.
+            keystrokeSeqStart: r.s.keystrokeBatches.reduce((m, b) => Math.max(m, b.seq + 1), 0),
+          },
         },
         { headers: { 'Cache-Control': 'no-store' } },
       );
@@ -242,9 +246,13 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       const raw = await request.text();
       if ((await hmacHex(raw)) !== signature) return problem(403, 'SIGNATURE_INVALID');
       const body = JSON.parse(raw) as { seq: number; events: { kind: string }[] };
-      if (s.keystrokeBatches.some((b) => b.seq === body.seq)) {
+      const seen = s.keystrokeBatches.find((b) => b.seq === body.seq);
+      // The same seq with the same signature is a retry; with another signature it is a conflict
+      // (ADR 0013 5.2): a client that restarts its sequence at 0 learns it here.
+      if (seen && seen.signature === signature) {
         return HttpResponse.json({ seq: body.seq, duplicate: true });
       }
+      if (seen) return problem(409, 'SEQ_CONFLICT');
       s.keystrokeBatches.push({ seq: body.seq, signature, events: body.events });
       return HttpResponse.json({ seq: body.seq, duplicate: false });
     }),
