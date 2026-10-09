@@ -372,3 +372,12 @@ Filed, not fixed
 - N2 a restored hold counts `seqConflicts` again on every reload; the heartbeat PR must not add the counts across loads.
 - N3 theoretical hold-marker write after a purge (the check is before the awaited put).
 - apps/web conflict: `candidate-test/proctor/lifecycle.test.tsx:386` expects a recorder to start and store a late chunk after `stop()`. The pipeline now starts nothing once `stop()` or `finish()` began (stop = page leave, no UI and no owner for a late recorder); Frontend must flip that assertion (no WEBCAM chunk key, keep the device-released and no-presign assertions).
+
+### Queued for the heartbeat PR: capability flag ids (FU-FEB-65, ADR 0013 5.3/5.8)
+- Ids must match `^[a-z][a-z0-9-]{1,47}$`, detail at most 128 characters, counts and reasons only, never keystroke text or code. A changed flag goes out on the first heartbeat after the event and is kept for the session (5-minute resend).
+- `keystroke-unrepresentable`: UNVERIFIABLE once any change could not be encoded; detail "N changes".
+- `keystroke-rejected`: UNVERIFIABLE when a batch was dropped after a 400 or a 409 SEQ_CONFLICT; detail is the count.
+- `keystroke-seq-reset`: UNVERIFIABLE when the keystroke counter was resynced or seeded high; the keystroke queue's current `event-seq`-style flag maps to this id.
+- `idb`: the ADR's name for our `event-storage` and `recording-storage` flags; map or rename.
+- #345 emits `keystrokes`, `keystroke-unrepresentable`, `keystroke-rejected` today; add `keystroke-seq-reset`.
+- Add a conformity test over every flag id the SDK can emit (regex and detail length).
