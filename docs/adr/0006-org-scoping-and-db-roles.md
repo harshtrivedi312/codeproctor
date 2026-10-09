@@ -529,7 +529,7 @@ There is no org-provisioning reason (8.6, 8.9).
   - **How grants work.** This is the normative grant spec; ADR 0013 uses the same wording.
     - `withGrant({ model, columns, ids }, fn)`. All three fields are mandatory, and an empty `ids` throws.
     - The extension checks the model and the columns, and adds `id IN ids` to the query itself.
-    - For a create grant there is no `where` to filter: `ids` then constrain the checked parent key (the extension checks that the create's `session_id` is in `ids`), and nothing else is filtered.
+    - For a create grant there is no `where` to filter: `ids` then constrain the model's declared checked key (the extension checks that the create's checked key is in `ids`), and nothing else is filtered. The checked key is `session_id` for `consents`; for `audit_logs` (ADR 0013 CS-4.4, D-82) it is `entity_id`, compared as a canonical lowercase UUID string and only after `entity_type = 'session'` is checked; a null, missing or malformed checked key throws.
     - A grant is a nested AsyncLocalStorage run inside the current scope. It carries an `active` flag that is cleared in `finally` when `fn` settles, and the extension refuses any query under an inactive grant. So async work started inside `fn` and not awaited (a promise, `setTimeout`, an emitter or a stream callback) cannot use the grant after `fn` settles. A test checks that such a detached query throws.
     - Grants exist only inside a scope.
     - `ids` are never request input. They are values read inside the same scope, or ids resolved within the session through ADR 0013 CS-2 and CS-4.2. For example, `SectionGateService`'s step-1 id comes from the URL after that resolution.
