@@ -64,6 +64,8 @@ export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1
 export const BE04_READY: boolean = BE04_DEFAULT;
 export const BE06_READY: boolean = BE06_DEFAULT;
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
+// The 'review-flag' row has no route on main (FU-BE-235): it needs its own switch, not BE13_READY.
+export const BE13_FLAG_READY: boolean = process.env.BE13_FLAG_READY === '1';
 
 export { PRINCIPALS, USER_ROLES };
 export type { Permission, Principal };
@@ -149,6 +151,12 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   'GET /review/sessions/:id': 'apps/api/src/review/review.e2e-spec.ts',
   'GET /review/sessions/:id/recordings/:recordingId/playback':
     'apps/api/src/review/review.e2e-spec.ts',
+  // Reviewer decisions (BE-13, Backend A PR #358): role matrix (REVIEWER and SUPER_ADMIN), cross-org 404, the audit row written in the
+  // decision's own transaction (not @Audited) and the fixtures (an UNDER_REVIEW session with no MANUAL_PENDING answer for the verdict) live in
+  // apps/api/src/review/review-decisions.e2e-spec.ts.
+  'PATCH /review/sessions/:sessionId/answers/:sessionQuestionId':
+    'apps/api/src/review/review-decisions.e2e-spec.ts',
+  'POST /review/sessions/:id/verdict': 'apps/api/src/review/review-decisions.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
@@ -1473,7 +1481,10 @@ export const BE03_ROUTES: Be03Route[] = [
     },
   },
   // Review routes: BE-13, from docs/fsd.md section 4. Kept here so TC-004 (reviewer opens a review)
-  // and TC-006 use one list. Switched on by BE13_READY.
+  // and TC-006 use one list. Switched on by BE13_READY. The verdict and answer-score routes are built
+  // (PR #358) and covered in review-decisions.e2e-spec.ts (COVERED_ELSEWHERE). 'review-flag' has NO
+  // backend route on main (FU-BE-235), so it stays off even when BE13_READY is on (BE13_FLAG_READY=1 only
+  // for a trial run).
   {
     id: 'review-queue',
     step: 'BE-13',
@@ -1531,27 +1542,6 @@ export const BE03_ROUTES: Be03Route[] = [
         secrets: [],
         unchanged: async () =>
           (await h.owner.flagDecision.count({ where: { eventId: BigInt(f.eventId) } })) === 0,
-      };
-    },
-  },
-  {
-    id: 'review-verdict',
-    step: 'BE-13',
-    method: 'POST',
-    template: '/review/sessions/:id/verdict',
-    permission: 'review_verdict:set',
-    audit: { action: 'REVIEW_VERDICT_SET', entityType: 'session' }, // ASSUMED
-    mutating: true,
-    ok: [200, 201],
-    prepare: async (h, orgId) => {
-      const f = await sessionFixture(h, orgId);
-      return {
-        path: `/review/sessions/${f.sessionId}/verdict`,
-        body: { verdict: 'CLEAN', note: 'QA note' }, // ASSUMED body
-        entityId: f.sessionId,
-        secrets: [],
-        unchanged: async () =>
-          (await h.owner.sessionReview.count({ where: { sessionId: f.sessionId } })) === 0,
       };
     },
   },
@@ -1699,4 +1689,4 @@ export function candidateRegistryProblems(input: {
 }
 
 export const routesFor = (step: Be03Route['step']): Be03Route[] =>
-  BE03_ROUTES.filter((r) => r.step === step);
+  BE03_ROUTES.filter((r) => r.step === step && (r.id !== 'review-flag' || BE13_FLAG_READY));
