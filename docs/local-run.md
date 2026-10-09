@@ -12,7 +12,7 @@ email address, or a real candidate. Last checked against `main` on 2026-10-07 (c
 | Start everything with one command                | `pnpm demo:up` (section 2)                                     | Works on a free machine; `pnpm demo:down` stops it.                 |
 | Sign in as staff, browse questions, tests, users | the real stack (sections 1 to 4)                               | Works (checked).                                                    |
 | Open a candidate invitation link                 | `node infra/scripts/demo-invite.mjs` (section 4)               | The link opens, and the one-time code arrives in Mailpit (#305).    |
-| Take a test as a candidate, end to end           | the real stack                                                 | The gate, code and consent work; code runs through the local stub.  |
+| Take a test as a candidate, end to end           | the real stack                                                 | The gate, email code and consent work; code runs via the stub.      |
 | Run candidate code                               | Judge0                                                         | **Not on `main` yet** on a Mac: Judge0 needs Linux x86 (section 7). |
 
 ## 1. Prerequisites

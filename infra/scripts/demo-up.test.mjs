@@ -412,3 +412,11 @@ describe('demo:up invitation step (local demo)', () => {
     );
   });
 });
+
+describe('demo:up summary wording (D-70, D-84)', () => {
+  it('says the second factor is optional (it is not forced on the admin)', () => {
+    const text = summary({ invite: '', appsStarted: true });
+    assert.match(text, /second factor is optional/i);
+    assert.doesNotMatch(text, /must enrol/i);
+  });
+});
