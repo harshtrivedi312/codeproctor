@@ -9,6 +9,8 @@ export * from './core/transport';
 export * from './core/session';
 export * from './core/key-store';
 export * from './core/proctor-key';
+export * from './core/system-check';
+export * from './core/health';
 export * from './monitors/fullscreen';
 export * from './monitors/visibility';
 export * from './monitors/clipboard';

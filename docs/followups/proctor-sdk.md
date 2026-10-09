@@ -437,3 +437,14 @@ Open
 - Probe beats count against the heartbeat route limit (12 per minute): the probe answers from a fresh acknowledged beat when it can.
 - #390 leftovers: a renewed token or state that arrives after the Heartbeat stopped waiting is delivered from the send closure (the transport may need two requests when a body is refused); after a refused body beats go body-less for 5 minutes, then the body is tried again; the body-less retry is limited to 400 and 413; `online` is false during the 401 hold; `persistKey` of a stopped-and-restarted run raises no flag. Known limitation: if the refused part is inside `capabilities`, no capability reaches `device_info` until the server accepts the body; isolating the bad flag (one per beat) is not built.
 
+## System check (PR fe/sdk-system-check; FR-604, FR-605, FR-610, TC-054, TC-056, TC-064, ADR 0013 5.4)
+Done: `runSystemCheck()` and `collectSystemCheck()` (see the README), body validated in tests against the built route's own zod schema (`apps/api/src/candidate/system-check.schema.ts`, a deliberate test-only coupling), privacy tests (no labels or ids), retry and final-error handling, a session-level test that the monitors repeat MULTI_MONITOR and VIRTUAL_CAMERA inside signed batches.
+
+For Frontend B
+- Call `runSystemCheck` after the screen-share request and before the start; pass the surface the `ScreenShareMonitor` reported (`MONITOR`, `OTHER`, or `UNVERIFIABLE` when the browser does not report it). Show `blocking` reasons; a `SYSTEM_CHECK_BLOCKED` from the start means a fresh passed check is needed. The app's own `/dev/proctor` and test-start code may have a local copy of this call: replace it.
+
+Open
+- Browser brand comes from `userAgentData.brands` then the UA string; the server also compares `Sec-CH-UA` (advisory), so a spoofed UA shows up there, not here.
+- `network` uses `navigator.connection` (Chromium only); other browsers send none.
+- The check enumerates devices without permission, so camera labels are usually hidden before the camera permission: `virtual-camera` is then UNVERIFIABLE and the VIRTUAL_CAMERA finding comes from the in-test monitor after the permission is granted. The app may call `runSystemCheck` again after the camera permission to get a label-based result (the route allows 10 per minute).
+
