@@ -77,6 +77,12 @@ export interface TransitionRequest {
    * overwritten. A miss is SessionStateConflictError, like a lost status race.
    */
   readonly ifPauseReasons?: readonly PauseReason[];
+  /**
+   * PAUSED to PAUSED only: the staff pause/resume routes (BE-13) may add or lift PROCTOR with it. A
+   * candidate-driven change never sets it, so a candidate event can neither add nor lift PROCTOR
+   * (ADR 0013 CS-4.4a).
+   */
+  readonly allowProctorChange?: boolean;
 }
 
 @Injectable()
@@ -124,6 +130,35 @@ export class SessionStateService {
   }
 
   /**
+   * The PAUSED to PAUSED edge (stale pause_reasons gap): only the pause reasons change, so the
+   * write gate (session-write-gate.ts) reads the true list. Compare-and-set on the reasons the
+   * caller read, a non-empty new list (an empty one is PAUSED to IN_PROGRESS), no change to the
+   * clock (deadline_at, paused_ms, proctor_paused_at stay as they are), and PROCTOR membership
+   * unchanged unless the staff caller says so.
+   */
+  private assertReasonsOnlyEdge(change: TransitionRequest, froms: readonly SessionStatus[]): void {
+    const patch = change.patch ?? {};
+    const keys = Object.keys(patch).filter(
+      (k) => (patch as Record<string, unknown>)[k] !== undefined,
+    );
+    const next = patch.pauseReasons;
+    if (
+      froms.length !== 1 ||
+      change.ifPauseReasons === undefined ||
+      next === undefined ||
+      next.length === 0 ||
+      keys.length !== 1 ||
+      new Set(next).size !== next.length
+    ) {
+      throw new IllegalTransitionError('PAUSED', 'PAUSED');
+    }
+    const had = change.ifPauseReasons.includes('PROCTOR');
+    if (next.includes('PROCTOR') !== had && change.allowProctorChange !== true) {
+      throw new IllegalTransitionError('PAUSED', 'PAUSED');
+    }
+  }
+
+  /**
    * Moves a session along an edge of the transition table. Throws IllegalTransitionError (409
    * ILLEGAL_TRANSITION) for an edge that is not in the table, and SessionStateConflictError (409
    * SESSION_STATE_CONFLICT) when the session was not in `from` at the moment of the update.
@@ -139,6 +174,8 @@ export class SessionStateService {
     const db = change.db ?? this.prisma.client;
     const now = change.now ?? new Date();
     const patch = change.patch ?? {};
+    if (change.to === 'PAUSED' && froms.includes('PAUSED'))
+      this.assertReasonsOnlyEdge(change, froms);
     const anchors = stampsRetentionAnchor(change.to) && !froms.includes('APPEALED');
 
     const updated = await db.session.updateMany({

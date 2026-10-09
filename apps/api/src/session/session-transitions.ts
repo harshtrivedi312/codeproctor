@@ -17,7 +17,9 @@ export const TRANSITIONS: Readonly<Record<SessionStatus, readonly SessionStatus[
   CONSENTED: ['VERIFIED', 'EXPIRED'],
   VERIFIED: ['IN_PROGRESS', 'EXPIRED'],
   IN_PROGRESS: ['PAUSED', 'SUBMITTED'],
-  PAUSED: ['IN_PROGRESS', 'SUBMITTED'],
+  // PAUSED to PAUSED changes the pause REASONS only (a candidate reason added or lifted while a pause
+  // is on); transition() guards it: compare-and-set on the reasons, clock untouched, PROCTOR kept.
+  PAUSED: ['IN_PROGRESS', 'SUBMITTED', 'PAUSED'],
   SUBMITTED: ['GRADED'],
   GRADED: ['UNDER_REVIEW'],
   UNDER_REVIEW: ['COMPLETED'],
