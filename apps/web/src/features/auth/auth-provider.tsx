@@ -17,7 +17,6 @@ import {
   signOutStillWanted,
   handleSignInElsewhere,
   invalidateRefreshes,
-  isSignOutMarkerSet,
   isSignOutPending,
   SESSION_EPOCH_KEY,
   SIGN_OUT_MARKER_KEY,
@@ -139,7 +138,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       if (startedIn !== getGeneration()) return 'superseded'; // a sign-in since: not ours to revoke
       // The shared marker was cleared by another tab: it confirmed this sign-out, or it signed in
       // (its epoch event may not have reached this tab yet). Either way nothing is sent here, and
-      // this tab's in-memory signing-out flag is left as it is (no refresh from this tab).
+      // this tab's in-memory signing-out flag is left as it is (no refresh from this tab). When this
+      // tab could not write the marker at all, the in-memory flag decides (signOutStillWanted).
       if (!signOutStillWanted()) return 'superseded';
       try {
         const { response } = await api.POST('/v1/auth/logout', {
@@ -173,7 +173,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
    * to someone else now, so just hide the button.
    */
   const retrySignOut = React.useCallback(async () => {
-    if (unconfirmedGen.current !== getGeneration() || !isSignOutMarkerSet()) {
+    if (unconfirmedGen.current !== getGeneration() || !signOutStillWanted()) {
       unconfirmedGen.current = null;
       setSignOutUnconfirmed(false);
       return;

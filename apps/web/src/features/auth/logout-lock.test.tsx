@@ -6,6 +6,7 @@ import { SESSION_EPOCH_KEY, beginSession, refreshSession, settleSession } from '
 import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
+import { router } from '@/test/nav-mock';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { LoginForm } from './login-form';
 import { SignOutButton } from './sign-out-button';
@@ -219,6 +220,10 @@ describe('sign-out marker edge cases (FR-104, TC-005)', () => {
       await waitFor(() => expect(calls.logout).toBe(1));
       await tick();
       expect(calls.logout).toBe(1);
+      expect(router.replace).toHaveBeenCalledWith('/admin/login');
+      expect(
+        screen.queryByText('We could not confirm you were signed out'),
+      ).not.toBeInTheDocument();
     } finally {
       spy.mockRestore();
     }
@@ -254,5 +259,50 @@ describe('sign-out marker edge cases (FR-104, TC-005)', () => {
     await tick();
     expect(calls.logout).toBe(0);
     expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
+  });
+});
+
+describe.each([
+  ['setItem throws, getItem works', 'set'],
+  ['getItem throws, setItem works', 'get'],
+  ['both throw', 'both'],
+] as const)('Retry sign-out with unusable storage (%s) (FR-104, TC-005)', (_name, mode) => {
+  function breakStorage() {
+    const blocked = (): never => {
+      throw new DOMException('blocked', 'SecurityError');
+    };
+    const spies: { mockRestore: () => void }[] = [];
+    if (mode !== 'get') {
+      spies.push(
+        vi.spyOn(window.localStorage, 'setItem').mockImplementation((key: string) => {
+          if (key === 'cp.signOutPending') blocked();
+        }),
+      );
+    }
+    if (mode !== 'set')
+      spies.push(vi.spyOn(window.localStorage, 'getItem').mockImplementation(blocked));
+    return () => spies.forEach((spy) => spy.mockRestore());
+  }
+
+  it('FR-104 TC-005: after a failed logout, Retry sends one more logout; a failed retry keeps the warning, an ok one clears it', async () => {
+    const calls = countLogouts();
+    const u = await signedInPage();
+    server.use(http.post('*/v1/auth/logout', () => HttpResponse.error()));
+    const restore = breakStorage();
+    try {
+      await u.click(screen.getByRole('button', { name: 'Sign out' }));
+      const warning = 'We could not confirm you were signed out';
+      expect(await screen.findByText(warning)).toBeInTheDocument();
+      expect(calls.logout).toBe(1);
+      await u.click(screen.getByRole('button', { name: 'Retry sign-out' }));
+      await waitFor(() => expect(calls.logout).toBe(2));
+      expect(await screen.findByText(warning)).toBeInTheDocument(); // still failing
+      server.use(http.post('*/v1/auth/logout', () => new HttpResponse(null, { status: 204 })));
+      await u.click(screen.getByRole('button', { name: 'Retry sign-out' }));
+      await waitFor(() => expect(calls.logout).toBe(3));
+      await waitFor(() => expect(screen.queryByText(warning)).not.toBeInTheDocument());
+    } finally {
+      restore();
+    }
   });
 });

@@ -118,11 +118,6 @@ function writeMarker(on: boolean): void {
   }
 }
 
-/** True while the shared sign-out marker is set in storage (another tab clears it when it signs in). */
-export function isSignOutMarkerSet(): boolean {
-  return markerSet();
-}
-
 /** True while a sign-out has not been confirmed by the server (survives reloads). */
 export function isSignOutPending(): boolean {
   return signingOut || markerSet();
@@ -134,7 +129,9 @@ export function isSignOutPending(): boolean {
  * true after a sign-out in this tab, so it cannot tell. The marker is trusted only if this tab
  * managed to write it; otherwise (blocked or full storage, or unreadable storage) the in-memory
  * flag decides, so the logout is still sent. Losing the "another tab signed in" signal there is
- * safe: that tab's epoch event bumps the generation while a logout is outstanding.
+ * not fully covered: with full storage the other tab's epoch write in announceSignIn fails too, so
+ * no event fires and a logout queued here can revoke that tab's fresh login. That fails closed (the
+ * other tab is asked to sign in again); see FU-FEA-SFR-4.
  */
 export function signOutStillWanted(): boolean {
   if (signingOut && !markerWritten) return true;
