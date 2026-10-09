@@ -85,6 +85,6 @@ Contact privacy@example.com. This schedule was last updated on [date].
    - *Legal hold:* decided (OQ-10, C-67). Needs a Super Admin action in DB-06.
    - *California 4 years:* decided (C-68). Needs a per-job results retention setting in DB-06.
    - *Demographic row:* FAIR-01 is not built before pilot exit (B6), so the row says so.
-   - *Backups:* unchanged from v0.5 (C-55, C-59). The consent document and this table now say that a face image can stay in a backup after its 90 days; this is lawful because BIPA allows destruction by the earlier of the purpose ending or 3 years, and the owner accepted the wording (C-67).
+   - *Backups:* unchanged from v0.5 (C-55, C-59). The consent document and this table now say that a face image can stay in a backup after its 90 days; this appears lawful, pending counsel review (C-15), because BIPA allows destruction by the earlier of the purpose ending or 3 years, and the owner accepted the wording (C-67).
    - *Colorado and the incident response summary:* Colorado's biometric rules (HB 24-1130, in force since 1 July 2025) require the written policy to cover an incident response plan and deletion guidelines. A short public summary of the plan is needed before publication; the full plan is an operational procedure (DEP-02, review inventory item 8).
    - *Scores after erasure:* v0.5 note 8 stands; the consent document v0.5 must use the same wording (see its section 9, which says scores are kept without name and email until the 1-year limit).
