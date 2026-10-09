@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 25
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # The runner is discarded after the job, so the Testcontainers reaper (an image from Docker Hub) is not needed.
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
       # The API refuses to boot without APP_ENV (DL-55). The test harness sets it too; this makes it explicit.
       APP_ENV: test
     steps:
@@ -95,7 +97,7 @@ jobs:
         run: pnpm exec prisma version
 
       - name: Shellcheck the reset and backup scripts
-        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset infra/backup/*.sh
+        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset infra/scripts/ci-pull-test-images.sh infra/backup/*.sh
 
       - name: Validate the compose file
         run: docker compose -f infra/docker-compose.yml config -q
@@ -120,7 +122,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-16
-          docker pull -q postgres:16
+          # The images the tests start come from credential-free mirrors, by digest (Docker Hub limits unauthenticated pulls).
+          sh infra/scripts/ci-pull-test-images.sh
 
       - name: Test
         env:

@@ -42,6 +42,8 @@ jobs:
     timeout-minutes: 40
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # The runner is discarded after the job, so the Testcontainers reaper (an image from Docker Hub) is not needed.
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
       # The API refuses to boot without APP_ENV (DL-55). The test harness sets it too; this makes it explicit.
       APP_ENV: test
     steps:
@@ -118,6 +120,12 @@ jobs:
 
       # Testcontainers starts throwaway Postgres 16 and Redis from the runner's own Docker; no
       # secret and no shared database is involved (apps/api/test/support/harness.ts).
+      # Testcontainers finds postgres and redis locally: they come from credential-free mirrors by digest
+      # (Docker Hub limits unauthenticated pulls and was failing runs). No Docker Hub token is used.
+      - name: Pull the test images from public mirrors
+        if: ${{ !cancelled() }}
+        run: sh infra/scripts/ci-pull-test-images.sh
+
       - name: API integration tests (Testcontainers)
         if: ${{ !cancelled() }}
         env:
