@@ -14,6 +14,7 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import { applyEnv, applyMigrations, startInfra } from '../test/containers';
 import type { TestInfra } from '../test/containers';
 import type { InvitedSessionDb } from './invited-session.port';
+import { awaitSafeWindow } from '../common/testing/window-boundary';
 
 const API = '/api/v1';
 const GHOST = '00000000-0000-4000-8000-000000000042';
@@ -786,6 +787,11 @@ describe('Single invitation (FR-303, TC-004, TC-006, TC-008)', () => {
   // ---- rate limit and timeout -----------------------------------------------------------------------
 
   describe('FR-303: per-organization limit and transaction timeout', () => {
+    // The limit is a fixed hourly window keyed by the clock hour: never straddle a boundary.
+    beforeEach(async () => {
+      await awaitSafeWindow();
+    }, 60_000);
+
     const svc = (): object => {
       const { InvitationsService } =
         jest.requireActual<typeof import('./invitations.service')>('./invitations.service');
