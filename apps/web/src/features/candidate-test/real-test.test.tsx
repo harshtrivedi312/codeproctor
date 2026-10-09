@@ -130,7 +130,13 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect((await put({ kind: 'code', language: 'python', code: 'x' })).status).toBe(400);
     expect((await put({ code: 'x' })).status).toBe(400); // a code draft needs its language
     expect((await put({ code: 'x', language: 'python' })).status).toBe(200);
-    expect((await put({ answer: { optionIds: ['a'] } })).status).toBe(200);
+    expect((await put({ answer: { optionIds: ['a'] } })).status).toBe(400); // q1 is a coding question
+    const mcq = await fetch(`${cand}/answers/q2/draft`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ answer: { optionIds: ['opt_b'] } }),
+    });
+    expect(mcq.status).toBe(200);
   });
 
   it('FR-502 DL-58: the real run response with LOCAL_STUB verdicts shows the stub notice, not a pass or a fail', async () => {
@@ -241,6 +247,62 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     await waitFor(() => expect(saved.length).toBeGreaterThan(0));
     expect(JSON.stringify(saved[0])).toContain('print(7)');
   }, 20_000);
+
+  it('FR-504 D-84: the server keeps one answer per question, so only the language shown is saved and a switch is saved too', async () => {
+    await startedSession();
+    const saved: Record<string, unknown>[] = [];
+    server.use(
+      http.put(`${cand}/answers/:id/draft`, async ({ request }) => {
+        saved.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print(1)');
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    await screen.findByText(/sample tests passed/i);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[0])).toContain('print(1)');
+    // Switching to another language changes what is graded: the next autosave sends that
+    // language's code (its starter here), never the stale Python draft under a new name.
+    await user.selectOptions(screen.getByLabelText(/language/i), 'javascript');
+    await waitFor(() => expect(saved).toHaveLength(2), { timeout: 12_000 });
+    expect(saved[1]).toMatchObject({ language: 'javascript' });
+    expect(JSON.stringify(saved[1])).not.toContain('print(1)');
+    // Back to Python: the Python draft is still held on screen and is what is saved again.
+    await user.selectOptions(screen.getByLabelText(/language/i), 'python');
+    await waitFor(() => expect(saved).toHaveLength(3), { timeout: 12_000 });
+    expect(saved[2]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[2])).toContain('print(1)');
+  }, 40_000);
+
+  it('FR-504 D-84: a failing draft is not sent again together with the ones that saved', async () => {
+    await startedSession();
+    const calls: string[] = [];
+    let failQ2 = true;
+    server.use(
+      http.put(`${cand}/answers/:id/draft`, ({ params }) => {
+        calls.push(String(params.id));
+        if (params.id === 'q2' && failQ2)
+          return HttpResponse.json({ code: 'VALIDATION_FAILED' }, { status: 400 });
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'x');
+    await user.click(screen.getByRole('button', { name: /question 2/i }));
+    await user.click(screen.getByRole('radio', { name: 'O(log n)' }));
+    await user.click(screen.getByRole('button', { name: /question 1/i }));
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    await waitFor(() => expect(calls).toContain('q2'));
+    failQ2 = false;
+    calls.length = 0;
+    await waitFor(() => expect(calls).toContain('q2'), { timeout: 12_000 });
+    expect(calls).toEqual(['q2']); // q1 was saved and is not sent again
+  }, 40_000);
 
   it('FR-504: a multiple-choice answer is saved with the option id', async () => {
     await startedSession();
