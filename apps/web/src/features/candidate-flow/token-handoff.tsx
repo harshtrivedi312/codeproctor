@@ -3,6 +3,9 @@ import { useParams, useRouter } from 'next/navigation';
 import * as React from 'react';
 import { captureInvitationToken, readTokenFromHash, SCRUBBED_PATH } from './session-store';
 
+/** Where the email link /t#<token> is forwarded to, as a full document load. */
+export const FRAGMENT_ENTRY_PATH = '/t/start';
+
 /**
  * Thin entry routes that move an invitation token into memory and navigate to the static
  * /t/link, where the stepper lives. They are separate routes on purpose: /t/link must never be
@@ -51,5 +54,29 @@ export function FragmentHandoff(): React.JSX.Element {
     if (token) captureInvitationToken(token);
     router.replace(SCRUBBED_PATH);
   }, [router]);
+  return <HandoffView />;
+}
+
+/**
+ * Entry for the invitation email link `/t#<token>` (FR-407, TC-107). It forwards to
+ * `/t/start#<token>` with window.location.replace, a FULL document load that replaces this history
+ * entry, for two reasons:
+ * - the Permissions-Policy that allows the microphone (DL-28) applies to the document as first
+ *   loaded and matches /t/<anything>, not /t itself, so the stepper must not be reached from a
+ *   document loaded at /t by a soft navigation (the mic check would be blocked);
+ * - the fragment is not left in this entry's history.
+ * Only a well-formed token is carried over (never a query string or other text); a missing or odd
+ * fragment goes to /t/start without one, which ends at the stepper's "link not valid" state. The
+ * fragment never reaches the server, so it is not in any log or Referer.
+ */
+export function EmailLinkEntry({
+  replaceLocation = (url: string) => window.location.replace(url),
+}: {
+  replaceLocation?: (url: string) => void;
+}): React.JSX.Element {
+  React.useEffect(() => {
+    const token = readTokenFromHash();
+    replaceLocation(token ? `${FRAGMENT_ENTRY_PATH}#${token}` : FRAGMENT_ENTRY_PATH);
+  }, [replaceLocation]);
   return <HandoffView />;
 }

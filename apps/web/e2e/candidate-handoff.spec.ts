@@ -59,6 +59,40 @@ test.describe('candidate link hand-off (FU-FEB-23)', () => {
     expect(page.url()).toBe('about:blank');
   });
 
+  test('/t#<token> (the email link, FR-407) ends at /t/link with no token anywhere', async ({
+    page,
+  }) => {
+    await stubLink(page);
+    const queries: string[] = [];
+    page.on('request', (r) => {
+      // Playwright may report a navigation URL with its fragment; compare what a server would see.
+      if (r.url().split('#')[0]?.includes(TOKEN)) queries.push(r.url());
+    });
+    await page.goto(`/t#${TOKEN}`);
+    await expect(page).toHaveURL(/\/t\/link$/);
+    await expect(page.getByRole('heading', { level: 1, name: /welcome/i })).toBeVisible();
+    await expectNoToken(page, TOKEN);
+    // The token never appeared in any request URL (query string, path), fragment aside.
+    expect(queries).toHaveLength(0);
+    // The entry before the goto is about:blank: /t was replaced, not kept in history.
+    await page.goBack();
+    expect(page.url()).toBe('about:blank');
+  });
+
+  test('a bare /t shows the "could not open this link" state and sends no API request', async ({
+    page,
+  }) => {
+    const calls: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/v1/candidate/')) calls.push(r.url());
+    });
+    await page.goto('/t');
+    await expect(
+      page.getByRole('heading', { level: 1, name: /could not open this link/i }),
+    ).toBeVisible();
+    expect(calls).toHaveLength(0);
+  });
+
   test('a hand-typed /t/link#<token> is refused and sends no API request', async ({ page }) => {
     const calls: string[] = [];
     page.on('request', (r) => {
