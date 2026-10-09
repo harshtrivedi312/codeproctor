@@ -86,7 +86,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
     });
 
     it('TC-008 the sweep covers the models of the generated client, which the scope map and the allowlist know', () => {
-      expect(models).toHaveLength(31);
+      expect(models).toHaveLength(32);
       expect(models).toEqual(Object.keys(ORG_SCOPE).sort());
       // Every allowlisted name is a model of the client (a rename would silently allow nothing).
       for (const model of Object.keys(CANDIDATE_MODELS)) expect(models).toContain(model);
@@ -94,7 +94,7 @@ describe('session scopes through the real client, without a database (ADR 0013 C
 
     it('TC-008 each model not on the CS-4.3 allowlist throws for every operation, before any query', async () => {
       const denied = models.filter((m) => CANDIDATE_MODELS[m as ModelName] === undefined);
-      expect(denied).toHaveLength(13);
+      expect(denied).toHaveLength(14);
       for (const model of denied) {
         for (const operation of SCOPED_OPERATIONS) {
           const run = (): Promise<unknown> =>

@@ -6,6 +6,7 @@ import { RecordingPipeline } from './pipeline';
 import { ChunkRecorder, PROFILES, type MediaRecorderLike } from './recorder';
 import { chunkKey, parseChunkKey, UploadQueue } from './upload-queue';
 import { MediaApiError, type ChunkRef, type MediaApi } from './types';
+import { chunkRef, okPresign } from '../test/media-helpers';
 
 let n = 0;
 const newStore = () => new IdbStore(indexedDB, `rec-${++n}`);
@@ -17,25 +18,14 @@ async function run(ms: number, step = 100): Promise<void> {
   }
 }
 const bytes = (size: number) => new Uint8Array(size).buffer;
-const ref = (
-  seq: number,
-  size = 100,
-  stream: ChunkRef['stream'] = 'SCREEN',
-  segment = 0,
-): ChunkRef => ({
-  stream,
-  segment,
-  seq,
-  bytes: size,
-  contentType: 'video/webm;codecs=vp8',
-});
+const ref = chunkRef;
 
 function fakeApi() {
   const calls = { presign: 0, confirm: [] as number[] };
   const api: MediaApi = {
     presign: () => {
       calls.presign++;
-      return Promise.resolve({ url: 'https://store.invalid/put' });
+      return Promise.resolve(okPresign());
     },
     confirm: (c) => {
       calls.confirm.push(c.seq);
@@ -49,6 +39,10 @@ describe('chunk keys (FR-701)', () => {
   it('FR-701: round-trips and sorts by stream, segment, seq', () => {
     const c = ref(12, 345, 'WEBCAM', 3);
     expect(parseChunkKey(chunkKey('sess', c))).toEqual(c);
+    expect(parseChunkKey(chunkKey('sess', ref(1, 5, 'AUDIO', 2, { first: true })))).toMatchObject({
+      contentType: 'audio/webm',
+      first: true,
+    });
     expect(chunkKey('s', ref(2)) < chunkKey('s', ref(10))).toBe(true);
   });
 });
@@ -362,7 +356,8 @@ describe('RecordingPipeline', () => {
     expect(h.droppedBytes).toBeGreaterThanOrEqual(1000);
     expect(h.chunksPending).toBe(0);
     expect(await store.keys('chunks', 's:')).toHaveLength(0);
-    expect(await store.keys('meta', 's:')).toHaveLength(0);
+    // only the small per-stream counters stay, so a new load continues the seq and segment numbers
+    expect(await store.keys('meta', 's:')).toEqual(['s:media:SCREEN']);
     vi.useRealTimers();
   });
 
@@ -502,7 +497,7 @@ describe('pipeline with a broken IndexedDB (FR-701, FR-702)', () => {
     }
     const confirmed: string[] = [];
     const api: MediaApi = {
-      presign: () => Promise.resolve({ url: 'https://store.invalid/put' }),
+      presign: () => Promise.resolve(okPresign()),
       confirm: (c) => {
         confirmed.push(`${c.stream}:${c.segment}:${c.seq}`);
         return Promise.resolve();
@@ -529,7 +524,7 @@ describe('pipeline with a broken IndexedDB (FR-701, FR-702)', () => {
     await p.recordWebcam();
     await p.recordWebcam(); // restart: the previous recorder flushes its chunk, new segment
     const h = await p.finish({ drainTimeoutMs: 3000 });
-    expect(confirmed.sort()).toEqual(['WEBCAM:0:0', 'WEBCAM:1:0']);
+    expect(confirmed.sort()).toEqual(['WEBCAM:0:0', 'WEBCAM:1:1']); // seq continues across segments
     expect(caps).toContain('recording-storage:UNSUPPORTED');
     expect(h.droppedChunks).toBe(0);
   });

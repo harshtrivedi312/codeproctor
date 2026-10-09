@@ -86,6 +86,7 @@ const orgSettingsManage = { roles: SUPER_ADMIN, permission: 'org_settings:manage
 const RECRUITER_ADMIN: readonly UserRole[] = ['SUPER_ADMIN', 'RECRUITER'];
 const REVIEW_STAFF: readonly UserRole[] = ['SUPER_ADMIN', 'REVIEWER'];
 const reviewQueueRead = { roles: REVIEW_STAFF, permission: 'review_queue:read' } as const;
+const reviewVerdictSet = { roles: REVIEW_STAFF, permission: 'review_verdict:set' } as const;
 const reviewSessionRead = { roles: REVIEW_STAFF, permission: 'review_session:read' } as const;
 
 export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
@@ -135,9 +136,23 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     permission: 'candidate_section:finish',
   },
   'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'GET /candidate/session/test': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'GET /candidate/questions/:questionId': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:read',
+  },
   'GET /candidate/session/accommodations': {
     principal: 'CANDIDATE',
     permission: 'candidate_session:read',
+  },
+  // Practice question (FR-406): fixed content, nothing stored.
+  'GET /candidate/session/practice': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:read',
+  },
+  'POST /candidate/session/practice/run': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:run',
   },
   'POST /candidate/session/test/start': {
     principal: 'CANDIDATE',
@@ -154,6 +169,12 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /candidate/session/keystrokes': {
     principal: 'CANDIDATE',
     permission: 'candidate_keystrokes:write',
+  },
+  // The pre-start system check reuses the heartbeat permission: the shared contract has no
+  // candidate_system_check:submit yet (hub question, FU-BEB-152).
+  'POST /candidate/session/system-check': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:heartbeat',
   },
   'POST /candidate/session/proctor-key': {
     principal: 'CANDIDATE',
@@ -229,6 +250,12 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     audited: true,
     candidateData: true,
   },
+  // Reviewer writes (BE-13; FR-205, FR-902, api-contract section 7): REVIEWER and SUPER_ADMIN. They
+  // change candidate data and write their audit row (ANSWER_SCORED_MANUALLY, REVIEW_VERDICT_SET) in
+  // the decision's own transaction with ids and booleans only, so they carry no @Audited (the
+  // interceptor would add a second, post-commit row), like the invitation route.
+  'PATCH /review/sessions/:sessionId/answers/:sessionQuestionId': reviewVerdictSet,
+  'POST /review/sessions/:id/verdict': reviewVerdictSet,
   // Question bank (FR-201..FR-205). Reads: SUPER_ADMIN, RECRUITER, AUTHOR; writes: SUPER_ADMIN,
   // AUTHOR (ADR 0010 section 3). Publish, archive and test cases are changes: question:update.
   'GET /questions': questionRead,

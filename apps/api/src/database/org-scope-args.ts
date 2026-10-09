@@ -335,7 +335,7 @@ function namesOtherOrg(cursor: PlainObject, orgId: string): boolean {
  * (d) The foreign keys that rule (i) has to cover are many more than the staff references
  *     (`created_by`, `reviewer_id`, `assigned_to`, `collected_by`) and
  *     `test_questions.question_version_id`: RULE_I_REFERENCES (org-scope-relations.ts) lists the
- *     26 (13 staff, 13 cross-chain), among them the cross-chain ones
+ *     27 (14 staff, 13 cross-chain), among them the cross-chain ones
  *     (session_questions to test_questions, question_versions and variants; session_sections to
  *     test_sections; consents to consent_texts; keystroke_batches to session_questions).
  * (e) The raw SQL hatch (OrgContextService.runRawSql) stays open inside a scope started within

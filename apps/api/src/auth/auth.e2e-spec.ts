@@ -54,7 +54,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
   const mails: SentMail[] = [];
   let seq = 0;
 
-  const fakeMail: Pick<MailPort, 'sendPasswordReset'> = {
+  const fakeMail: Pick<MailPort, 'sendPasswordReset' | 'sendTwoFactorNotice'> = {
+    sendTwoFactorNotice: () => Promise.resolve('queued'),
     sendPasswordReset: (to, url) => {
       mails.push({ to, url });
       return Promise.resolve();
@@ -3346,6 +3347,7 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
           previouslyEnabled: true,
           targetRole: 'REVIEWER',
           sessionsRevoked: 2,
+          requestRef: expect.any(String) as string,
         });
         const next = (await login(target.email).expect(200)).body as Body;
         expect(next.status).toBe('authenticated');

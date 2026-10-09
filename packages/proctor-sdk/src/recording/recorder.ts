@@ -1,4 +1,4 @@
-import { CHUNK_MS, type ChunkRef, type RecordingStream } from './types';
+import { CHUNK_MS, contentTypeFor, type ChunkRef, type RecordingStream } from './types';
 
 /** The slice of MediaRecorder we use, so tests can fake it. */
 export interface MediaRecorderLike {
@@ -50,12 +50,17 @@ export type ChunkSink = (chunk: ChunkRef, data: ArrayBuffer) => Promise<void>;
  * each blob goes to the sink with the next seq. Only the first chunk of a segment carries the
  * webm header, so chunks are concatenated in seq order within a segment (worker side); a restart
  * opens a new segment (ADR 0004).
+ *
+ * `allocSeq` hands out the stream's next seq: it is unique per (session, stream) across segments
+ * and keeps counting over recorder restarts and reloads (the server answers 409 SEQ_CONFLICT for a
+ * seq that exists under another segment).
  */
 export class ChunkRecorder {
   private rec: MediaRecorderLike | null = null;
-  private seq = 0;
   private chain: Promise<void> = Promise.resolve();
   private stopped: Promise<void> = Promise.resolve();
+  private firstPending = true;
+  private boundaryMs = 0;
 
   constructor(
     readonly stream: RecordingStream,
@@ -63,6 +68,11 @@ export class ChunkRecorder {
     private readonly sink: ChunkSink,
     private readonly factory: RecorderFactory = (s, o) =>
       new MediaRecorder(s, o) as unknown as MediaRecorderLike,
+    private readonly allocSeq: () => number = (() => {
+      let n = 0;
+      return () => n++;
+    })(),
+    private readonly now: () => number = Date.now,
   ) {}
 
   start(media: MediaStream, hooks: { onEnded?: () => void; onError?: () => void } = {}): void {
@@ -73,10 +83,17 @@ export class ChunkRecorder {
       ...(p.audioBitsPerSecond ? { audioBitsPerSecond: p.audioBitsPerSecond } : {}),
     });
     this.rec = rec;
+    this.boundaryMs = this.now();
     rec.ondataavailable = (e) => {
       if (e.data.size === 0) return;
       const blob = e.data;
-      const seq = this.seq++;
+      const endMs = this.now();
+      const startedAtMs = this.boundaryMs;
+      this.boundaryMs = endMs;
+      const durationMs = Math.min(60_000, Math.max(1, endMs - startedAtMs));
+      const seq = this.allocSeq();
+      const first = this.firstPending;
+      this.firstPending = false;
       // Serialise so seq order equals storage order; the editor thread only awaits arrayBuffer().
       this.chain = this.chain
         .then(() => blob.arrayBuffer())
@@ -87,7 +104,11 @@ export class ChunkRecorder {
               segment: this.segment,
               seq,
               bytes: data.byteLength,
-              contentType: p.mimeType,
+              // The bare type, not the recorder's mime type with codecs (the server signs it).
+              contentType: contentTypeFor(this.stream),
+              startedAtMs,
+              durationMs,
+              first,
             },
             data,
           ),

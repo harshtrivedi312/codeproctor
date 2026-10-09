@@ -40,6 +40,10 @@ export interface ErasureDelayedMail {
   delayedUntil: Date;
 }
 
+/** D-76 templates: the account holder's two-factor sign-in was turned on, off or reset. */
+export type TwoFactorNoticeTemplate =
+  'two-factor-enabled' | 'two-factor-disabled' | 'two-factor-reset';
+
 export abstract class MailPort {
   /** Template password-reset (FR-107). resetUrl carries the single-use token. */
   abstract sendPasswordReset(to: string, resetUrl: string): Promise<void>;
@@ -76,6 +80,16 @@ export abstract class MailPort {
 
   /** Template erasure-delayed (D-19). */
   abstract sendErasureDelayed(to: string, mail: ErasureDelayedMail): Promise<MailOutcome>;
+
+  /**
+   * D-76: tells the account holder that two-factor sign-in changed. Queued path only. The only
+   * parameter is the server time of the change; the body holds nothing else.
+   */
+  abstract sendTwoFactorNotice(
+    to: string,
+    template: TwoFactorNoticeTemplate,
+    occurredAt: Date,
+  ): Promise<MailOutcome>;
 }
 
 /** Drops every message. Bound when EMAIL_PROVIDER=noop (local, test). */
@@ -111,6 +125,9 @@ export class NoopMailPort extends MailPort {
     return this.drop();
   }
   sendErasureDelayed(): Promise<MailOutcome> {
+    return this.drop();
+  }
+  sendTwoFactorNotice(): Promise<MailOutcome> {
     return this.drop();
   }
 }

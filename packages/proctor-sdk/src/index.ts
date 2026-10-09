@@ -7,6 +7,8 @@ export * from './core/heartbeat';
 export * from './core/metrics';
 export * from './core/transport';
 export * from './core/session';
+export * from './core/key-store';
+export * from './core/proctor-key';
 export * from './monitors/fullscreen';
 export * from './monitors/visibility';
 export * from './monitors/clipboard';
@@ -56,3 +58,7 @@ export * from './detectors/identity';
 export * from './detectors/voice-monitor';
 export * from './detectors/vision-monitor';
 export { mountCalibrationPanel } from './demo/calibration';
+
+export * from './core/batch-queue';
+export * from './keystrokes/keystroke-queue';
+export * from './keystrokes/recorder';

@@ -28,6 +28,10 @@ export const IDENTITY_MIN_INTERVAL_MS = 60_000;
 export const MAX_JSON_BODY_BYTES = 16 * 1024;
 export const MAX_EVIDENCE_ISSUED = 1000;
 export const MAX_MISSING_SHOWN = 50;
+/** media.constants.ts: segments 0..9999. */
+export const MAX_SEGMENT = 9_999;
+/** presignCap(600 s): ceil(ceil(600 / 10) * 1.5) + 50. Every presign request counts, repeats too. */
+export const MAX_PRESIGNS_PER_STREAM = 140;
 
 export type BatchStatus =
   'ACCEPTED' | 'DUPLICATE' | 'SEQ_CONFLICT' | 'SIGNATURE_INVALID' | 'VALIDATION_FAILED';
@@ -67,6 +71,8 @@ export interface SessionState {
   evidence: { presigned: number; uploaded: number; namesDropped: number };
   identity: { accepted: number; serverFaceMismatch: number; lastAt: number };
   errors: Record<string, number>;
+  /** Presign requests per stream (the quota counts every request). */
+  presigns: Record<string, number>;
 }
 
 const GLOBAL_KEY = Symbol.for('codeproctor.dev-proctor.mock-state');
@@ -92,6 +98,7 @@ function emptyState(): SessionState {
     evidence: { presigned: 0, uploaded: 0, namesDropped: 0 },
     identity: { accepted: 0, serverFaceMismatch: 0, lastAt: 0 },
     errors: {},
+    presigns: {},
   };
 }
 
@@ -294,7 +301,7 @@ export function mediaPresign(st: SessionState, sessionId: string, input: unknown
     STREAMS.includes(stream) &&
     Number.isInteger(segment) &&
     segment >= 0 &&
-    segment <= 999_999 &&
+    segment <= MAX_SEGMENT &&
     Number.isInteger(seq) &&
     seq >= 0 &&
     seq <= 99_999_999 &&
@@ -319,6 +326,13 @@ export function mediaPresign(st: SessionState, sessionId: string, input: unknown
   if (!prev && st.chunks.size >= MAX_CHUNKS_PER_SESSION) {
     return problem(429, 'RATE_LIMITED', 'Too many chunks', st);
   }
+  // Quota (ADR 0013 5.5): every presign request counts, a repeat for the same chunk too; only a
+  // confirmed chunk (alreadyUploaded above) is free.
+  if ((st.presigns[stream] ?? 0) >= MAX_PRESIGNS_PER_STREAM) {
+    const r = problem(429, 'PRESIGN_QUOTA_EXCEEDED', 'Presign quota exceeded', st);
+    return { ...r, headers: { ...r.headers, 'Retry-After': '30' } };
+  }
+  st.presigns[stream] = (st.presigns[stream] ?? 0) + 1;
   st.chunks.set(id, {
     stream,
     segment,
@@ -334,7 +348,7 @@ export function mediaPresign(st: SessionState, sessionId: string, input: unknown
     body: {
       url: `/dev/proctor/api/media/put/${chunkObjectPath(sessionId, stream, segment, seq)}`,
       method: 'PUT',
-      headers: { 'Content-Type': contentType },
+      headers: { 'Content-Type': contentType, 'If-None-Match': '*' },
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     },
   };
@@ -347,12 +361,17 @@ export function mediaPut(
   path: string,
   byteLength: number,
   contentType: string | null,
+  ifNoneMatch: string | null = null,
 ): Reply {
   const m = new RegExp(
     `^orgs/demo/sessions/${sessionId}/media/([A-Z_]+)/(\\d{6})/(\\d{8})\\.webm$`,
   ).exec(path);
   const c = m ? st.chunks.get(chunkId(m[1] ?? '', Number(m[2]), Number(m[3]))) : undefined;
   if (!c) return problem(403, 'FORBIDDEN', 'Not presigned', st);
+  // Conditional PUT: a second PUT of the same object answers 412 (the first one stays).
+  if (ifNoneMatch === '*' && c.putBytes !== null) {
+    return problem(412, 'PRECONDITION_FAILED', 'Object exists', st);
+  }
   c.putBytes = byteLength;
   c.putType = contentType;
   return { status: 200, body: {} };

@@ -57,6 +57,7 @@ describe('NFR-04 environment validation', () => {
       // Candidate settings (BE-07) are also required in pilot and production.
       JWT_CANDIDATE_SECRET: 'c'.repeat(48),
       OTP_PEPPER: 'p'.repeat(48),
+      QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       EMAIL_PROVIDER: 'ses',
@@ -126,6 +127,7 @@ describe('NFR-04 environment validation', () => {
       // Candidate settings (BE-07) are also required in pilot and production.
       JWT_CANDIDATE_SECRET: 'c'.repeat(48),
       OTP_PEPPER: 'p'.repeat(48),
+      QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
@@ -211,6 +213,7 @@ describe('NFR-04 environment validation', () => {
       // Candidate settings (BE-07) are also required in pilot and production.
       JWT_CANDIDATE_SECRET: 'c'.repeat(48),
       OTP_PEPPER: 'p'.repeat(48),
+      QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
@@ -241,6 +244,7 @@ describe('NFR-04 environment validation', () => {
       // Candidate settings (BE-07) are also required in pilot and production.
       JWT_CANDIDATE_SECRET: 'c'.repeat(48),
       OTP_PEPPER: 'p'.repeat(48),
+      QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 3).toString('base64'),
       EMAIL_PROVIDER: 'ses',
@@ -461,6 +465,7 @@ describe('FU-BE-194 database pool settings', () => {
       COOKIE_SECRET: 'Change-Me-local-cookie-secret-00000000000',
       JWT_CANDIDATE_SECRET: 'change-me-local-candidate-secret-00000000',
       OTP_PEPPER: 'change-me-local-otp-pepper-0000000000000',
+      QUESTION_OPTION_ID_SECRET: 'change-me-local-question-option-id-secret-000',
       ENCRYPTION_KEY: Buffer.from('change-me-local-encrypt-key-0001').toString('base64'),
       JUDGE0_AUTH_TOKEN: 'change-me',
       JUDGE0_AUTHZ_TOKEN: 'change-me',
@@ -470,6 +475,7 @@ describe('FU-BE-194 database pool settings', () => {
       ...valid,
       JWT_CANDIDATE_SECRET: 'c'.repeat(40),
       OTP_PEPPER: 'd'.repeat(40),
+      QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
     };
 
@@ -543,6 +549,7 @@ describe('DL-55 FU-BE-224 NFR-04 APP_ENV is required, with no default', () => {
     ...withoutAppEnv,
     JWT_CANDIDATE_SECRET: 'c'.repeat(40),
     OTP_PEPPER: 'd'.repeat(40),
+    QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
     SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
   };
 
@@ -638,6 +645,7 @@ describe('DL-55 FU-BE-225 NFR-04 placeholder database password', () => {
     ...valid,
     JWT_CANDIDATE_SECRET: 'c'.repeat(40),
     OTP_PEPPER: 'd'.repeat(40),
+    QUESTION_OPTION_ID_SECRET: 'q'.repeat(48),
     SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
   };
   const bad = 'postgresql://app_user:Change-Me@db.internal:5432/secretdb';

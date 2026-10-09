@@ -197,7 +197,7 @@ if [ "$reapply" = yes ]; then
   } > "$WORK/reapply.sql"
   psql --no-psqlrc -X -q -v ON_ERROR_STOP=1 -d "$target" -f "$WORK/reapply.sql" > /dev/null ||
     die "erasures were NOT re-applied. Do not use database $target: it holds personal data that was erased."
-  log "re-applied $n erasure(s) from the erasure list."
+  log "re-applied $n erasure(s) from the erasure list. The erasure sweep must run before this database serves traffic (it finishes the object purge and the completion row; runbook 'Restoring for real'). Legal holds and the review/appeal hold are not re-applied (FU-DBB-32)."
 fi
 log "restore finished: database $target."
 [ "$status" -eq 0 ] || deliberate=1

@@ -46,6 +46,8 @@ vi.mock('next/dynamic', async () => {
 setupCandidateServer();
 const cand = `${apiBaseUrl}/v1/candidate`;
 const SID = '3f0e2a7c-6a52-4d5b-9a53-7e9b6a1c2d10';
+/** A session question id (a UUID like the API's), distinct from the session id. */
+const QUESTION = '8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => installFullscreen());
@@ -89,9 +91,20 @@ async function prefill(store: MemoryStore): Promise<void> {
     { data: new ArrayBuffer(8) },
   );
   await store.put(STORES.meta, `${SID}:segment:SCREEN`, 0);
+  // A signed keystroke batch (FR-608) lives in the same store under the `ks:` infix: the editor text
+  // in it must go with the rest of the candidate's data.
+  await store.put(STORES.eventBatches, `${SID}:ks:${padSeq(3)}`, {
+    seq: 3,
+    body: '{"seq":3,"events":[]}',
+    signature: 'b'.repeat(64),
+  });
   localStorage.setItem(
     `codeproctor:eventseq:${SID}`,
     JSON.stringify({ seq: 8, seenAt: Date.now() }),
+  );
+  localStorage.setItem(
+    `codeproctor:keystrokeseq:${SID}`,
+    JSON.stringify({ seq: 4, seenAt: Date.now() }),
   );
 }
 
@@ -100,6 +113,7 @@ function expectPurged(store: MemoryStore): void {
   expect(store.count(STORES.chunks)).toBe(0);
   expect([...store.data.keys()].some((k) => k.includes(`${SID}:segment:`))).toBe(false);
   expect(localStorage.getItem(`codeproctor:eventseq:${SID}`)).toBeNull();
+  expect(localStorage.getItem(`codeproctor:keystrokeseq:${SID}`)).toBeNull();
 }
 
 const paste = (): void => {
@@ -108,6 +122,105 @@ const paste = (): void => {
 const flush = (): void => {
   window.dispatchEvent(new Event('pagehide'));
 };
+
+describe('keystroke recording through the proctor session (FR-608, TC-062, FR-802)', () => {
+  it('TC-062 FR-608: the recorder exists once the session started, and a recorded change reaches /keystrokes as a signed batch', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const store = new MemoryStore();
+    const c = controllerFor(store);
+    expect(c.keystrokes()).toBeNull(); // before the session started
+    await c.init();
+    const recorder = c.keystrokes();
+    expect(recorder).not.toBeNull();
+    expect(recorder?.reset(QUESTION, 'python', 'x = 1\n')).toBe(true);
+    recorder?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
+    flush(); // pagehide asks the SDK to send what it has now
+    // The mock verifies the HMAC of the exact bytes: a batch it stored was signed correctly.
+    await waitFor(() => expect(testState(session).keystrokeBatches.length).toBeGreaterThan(0));
+    const sent = testState(session).keystrokeBatches.flatMap((b) => b.events.map((e) => e.kind));
+    expect(sent).toEqual(['RESET', 'EDIT']);
+    await c.stop();
+  });
+
+  it('FR-702 FR-608: after the session is stopped the recorder records nothing', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const store = new MemoryStore();
+    const c = controllerFor(store);
+    await c.init();
+    const recorder = c.keystrokes();
+    await c.stop();
+    recorder?.reset(QUESTION, 'python', 'late\n');
+    recorder?.recordChange({ offset: 0, deleteLength: 0, text: 'late' });
+    flush();
+    await wait(150);
+    expect(testState(session).keystrokeBatches).toHaveLength(0);
+  });
+
+  it('TC-062 FR-608: a resumed session continues the keystroke sequence where the server is, so no batch is refused with SEQ_CONFLICT', async () => {
+    setupDevices();
+    const session = await startedSession();
+    // The server already holds keystroke batches 0..4 from an earlier device (other signatures).
+    testState(session).keystrokeBatches.push(
+      ...[0, 1, 2, 3, 4].map((seq) => ({ seq, signature: 'f'.repeat(64), events: [] })),
+    );
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    c.keystrokes()?.reset(QUESTION, 'python', 'x = 1\n');
+    c.keystrokes()?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
+    flush();
+    await waitFor(() => expect(testState(session).keystrokeBatches.length).toBe(6));
+    const added = testState(session).keystrokeBatches[5];
+    expect(added?.seq).toBeGreaterThanOrEqual(5);
+    expect(added?.events.map((e) => e.kind)).toEqual(['RESET', 'EDIT']);
+    await c.stop();
+  });
+
+  it('FR-608 ADR 0013 5.8: the heartbeat reports unsent and refused keystroke batches, not a fixed zero', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const bodies: { queue?: { pendingKeystrokeBatches: number; rejectedBatches: number } }[] = [];
+    server.use(
+      http.post(`${cand}/session/keystrokes`, () =>
+        HttpResponse.json({ code: 'PAYLOAD_TOO_LARGE' }, { status: 413 }),
+      ),
+      http.post(`${cand}/session/heartbeat`, async ({ request }) => {
+        bodies.push((await request.clone().json()) as (typeof bodies)[number]);
+        return undefined;
+      }),
+    );
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    c.keystrokes()?.reset(QUESTION, 'python', 'x = 1\n');
+    c.keystrokes()?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
+    flush();
+    // The server refuses the batch (413): it is dropped by the SDK and must show up as rejected.
+    await waitFor(() =>
+      expect(bodies.some((b) => (b.queue?.rejectedBatches ?? 0) >= 1)).toBe(true),
+    );
+    expect(testState(session).keystrokeBatches).toHaveLength(0);
+    await c.stop();
+  });
+
+  it('NFR-05: the editor text never appears in the console while recording and sending', async () => {
+    setupDevices();
+    await startedSession();
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => undefined),
+    );
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    c.keystrokes()?.reset(QUESTION, 'python', 'distinctive-secret-answer\n');
+    c.keystrokes()?.recordChange({ offset: 0, deleteLength: 0, text: 'more-secret-text' });
+    flush();
+    await wait(200);
+    const logged = spies.flatMap((s) => s.mock.calls).map((args) => JSON.stringify(args));
+    expect(logged.some((l) => l.includes('secret'))).toBe(false);
+    await c.stop();
+    for (const s of spies) s.mockRestore();
+  });
+});
 
 describe('purge and keep on the way out (ADR 0013 section 2, Purge; TC-063)', () => {
   it('ADR 0013 5.3: 409 SESSION_NOT_ACTIVE purges batches, chunks, counters and the backup, and releases the devices', async () => {
@@ -183,7 +296,8 @@ describe('purge and keep on the way out (ADR 0013 section 2, Purge; TC-063)', ()
     await c.init();
     expect(c.getState().endedBecause).toBe('reauth');
     await wait(100);
-    expect(store.count(STORES.eventBatches)).toBe(1);
+    // The kept outbox: the signed event batch and the keystroke batch (both in this store).
+    expect(store.count(STORES.eventBatches)).toBe(2);
     await c.stop();
   });
 
@@ -383,7 +497,7 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     expectPurged(store);
   });
 
-  it('TC-070 FR-701: leaving the page (no purge) keeps the late chunk for the next load', async () => {
+  it('TC-070 FR-701: after leaving the page (no purge) a camera granted late is released and nothing is sent', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const store = new MemoryStore();
@@ -395,12 +509,13 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     await c.stop();
     devices.grantUser();
     await starting;
+    // The device is released and nothing is presigned or confirmed for it. Whether the SDK keeps a
+    // chunk the late recorder flushed (older SDK) or never starts that recorder (the pipeline
+    // refuses devices once it is closing, SDK #366) is the SDK's business: a remount builds
+    // a new controller and pipeline, so nothing here depends on a late recorder after stop().
     expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
-    // The chunk the late recorder flushed is still in the store for the next load, and nothing
-    // was sent for it.
-    expect(
-      [...store.data.keys()].some((k) => k.startsWith(`${STORES.chunks}\u0000${SID}:WEBCAM`)),
-    ).toBe(true);
+    // Uploads are asynchronous: give a wrongly sent presign time to arrive before asserting.
+    await wait(150);
     expect(seen.some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
   });
 });
