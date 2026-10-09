@@ -452,3 +452,60 @@ From the architect details above:
 4. R-10 nulls scores and verdicts for every session; the multi-session case (9.4)?
 5. Should `retention_days` become 7..365 (9.4)?
 6. The pseudonymisation wording in published texts (9.5).
+
+## 10. Proposed amendment 2026-10-09: the face tier widened, the erasure hold capped, legal hold, results retention per test, audit retention, restore (D-81: C-37, C-40, C-41, C-68, OQ-10)
+
+Status: **Proposed. The owner accepts it with the batch (CLAUDE.md rule 7; pinned ADR).** The owner has already decided the substance (D-81, docs/compliance/decisions.md C-37, C-40, C-41, C-68 and C-67/OQ-10); "(architect detail)" marks what this section adds to make it implementable, which the owner confirms. It amends section 9 and the ADR 0013 section 5.7 tier table, and needs ADR 0008 delta rows (10.7).
+
+### 10.1 The face tier covers everything that shows a face (C-37)
+
+This answers the open question at the end of 9.2 ("Evidence snapshots and webcam recordings also show the face; is that intended?"): yes.
+- **On the face clock** (9.2: `COALESCE(submitted_at, latest capture, terminal transition time, created_at)`, plus `LEAST(retention_days, 90 days)`): the ID image, the selfie, the identity re-check frames and the sealed FACE_MISMATCH frames (as today), and now also **the WEBCAM, ROOM_SCAN and SIDE_CAMERA recordings, every event evidence snapshot (`evidence/{ULID}.jpg`, `EVENT` purpose) and the webcam `live/` thumbnails**. The 90 days is fixed; an organisation may shorten it with `retention_days` and may never extend it.
+- **Not on the face clock (architect detail, owner to confirm):** SCREEN and AUDIO recordings and keystroke data stay on the main tier (anchor + `retention_days`, R-3 and R-4). A screen recording shows the candidate's face only if a window of the candidate's own does.
+- **Mechanism (architect detail).** The face tier selects sessions on the face clock and lists these prefixes of the session: `identity/`, `evidence/` (including `evidence/sealed/`), `live/`, `media/WEBCAM/`, `media/ROOM_SCAN/` and `media/SIDE_CAMERA/` (ADR 0013 5.7). It deletes the objects, then in one transaction nulls `identity_checks.id_image_key` and `selfie_key`, `proctor_events.evidence_key` (every type, not only FACE_MISMATCH), and sets `media_chunks.object_key = NULL` and `deleted_at` for those three streams, and writes `RETENTION_FACE_DONE` with the same verification rules as 9.2. The main tier then deletes the rest of the session prefix except `reports/`. Selection by session, the three-condition marker rule, the alert after 3 failed days and the versioning check are unchanged.
+- **Holds do not apply** (C-35 stays): an open review or appeal does not delay the face tier. The review panel shows "face images and webcam recordings deleted (90-day limit)" where they are gone. A reviewer therefore has at most 90 days to use them.
+- **Backups (R-7).** A backup keeps rotating for 14 days (A-31), and longer if backups stall (ADR 0017 5.3: the newest backups survive a stall). The consent and the privacy notice state this "backup tail" honestly: deleted face data can remain in a backup for up to 14 days, and for longer if backups stall until the next successful rotation. A restore re-applies deletions (9.7).
+- **Tests (QA assigns IDs).** A WEBCAM chunk, a ROOM_SCAN chunk, a SIDE_CAMERA chunk, an EVENT evidence snapshot and a `live/` thumbnail are deleted on the face clock while the SCREEN, AUDIO and keystroke data of the same session remain until the main tier; `retention_days` below 90 shortens the face tier; a larger value does not extend it; a session UNDER_REVIEW or APPEALED loses its face data at day 90; a session never submitted is covered; `RETENTION_FACE_DONE` is written once all conditions hold.
+
+### 10.2 The erasure hold is capped and covers results and notes only (C-41; amends C-06 and 9.5)
+
+- A candidate's erasure request (R-6) erases **face data and recordings at once**, in the fence run, even when a session is UNDER_REVIEW, APPEALED or has an open appeal: they are never held. What waits is only the **results and the reviewer notes** (scores, verdicts, review notes, appeal text) of a held session.
+- The hold ends at the earlier of the review or appeal closing (9.5 hold-close job) and **60 days after the request**. At day 60 the hold-close job runs the rest of the erasure whether or not the review has finished, and the review shows "erased on request". The `erasure-delayed` email states the day on which the hold ends at the latest.
+- A legal hold (10.4) is different and has no 60-day limit; it never holds face data or recordings either.
+- Tests: face data and recordings of a held session are gone at the fence; results and notes remain until close or day 60; day 60 completes the erasure; the email carries the end date.
+
+### 10.3 Audit rows are kept 3 years (C-40; amends 9.3 and R-5, which said audit rows are unchanged)
+
+- A daily job deletes `audit_logs` rows with `created_at` older than 3 years, in small batches. **Exempt:** rows of an active legal hold and for 3 years after it is lifted (10.4), and the completion markers of tiers that have not finished for their session. R-10's own whole-prefix verification already covers older markers (9.2), so no marker older than 3 years is needed for correctness.
+- **Mechanism (architect detail, owner to confirm; ADR 0006 delta).** `audit_logs` is append-only for `app_user` (REVOKE UPDATE, DELETE). The deletion runs under a dedicated retention role that has DELETE on `audit_logs` only through a row-level policy `created_at < now() - interval '3 years'` (and not exempt), so even a compromised job cannot delete recent rows. Each batch writes one aggregate audit row (`RETENTION_AUDIT_DONE`: count and cut-off date, no entity ids).
+- FSD FR-105 says the audit trail is kept; it becomes "kept 3 years".
+- Tests: a row older than 3 years is deleted, a recent row cannot be deleted by the role, a held row survives, the aggregate row is written.
+
+### 10.4 Legal hold (OQ-10, C-67)
+
+- A SUPER_ADMIN of the organisation can place a **legal hold** on a candidate (all their sessions) with a reason and an optional reference. It is audited (`LEGAL_HOLD_PLACED`, `LEGAL_HOLD_LIFTED`), has **no automatic expiry**, and is lifted manually by a SUPER_ADMIN (audited, reason required). Both actions need the caller's password (ADR 0011 pattern).
+- **Effect:** while a hold exists, the main tier (R-4), the consent clock (R-9), the results tier (R-10), the reviewer notes and the audit deletion (10.3) are suspended for that candidate's sessions. **It never extends the face tier** (10.1): face data and recordings of the face tier are deleted at 90 days regardless. An erasure request during a hold erases the face tier data at once and leaves the held records until the hold is lifted; the candidate is told only that a legal obligation applies (no detail).
+- **Schema (ADR 0008 delta, architect detail):** `legal_holds(id uuid, org_id, candidate_id, reason text, reference text null, placed_by, placed_at, lifted_by null, lifted_at null)`, org-scoped like every table, no DELETE for `app_user`. Retention queries add `NOT EXISTS (active hold for the candidate)`.
+- **API (architect detail):** `POST /candidates/:id/legal-hold { reason, reference?, currentPassword }` and `DELETE /candidates/:id/legal-hold { reason, currentPassword }`, SUPER_ADMIN only; a list in the candidate view. New permission `legal_hold:manage` (SUPER_ADMIN only) in packages/shared. The contract text goes into docs/api-contract.md when this section is accepted.
+- Tests: a held candidate's results survive R-10; the face tier still deletes at 90 days; erasure during a hold; place and lift are audited with the actor; only SUPER_ADMIN of the same organisation can place or lift; a cross-organisation id is 404.
+
+### 10.5 Results retention is a setting of the test (C-68; the Delivery Lead's D-61 modelling ruling)
+
+- A test (one per role) gets `resultsRetention`: `standard` (the 1-year results clock of R-10, the default) or `california_4y` (4 years, for California-based roles). The recruiter sets it when creating or editing the test. It affects **only the results tier (R-10)** and, with it, the report PDF; recordings, face data and the main tier are unchanged (10.1). Existing rows are `standard`.
+- **Snapshot (architect detail).** The value is copied onto the session when it is created (`sessions.results_retention`), so a later edit of the test applies to new sessions only and can never shorten the retention of results already collected. Changing the test setting writes an audit row (`TEST_RESULTS_RETENTION_CHANGED`).
+- R-10 uses `anchor + 1 year` or `anchor + 4 years` per the session's snapshot (OQ-20: the clock runs from the retention anchor).
+- Schema (ADR 0008 delta): enum `results_retention('STANDARD','CALIFORNIA_4Y')`, `tests.results_retention NOT NULL DEFAULT 'STANDARD'`, `sessions.results_retention NOT NULL DEFAULT 'STANDARD'`. API: the tests create and update bodies gain `resultsRetention` (shared type change, owner item with this amendment).
+- Tests: a `california_4y` session's results survive 1 year and are deleted at 4; a `standard` one at 1; editing the test after the invitation changes nothing for existing sessions; recordings and face data are unaffected by the setting.
+
+### 10.6 Restore re-applies every erasure on the list (replaces the first sub-bullet of 9.7)
+
+A restore re-applies **every** erasure recorded on the re-application list in full: epoch bump, ERASED, CLOSED_ERASED, and **anonymisation at once**, whatever stage the request had reached. The list does not record the stage, and an erasure request is a right that was already exercised, so completing it after a restore is correct and the privacy-stricter outcome. The notification email is sent only if no notice was recorded. (This replaces "anonymise at once only if anonymisation had already happened or the day-28 deadline has passed". Database B's #357 already implements it.)
+
+### 10.7 What this section needs elsewhere (not edited here)
+
+- **ADR 0013 5.7** retention tier table: the Face row deletes the prefixes of 10.1 and nulls the columns listed there.
+- **ADR 0008** delta rows: `legal_holds`, `results_retention` enum and the two columns, the retention role and its policy on `audit_logs`, `RETENTION_AUDIT_DONE`.
+- **packages/shared:** `legal_hold:manage`, `resultsRetention` on the test schemas.
+- **FSD:** FR-105 (3 years), FR-704 (the face tier list), FR-305 and FR-401 follow in the next sections of this batch.
+- **Database B (DB-06) and Backend A:** build against this section only after the owner accepts it.
+
