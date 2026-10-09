@@ -16,6 +16,7 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import type { MailPort } from '../mail/mail.port';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import type { TokenService } from '../common/auth/token.service';
+import { awaitSafeWindow } from '../common/testing/window-boundary';
 
 const API = '/api/v1';
 const PASSWORD = 'Correct-Horse-9';
@@ -1032,6 +1033,11 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
   // ---- S2: invite rate limit ---------------------------------------------------------------------------
 
   describe('FR-103, S2: per-organization invite limit', () => {
+    // The limit is a fixed hourly window keyed by the clock hour: never straddle a boundary.
+    beforeEach(async () => {
+      await awaitSafeWindow();
+    }, 60_000);
+
     it('FR-103: the 3rd invite in an hour is 429 when the limit is 2, and a refused invite creates no user', async () => {
       const org = (await owner.organization.create({ data: { name: 'Invite Limit Org' } })).id;
       const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });

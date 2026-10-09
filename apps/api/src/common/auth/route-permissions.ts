@@ -144,6 +144,15 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_session:read',
   },
+  // Practice question (FR-406): fixed content, nothing stored.
+  'GET /candidate/session/practice': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:read',
+  },
+  'POST /candidate/session/practice/run': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_answer:run',
+  },
   'POST /candidate/session/test/start': {
     principal: 'CANDIDATE',
     permission: 'candidate_session:start',
