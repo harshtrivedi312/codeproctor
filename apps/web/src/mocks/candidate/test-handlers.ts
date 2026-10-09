@@ -327,7 +327,21 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       if (!isQuestionId(id) || QUESTIONS[id].section !== openPosition(r.s))
         return problem(409, 'SECTION_NOT_OPEN');
       if (r.s.pauseReasons.length > 0) return problem(409, 'SESSION_PAUSED');
-      r.s.drafts.set(id, await request.json());
+      // The API's DraftDto is whitelisted: only code, language and answer are accepted, and a
+      // code draft needs its language. Anything else is a 400, like the real route.
+      const draft = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      const allowed = new Set(['code', 'language', 'answer']);
+      if (
+        !draft ||
+        typeof draft !== 'object' ||
+        Object.keys(draft).some((k) => !allowed.has(k)) ||
+        ('code' in draft && typeof draft.code !== 'string') ||
+        ('code' in draft && typeof draft.language !== 'string') ||
+        ('answer' in draft && (typeof draft.answer !== 'object' || draft.answer === null))
+      ) {
+        return problem(400, 'VALIDATION_FAILED');
+      }
+      r.s.drafts.set(id, draft);
       r.s.draftCalls += 1;
       return HttpResponse.json({ savedAt: iso(Date.now()) });
     }),
