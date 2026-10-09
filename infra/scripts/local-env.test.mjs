@@ -130,13 +130,18 @@ describe('local-env (local demo)', () => {
   });
 
   it('QUESTION_OPTION_ID_SECRET gets a random value when the example has the placeholder, and is ignored when it does not (ADR 0013 CS-4.6)', () => {
-    const example = readFileSync(`${REPO_ROOT}.env.example`, 'utf8');
+    // Built from the example with the key removed, so this holds before and after the key is in .env.example.
+    const base = readFileSync(`${REPO_ROOT}.env.example`, 'utf8').replace(
+      /^QUESTION_OPTION_ID_SECRET=.*\n?/gm,
+      '',
+    );
     const withIt = parseEnv(
-      buildLocalEnv(`${example}\nQUESTION_OPTION_ID_SECRET=change-me-random-secret\n`),
+      buildLocalEnv(`${base}\nQUESTION_OPTION_ID_SECRET=change-me-random-secret\n`),
     );
     assert.ok(withIt.QUESTION_OPTION_ID_SECRET.length >= 32);
     assert.doesNotMatch(withIt.QUESTION_OPTION_ID_SECRET, /change-me/);
-    assert.equal(parseEnv(buildLocalEnv(example)).QUESTION_OPTION_ID_SECRET, undefined);
+    assert.notEqual(withIt.QUESTION_OPTION_ID_SECRET, withIt.OTP_PEPPER);
+    assert.equal(parseEnv(buildLocalEnv(base)).QUESTION_OPTION_ID_SECRET, undefined);
   });
 
   it('two runs give different secrets', () => {
