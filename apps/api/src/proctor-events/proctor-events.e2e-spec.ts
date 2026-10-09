@@ -454,9 +454,11 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
         'SIDE_CAMERA_LOST',
       ]);
       await sendEvents(r, 1, [event('FULLSCREEN_RESTORED')]).expect(200);
-      // One reason is still active (derived from the events), so the session stays paused. The stored
-      // reason list is not edited while PAUSED (no PAUSED to PAUSED edge in SessionStateService yet).
-      expect((await sessionRow(r)).status).toBe('PAUSED');
+      // One reason is still active (derived from the events), so the session stays paused and the stored
+      // list follows through the PAUSED to PAUSED edge (stale pause_reasons gap, FU-BEB-161).
+      const stillPaused = await sessionRow(r);
+      expect(stillPaused.status).toBe('PAUSED');
+      expect(stillPaused.pauseReasons).toEqual(['SIDE_CAMERA_LOST']);
       await sendEvents(r, 2, [event('SIDE_CAMERA_RECONNECTED')]).expect(200);
       const resumed = await sessionRow(r);
       expect(resumed.status).toBe('IN_PROGRESS');
@@ -529,8 +531,31 @@ describe('Proctor event and keystroke batches (FR-608, FR-801, ADR 0013 section 
       }
       const row = await sessionRow(r);
       expect(row.status).toBe('PAUSED');
-      expect(row.pauseReasons).toEqual(['PROCTOR']);
+      // The proctor pause is kept, and the retry stores the candidate reason beside it (the edge).
+      expect(row.pauseReasons).toEqual(['SCREEN_SHARE_STOPPED', 'PROCTOR']);
       expect(row.proctorPausedAt).not.toBeNull();
+    });
+
+    it('FR-609, DL-17: a second candidate reason while PAUSED is stored (the write gate sees it), the clock and PROCTOR are untouched', async () => {
+      const pausedAt = new Date(Date.now() - 60_000);
+      const r = await running(tenant, { pauseReasons: ['PROCTOR', 'FULLSCREEN_EXIT'] }, 'PAUSED');
+      await owner.session.update({
+        where: { id: r.inv.sessionId },
+        data: { proctorPausedAt: pausedAt },
+      });
+      const before = await sessionRow(r);
+      await sendEvents(r, 0, [
+        event('FULLSCREEN_EXIT'),
+        event('SCREEN_SHARE_STOPPED', { payload: { reason: 'TRACK_ENDED' } }),
+      ]).expect(200);
+      const row = await sessionRow(r);
+      expect(row.status).toBe('PAUSED');
+      expect([...row.pauseReasons].sort()).toEqual(
+        ['FULLSCREEN_EXIT', 'PROCTOR', 'SCREEN_SHARE_STOPPED'].sort(),
+      );
+      expect(row.proctorPausedAt?.getTime()).toBe(pausedAt.getTime());
+      expect(row.deadlineAt).toEqual(before.deadlineAt);
+      expect(row.pausedMs).toBe(before.pausedMs);
     });
 
     it('FR-801: a duplicate resend re-applies a pause that was missed', async () => {
