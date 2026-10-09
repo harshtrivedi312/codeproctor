@@ -10,27 +10,25 @@ from __future__ import annotations
 import random
 
 import pytest
-from fastapi.testclient import TestClient
 
-from helpers import batches, cursor, edit, human_intervals, typed
-from worker.app import app
+from helpers import QID, batches, cursor, edit, human_intervals, typed
+from signed_app import make_app, send
 from worker.keystrokes import analyze_question
 from worker.risk import QueueItem, order_review_queue, route_for_review
 
-client = TestClient(app)
-AUTH = {"X-Internal-Token": "qa-token"}
+app = make_app()  # signed requests only (ADR 0014); the old token routes are gone
 
 
 @pytest.fixture(autouse=True)
-def _token(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WORKER_INTERNAL_TOKEN", "qa-token")
+def _no_review_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RISK_FAST_REVIEW_BANDS", raising=False)
 
 
 def _analyze(events: list[dict[str, object]]) -> list[dict[str, object]]:
     bs = [b.model_dump(mode="json", by_alias=True) for b in batches(events)]
-    r = client.post("/analyze/keystrokes", json={"batches": bs}, headers=AUTH)
+    r = send(app, "/v1/analyze/keystrokes", {"sessionQuestionId": QID, "batches": bs})
     assert r.status_code == 200, r.text
-    return r.json()[0]["findings"]  # type: ignore[no-any-return]
+    return r.json()["findings"]  # type: ignore[no-any-return]
 
 
 # ---------- TC-073 (FR-802): paste burst via typing tool ----------
@@ -104,13 +102,27 @@ SOLUTION = (
 
 
 def _similarity(codes: dict[str, str]) -> dict[str, list[dict[str, object]]]:
-    subs = [
-        {"session_id": s, "session_question_id": f"q-{s}", "language": "python", "code": c}
-        for s, c in codes.items()
-    ]
-    r = client.post("/analyze/similarity", json={"submissions": subs}, headers=AUTH)
-    assert r.status_code == 200
-    return r.json()["findings_by_session"]  # type: ignore[no-any-return]
+    """Each submission in turn is the target and the others are the corpus (ADR 0014 6.2)."""
+    out: dict[str, list[dict[str, object]]] = {}
+    for session, code in codes.items():
+        body = {
+            "target": {
+                "sessionId": session,
+                "sessionQuestionId": f"q-{session}",
+                "language": "python",
+                "code": code,
+            },
+            "corpus": [
+                {"sessionId": o, "language": "python", "code": c}
+                for o, c in codes.items()
+                if o != session
+            ],
+        }
+        r = send(app, "/v1/analyze/similarity", body)
+        assert r.status_code == 200, r.text
+        if r.json()["findings"]:
+            out[session] = r.json()["findings"]
+    return out
 
 
 def test_TC_074_two_identical_submissions_each_get_a_code_similarity_finding_naming_the_other() -> (
@@ -148,10 +160,14 @@ def test_TC_074_two_different_correct_solutions_are_not_flagged() -> None:
 
 
 def _risk(types: list[str], config: dict[str, object] | None = None) -> dict[str, object]:
-    body: dict[str, object] = {"events": [{"type": t} for t in types]}
+    body: dict[str, object] = {
+        "events": [{"type": t, "source": "CLIENT"} for t in types],
+        "identityReviewPending": False,
+        "shortAnswerPending": False,
+    }
     if config:
         body["config"] = config
-    r = client.post("/risk", json=body, headers=AUTH)
+    r = send(app, "/v1/risk", body)
     assert r.status_code == 200, r.text
     return r.json()  # type: ignore[no-any-return]
 
@@ -211,8 +227,9 @@ def test_TC_076_the_risk_route_band_for_a_medium_session_feeds_routing() -> None
     out = _risk(["TAB_SWITCH"] * 3 + ["NO_FACE"] * 2)  # 24 + 16 = 40
     assert out["band"] == "MEDIUM"
     assert route_for_review("MEDIUM").reasons == ["RISK_MEDIUM"]
-    assert out["needs_review"] is True and out["review_path"] == "full"
-    assert out["review_reasons"] == ["RISK_MEDIUM"] and out["queue_rank"] == 1
+    assert (
+        out["reviewPath"] == "full" and out["reasons"] == ["RISK_MEDIUM"] and out["queueRank"] == 1
+    )
 
 
 def test_TC_076_C28_queue_is_high_then_medium_then_low_whatever_the_scores_and_input_order() -> (
