@@ -85,23 +85,10 @@ export interface UploadQueueOptions {
   /** The presign quota ran out (PRESIGN_QUOTA_EXCEEDED): the cap is per session, waiting may not help. */
   onQuota?: (info: { stream: RecordingStream }) => void;
   /**
-   * Identity collision handling (the server confirmed ANOTHER chunk under a (stream, seq) we hold,
-   * so our counters are behind: storage lost, a new device, two tabs). The stream is HELD (no
-   * presign, no blind seq jump). `prepare` stops the live recorder of the stream and brings the
-   * counters up to the server's (the app's choice, OTP resume today); it returns false when the
-   * counters could not be refreshed (the stream stays held, chunks kept, until `resyncHeld()`).
-   * `allocate` reserves a fresh segment and `count` contiguous seqs from the refreshed counters;
-   * the whole pending group is then moved there in seq order (header chunk lowest). `done`
-   * restarts the live recorder into a new segment.
+   * Called when held chunks were dropped because the counters were refreshed (`releaseHeld`): they
+   * carried identities that collide with chunks the server already has. Never carries content.
    */
-  collision?: {
-    prepare(stream: RecordingStream): Promise<boolean>;
-    allocate(
-      stream: RecordingStream,
-      count: number,
-    ): Promise<{ segment: number; firstSeq: number }>;
-    done(stream: RecordingStream): void | Promise<void>;
-  };
+  onStaleIdentityLoss?: (info: { stream: RecordingStream; chunks: number; bytes: number }) => void;
   /** Called when a chunk's identity collided with a confirmed one (never carries content). */
   onSeqConflict?: (info: { stream: RecordingStream; segment: number }) => void;
   /** Probe timeout (default 15 s): a probe that never answers counts as "still offline". */
@@ -156,6 +143,8 @@ const PRESIGN_REUSE_MARGIN_MS = 5000;
  * chunks that are not uploading are dropped and counted in the health report (the review UI must
  * show a gap, never silently skip).
  */
+const sum = (m: Record<string, number>): number => Object.values(m).reduce((a, b) => a + b, 0);
+
 export class UploadQueue {
   private readonly concurrency: number;
   private readonly cap: number;
@@ -200,12 +189,23 @@ export class UploadQueue {
    * chunk (counters behind), and deleting it would lose media without a trace.
    */
   private readonly trusted = new Set<string>();
-  /** Streams held after an identity collision, with the colliding segment. */
-  private readonly held = new Map<RecordingStream, { segment: number; resolving: boolean }>();
-  private readonly resyncs = new Map<RecordingStream, number>();
-  private rekeyed = 0;
-  private seqConflicts = 0;
-  private staleLosses = 0;
+  /**
+   * Streams held after an identity collision (the server confirmed ANOTHER chunk under a seq we
+   * hold: our counters are behind). A held stream gets no presign, no drop and no guessed seq; its
+   * chunks wait. The hold is persisted per stream (`<sid>:held:<STREAM>`, a segment number, no
+   * media) BEFORE anything else happens, so a reload re-holds instead of trusting the chunks.
+   */
+  private readonly held = new Map<RecordingStream, { segment: number }>();
+  private readonly seqConflictsBy: Record<RecordingStream, number> = {
+    SCREEN: 0,
+    WEBCAM: 0,
+    AUDIO: 0,
+  };
+  private readonly staleLossesBy: Record<RecordingStream, number> = {
+    SCREEN: 0,
+    WEBCAM: 0,
+    AUDIO: 0,
+  };
   private purged = false;
   /** Bytes of first chunks admitted above the cap, per chunk (ADR 0013 5.5: at most 16 MiB per stream). */
   private readonly overflow = new Map<string, number>();
@@ -224,14 +224,28 @@ export class UploadQueue {
     return `${this.o.sessionId}:`;
   }
 
+  private heldKey(stream: RecordingStream): string {
+    return `${this.o.sessionId}:held:${stream}`;
+  }
+
   /** Pick up chunks left by a previous page load and start uploading. */
   async start(): Promise<void> {
     try {
+      // Holds first: chunks of a held stream are NOT trusted (the server may answer alreadyUploaded
+      // for another chunk under their identity, and believing it would delete them unseen).
+      for (const stream of RECORDING_STREAMS) {
+        const h = await this.o.store.get<{ segment: number }>(STORES.meta, this.heldKey(stream));
+        if (h && Number.isInteger(h.segment)) {
+          this.held.set(stream, { segment: h.segment });
+          this.seqConflictsBy[stream]++;
+          this.o.onSeqConflict?.({ stream, segment: h.segment });
+        }
+      }
       for (const key of await this.o.store.keys(STORES.chunks, this.prefix())) {
         const ref = parseChunkKey(key);
         if (ref) {
           this.pending.set(key, ref);
-          this.trusted.add(key); // restored from IndexedDB: this identity was ours
+          if (!this.held.has(ref.stream)) this.trusted.add(key); // restored: this identity was ours
         }
       }
       await sweepStaleSessions(this.o.store, this.o.sessionId, Date.now(), this.o.staleAfterMs);
@@ -270,6 +284,12 @@ export class UploadQueue {
       return;
     }
     const room = await this.makeRoom(chunk);
+    if (this.ended || this.purged) {
+      // finish() purged (or the session ended) while we made room: write nothing.
+      this.drop(chunk);
+      this.report();
+      return;
+    }
     if (room === 'NO') {
       // Only protected first chunks are left and the cap is still exceeded: drop the incoming
       // chunk and say so; the buffer never grows past the cap silently.
@@ -436,7 +456,7 @@ export class UploadQueue {
       if (this.inFlight.size >= this.concurrency) break;
       if (this.inFlight.has(key)) continue;
       const ref = this.pending.get(key);
-      if (ref && this.held.has(ref.stream)) continue; // identity collision: wait for the resync
+      if (ref && this.held.has(ref.stream)) continue; // identity collision: waits for releaseHeld
       const at = Math.max(
         this.notBefore.get(key) ?? 0,
         ref ? (this.streamHold.get(ref.stream) ?? 0) : 0,
@@ -554,7 +574,6 @@ export class UploadQueue {
       this.attempts.delete(key);
       this.notBefore.delete(key);
       this.lastOk = Date.now();
-      this.resyncs.delete(ref.stream); // an upload went through: the identities are good again
       void this.touch.touch();
       this.failures = 0;
       this.offline = false;
@@ -596,7 +615,7 @@ export class UploadQueue {
         this.notBefore.set(key, backoff());
         return;
       case 'SEQ_COLLISION':
-        if (ref) this.onCollision(ref);
+        if (ref) await this.onCollision(ref);
         return;
       case 'QUOTA': {
         // Never drop for a quota: wait for it, for the whole stream (every presign counts). The
@@ -646,108 +665,56 @@ export class UploadQueue {
 
   /**
    * The server confirmed ANOTHER chunk under an identity we hold (alreadyUploaded for a chunk we
-   * never presigned, or 409 SEQ_CONFLICT). Hold the stream, flag it once per episode, and resolve:
-   * refresh the counters, then move the whole pending group of that segment into a fresh segment
-   * with contiguous seqs (header chunk lowest). Never a blind jump: a guessed seq would fabricate
-   * recording gaps that look like tampering. Without a hook, or when the counters cannot be
-   * refreshed, the chunks are kept and the stream stays held until `resyncHeld()`.
+   * never presigned, or 409 SEQ_CONFLICT). HOLD the stream: no presign, no drop, no guessed seq.
+   * The hold is persisted first, then flagged once per episode. The live recorder keeps recording
+   * into the held segment (bounded by the buffer cap). Only `releaseHeld` ends a hold.
    */
-  private onCollision(ref: ChunkRef): void {
-    if (this.held.has(ref.stream)) return; // already handling this stream (dedupe flags)
-    this.seqConflicts++;
-    this.held.set(ref.stream, { segment: ref.segment, resolving: false });
+  private async onCollision(ref: ChunkRef): Promise<void> {
+    if (this.held.has(ref.stream)) return; // already held: one flag per episode
+    this.held.set(ref.stream, { segment: ref.segment });
+    this.seqConflictsBy[ref.stream]++;
+    if (!this.purged) {
+      await this.o.store
+        .put(STORES.meta, this.heldKey(ref.stream), { segment: ref.segment })
+        .catch(() => undefined);
+    }
     this.o.onSeqConflict?.({ stream: ref.stream, segment: ref.segment });
-    void this.resolveHeld(ref.stream);
   }
 
-  /** Counters were refreshed from outside (for example `seedCounters`): try the held streams again. */
-  resyncHeld(): void {
-    this.resyncs.clear();
-    for (const stream of this.held.keys()) void this.resolveHeld(stream);
-  }
-
-  private async resolveHeld(stream: RecordingStream): Promise<void> {
-    const h = this.held.get(stream);
-    const hook = this.o.collision;
-    if (!h || h.resolving || !hook) return;
-    const tries = (this.resyncs.get(stream) ?? 0) + 1;
-    if (tries > 3) return; // stays held and flagged; seedCounters resets the attempts
-    this.resyncs.set(stream, tries);
-    h.resolving = true;
-    try {
-      const ok = await hook.prepare(stream);
-      if (!ok || !this.running || this.ended || this.purged) return;
-      // Let uploads of this stream that are already running finish before moving anything.
-      for (let i = 0; i < 100 && this.streamBusy(stream); i++) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      if (this.ended || this.purged) return;
-      const group = [...this.pending.entries()]
-        .filter(([, c]) => c.stream === stream && c.segment === h.segment)
-        .sort((a, b) => a[1].seq - b[1].seq);
-      if (group.length > 0) {
-        const { segment, firstSeq } = await hook.allocate(stream, group.length);
-        if (this.ended || this.purged) return;
-        for (let i = 0; i < group.length; i++) {
-          const entry = group[i] as [string, ChunkRef];
-          await this.moveChunk(entry[0], {
-            ...entry[1],
-            segment,
-            seq: firstSeq + i,
-            // the header chunk (lowest seq) stays the lowest of the new segment
-            first: i === 0 && group.some(([, c]) => c.first === true),
-          });
-        }
+  /**
+   * The counters were refreshed from the server (the app calls `seedCounters` after a new epoch):
+   * end the holds. The held chunks carry identities that collide with chunks the server already
+   * has, so they are dropped and COUNTED as stale-identity losses (never silent); uploads that are
+   * running right now are left to finish. Returns the streams that were released.
+   */
+  async releaseHeld(): Promise<RecordingStream[]> {
+    const released: RecordingStream[] = [];
+    for (const stream of [...this.held.keys()]) {
+      let chunks = 0;
+      let bytes = 0;
+      for (const [key, ref] of [...this.pending.entries()]) {
+        if (ref.stream !== stream || this.inFlight.has(key)) continue;
+        this.pending.delete(key);
+        this.presigns.delete(key);
+        this.trusted.delete(key);
+        this.overflow.delete(key);
+        this.blocked.delete(key);
+        this.dropMemory(key);
+        this.attempts.delete(key);
+        this.notBefore.delete(key);
+        await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
+        this.drop(ref);
+        this.staleLossesBy[stream]++;
+        chunks++;
+        bytes += ref.bytes;
       }
       this.held.delete(stream);
-      await hook.done(stream);
-    } catch {
-      // the stream stays held: chunks are kept, nothing was dropped
-    } finally {
-      const cur = this.held.get(stream);
-      if (cur) cur.resolving = false;
-      this.pump();
+      await this.o.store.delete(STORES.meta, this.heldKey(stream)).catch(() => undefined);
+      if (chunks > 0) this.o.onStaleIdentityLoss?.({ stream, chunks, bytes });
+      released.push(stream);
     }
-  }
-
-  private streamBusy(stream: RecordingStream): boolean {
-    for (const k of this.inFlight) if (this.pending.get(k)?.stream === stream) return true;
-    return false;
-  }
-
-  /** Move a pending chunk to a new identity: the new key is written before the old one is removed. */
-  private async moveChunk(oldKey: string, next: ChunkRef): Promise<void> {
-    const nextKey = chunkKey(this.o.sessionId, next);
-    const mem = this.memory.get(oldKey);
-    const stored: StoredChunk | undefined = mem
-      ? { data: mem }
-      : await this.o.store.get<StoredChunk>(STORES.chunks, oldKey).catch(() => undefined);
-    const old = this.pending.get(oldKey);
-    if (!stored) {
-      // The data is gone (IndexedDB read failed): a counted loss, never a silent one.
-      this.staleLosses++;
-      if (old) this.drop(old);
-    } else if (mem) {
-      this.memory.set(nextKey, mem);
-    } else {
-      await this.o.store.put(STORES.chunks, nextKey, stored).catch(() => {
-        this.memory.set(nextKey, stored.data);
-        this.memBytes += stored.data.byteLength;
-      });
-    }
-    if (mem) this.memory.delete(oldKey); // same buffer under the new key: byte count unchanged
-    const overflowBytes = this.overflow.get(oldKey);
-    await this.o.store.delete(STORES.chunks, oldKey).catch(() => undefined);
-    this.pending.delete(oldKey);
-    for (const m of [this.presigns, this.trusted, this.overflow, this.attempts, this.notBefore]) {
-      (m as Map<string, unknown> | Set<string>).delete(oldKey);
-    }
-    this.blocked.delete(oldKey);
-    if (stored) {
-      this.pending.set(nextKey, next);
-      if (overflowBytes !== undefined) this.overflow.set(nextKey, overflowBytes);
-      this.rekeyed++;
-    }
+    this.pump();
+    return released;
   }
 
   /** Retry everything now, for the browser `online` event. */
@@ -784,9 +751,10 @@ export class UploadQueue {
       quotaWait: [...this.streamHold.values()].some((t) => t > Date.now()),
       blockedChunks: this.blocked.size,
       capExceeded: this.capExceeded,
-      seqConflicts: this.seqConflicts,
-      rekeyedChunks: this.rekeyed,
-      staleIdentityLosses: this.staleLosses,
+      seqConflicts: sum(this.seqConflictsBy),
+      seqConflictsByStream: { ...this.seqConflictsBy },
+      staleIdentityLosses: sum(this.staleLossesBy),
+      staleIdentityLossesByStream: { ...this.staleLossesBy },
       heldStreams: [...this.held.keys()],
     };
   }
@@ -838,8 +806,10 @@ export class UploadQueue {
     this.trusted.clear();
     this.overflow.clear();
     this.held.clear();
-    this.resyncs.clear();
     await this.o.store.deletePrefix(STORES.chunks, this.prefix()).catch(() => 0);
+    for (const stream of RECORDING_STREAMS) {
+      await this.o.store.delete(STORES.meta, this.heldKey(stream)).catch(() => undefined);
+    }
     this.report();
     return bytes;
   }

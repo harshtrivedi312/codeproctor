@@ -41,13 +41,6 @@ export interface RecordingPipelineOptions {
   onEnded?: UploadQueueOptions['onEnded'];
   /** A segment's first chunk was refused for good; it is kept and retried slowly. */
   onChunkBlocked?: UploadQueueOptions['onChunkBlocked'];
-  /**
-   * Refresh the media counters from the server after an identity collision (the server confirmed
-   * another chunk under a seq we hold). The app decides how (a new-epoch `proctor-key` answer after
-   * an OTP resume today); return `counters.media` or null when it cannot. Without it the stream
-   * stays held (chunks kept, `recording-seq-conflict` flagged) until the app calls `seedCounters`.
-   */
-  resyncCounters?: () => Promise<Partial<Record<string, Partial<MediaCounter>>> | null>;
   /** Injected clock for chunk start times and durations (tests). */
   now?: () => number;
 }
@@ -69,11 +62,8 @@ export class RecordingPipeline {
   private readonly sources = new Map<RecordingStream, MediaStream>();
   /** The server said the session is over: no device may be opened or recorder started any more. */
   private ended = false;
-  /** Bumped by every seedCounters call; a held stream resumes once it moved past the collision. */
-  private seedStamp = 0;
-  private readonly restartAfter = new Set<RecordingStream>();
-  /** seedStamp when a stream's collision started: counters seeded after it resolve the hold. */
-  private readonly heldStamp = new Map<RecordingStream, number>();
+  /** stop() or finish() began: no recorder may start any more, whatever is still awaiting. */
+  private closing = false;
 
   constructor(private readonly o: RecordingPipelineOptions) {
     this.store = o.store ?? new IdbStore();
@@ -87,9 +77,8 @@ export class RecordingPipeline {
       onEnded: (info) => {
         this.ended = true;
         // Privacy: the session is over, so nothing more may be captured (recorders stop, their
-        // last chunk is refused by the queue, devices are released).
-        for (const stream of [...this.recorders.keys()])
-          void this.stopStream(stream).catch(() => undefined);
+        // last chunk is refused by the queue, every device is released).
+        void this.releaseAll().catch(() => undefined);
         o.onCapability?.({
           id: 'recording-ended',
           status: 'UNVERIFIABLE',
@@ -116,42 +105,15 @@ export class RecordingPipeline {
         o.onCapability?.({
           id: 'recording-seq-conflict',
           status: 'UNVERIFIABLE',
-          detail: `A ${info.stream.toLowerCase()} chunk collided with one the server already confirmed (our counters were behind). The stream is held and its chunks are kept; they move to a fresh segment once the counters are refreshed. Chunks confirmed under stale numbers before are not recoverable.`,
+          detail: `A ${info.stream.toLowerCase()} chunk collided with one the server already confirmed (our counters were behind). The stream is held: recording continues and its chunks are kept until the counters are refreshed (seedCounters), then the held chunks are dropped and counted. Chunks confirmed under stale numbers before are not recoverable.`,
         });
       },
-      // Identity collision (counters behind the server's): see UploadQueue `collision`.
-      collision: {
-        prepare: async (stream) => {
-          if (!this.heldStamp.has(stream)) this.heldStamp.set(stream, this.seedStamp);
-          const stamp = this.heldStamp.get(stream) ?? this.seedStamp;
-          // Stop the live recorder first: its last chunk joins the group that moves to a new segment.
-          if (this.recorders.has(stream) && !this.ended) {
-            this.restartAfter.add(stream);
-            await this.recorders.get(stream)?.stop();
-            this.recorders.delete(stream);
-          }
-          let fresh: Partial<Record<string, Partial<MediaCounter>>> | null;
-          try {
-            fresh = (await o.resyncCounters?.()) ?? null;
-          } catch {
-            fresh = null;
-          }
-          if (fresh) this.seedCounters(fresh);
-          // True when counters were refreshed now, or by the app (seedCounters) since the collision.
-          return fresh !== null || this.seedStamp > stamp;
-        },
-        allocate: async (stream, count) => {
-          const segment = await this.counters.newSegment(stream);
-          const firstSeq = this.counters.reserveSeqs(stream, count);
-          await this.counters.persist(stream);
-          return { segment, firstSeq };
-        },
-        done: async (stream) => {
-          this.heldStamp.delete(stream);
-          if (!this.restartAfter.delete(stream) || this.ended) return;
-          const src = this.sources.get(stream);
-          if (src) await this.begin(stream, src); // a new segment, numbered past the moved group
-        },
+      onStaleIdentityLoss: (info) => {
+        o.onCapability?.({
+          id: 'recording-stale-identity',
+          status: 'UNVERIFIABLE',
+          detail: `${String(info.chunks)} ${info.stream.toLowerCase()} chunks were dropped when the counters were refreshed: they carried numbers the server had already confirmed for other chunks.`,
+        });
       },
       onChunkBlocked: (info) => {
         o.onCapability?.({
@@ -224,8 +186,39 @@ export class RecordingPipeline {
       this.counters.seed(stream as RecordingStream, v);
       void this.counters.persist(stream as RecordingStream); // best effort, also on later loads
     }
-    this.seedStamp++;
-    this.queue.resyncHeld(); // a stream held after a collision can move on now
+    void this.releaseHeldStreams().catch(() => undefined);
+  }
+
+  /**
+   * End the holds after a collision (the app refreshed the counters from the server): stop the
+   * live recorder of each held stream (its last chunk joins the held chunks), drop the held
+   * chunks as counted stale-identity losses, and restart the recorder into a fresh segment whose
+   * seqs continue from the seeded counters. Nothing is guessed and no seq is reused.
+   */
+  private async releaseHeldStreams(): Promise<void> {
+    const held = this.queue.health().heldStreams;
+    if (held.length === 0 || this.ended || this.closing) return;
+    const restart: RecordingStream[] = [];
+    for (const stream of held) {
+      if (this.recorders.has(stream)) {
+        restart.push(stream);
+        await this.recorders.get(stream)?.stop(); // the device stays open
+        this.recorders.delete(stream);
+      }
+    }
+    await this.queue.releaseHeld();
+    if (this.ended || this.closing) return;
+    for (const stream of restart) {
+      const src = this.sources.get(stream);
+      if (src) await this.begin(stream, src);
+    }
+  }
+
+  /** Stop every recorder and release every device this pipeline opened (recorders UNION owned). */
+  private async releaseAll(): Promise<void> {
+    const streams = new Set<RecordingStream>([...this.recorders.keys(), ...this.owned.keys()]);
+    for (const stream of streams) await this.stopStream(stream).catch(() => undefined);
+    this.sources.clear();
   }
 
   private supported(stream: RecordingStream): boolean {
@@ -242,7 +235,7 @@ export class RecordingPipeline {
 
   /** Record a screen stream the caller already obtained (displaySurface was checked there). */
   async recordScreen(stream: MediaStream): Promise<boolean> {
-    if (this.ended) return false; // session over: no recorder may start (before anything else)
+    if (this.ended || this.closing) return false; // no recorder may start (before anything else)
     this.o.assertConsent();
     if (!this.supported('SCREEN')) return false;
     // 5 fps keeps files small; some browsers ignore it, which is fine.
@@ -250,12 +243,13 @@ export class RecordingPipeline {
       .getVideoTracks()[0]
       ?.applyConstraints({ frameRate: { ideal: SCREEN_FRAME_RATE, max: SCREEN_FRAME_RATE } })
       .catch(() => undefined);
+    if (this.ended || this.closing) return false;
     await this.begin('SCREEN', stream);
-    return true;
+    return !(this.ended || this.closing);
   }
 
   async recordWebcam(): Promise<MediaStream | null> {
-    if (this.ended) return null;
+    if (this.ended || this.closing) return null;
     this.o.assertConsent();
     if (!this.supported('WEBCAM')) return null;
     const md = this.o.mediaDevices ?? navigator.mediaDevices;
@@ -266,19 +260,19 @@ export class RecordingPipeline {
       this.o.onCapability?.({ id: 'record-webcam', status: 'DENIED' });
       return null;
     }
-    if (this.ended) {
-      // The session ended while the permission prompt was open: release the device at once.
+    if (this.ended || this.closing) {
+      // The session ended (or stop() began) while the permission prompt was open: release the device at once.
       s.getTracks().forEach((t) => t.stop());
       return null;
     }
     this.owned.set('WEBCAM', s);
     await this.begin('WEBCAM', s);
-    if (this.ended) return null; // ended during begin(): it released the device
+    if (this.ended || this.closing) return null; // ended during begin(): it released the device
     return s;
   }
 
   async recordAudio(): Promise<MediaStream | null> {
-    if (this.ended) return null;
+    if (this.ended || this.closing) return null;
     this.o.assertConsent();
     if (!this.supported('AUDIO')) return null;
     const md = this.o.mediaDevices ?? navigator.mediaDevices;
@@ -292,14 +286,14 @@ export class RecordingPipeline {
       this.o.onCapability?.({ id: 'record-audio', status: 'DENIED' });
       return null;
     }
-    if (this.ended) {
+    if (this.ended || this.closing) {
       // The session ended while the permission prompt was open: release the device at once.
       s.getTracks().forEach((t) => t.stop());
       return null;
     }
     this.owned.set('AUDIO', s);
     await this.begin('AUDIO', s);
-    if (this.ended) return null; // ended during begin(): it released the device
+    if (this.ended || this.closing) return null; // ended during begin(): it released the device
     return s;
   }
 
@@ -307,8 +301,8 @@ export class RecordingPipeline {
     if (!this.started) await this.start();
     await this.recorders.get(stream)?.stop();
     const segment = await this.counters.newSegment(stream);
-    if (this.ended) {
-      // SESSION_NOT_ACTIVE arrived while we waited: register nothing, release what we own.
+    if (this.ended || this.closing) {
+      // SESSION_NOT_ACTIVE or stop()/finish() arrived while we waited: register nothing, release.
       this.owned
         .get(stream)
         ?.getTracks()
@@ -373,8 +367,9 @@ export class RecordingPipeline {
    * `<sessionId>:segment:` keys are removed.
    */
   async finish(opts: { drainTimeoutMs?: number } = {}): Promise<RecorderHealth> {
+    this.closing = true; // first: no recorder may start while the queue drains
     globalThis.removeEventListener?.('online', this.onOnline);
-    for (const s of [...this.recorders.keys()]) await this.stopStream(s);
+    await this.releaseAll();
     await this.queue.waitUntilIdle(opts.drainTimeoutMs ?? 15_000);
     this.queue.stop();
     await this.queue.purge();
@@ -385,8 +380,9 @@ export class RecordingPipeline {
 
   /** Stop recording; unsent chunks stay in IndexedDB and upload on the next load. */
   async stop(): Promise<void> {
+    this.closing = true; // first: nothing may start while we tear down
     globalThis.removeEventListener?.('online', this.onOnline);
-    for (const s of [...this.recorders.keys()]) await this.stopStream(s);
+    await this.releaseAll();
     this.queue.stop();
   }
 }

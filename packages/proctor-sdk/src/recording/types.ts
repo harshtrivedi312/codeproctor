@@ -135,11 +135,11 @@ export interface RecorderHealth {
   capExceeded: boolean;
   /** Chunks whose identity collided with a confirmed chunk (counters were behind). */
   seqConflicts: number;
-  /** Of those, chunks moved into a fresh segment with fresh contiguous seqs. */
-  rekeyedChunks: number;
-  /** Chunks lost because their data could not be moved after a collision (counted, never silent). */
+  seqConflictsByStream: Record<RecordingStream, number>;
+  /** Held chunks dropped when the counters were refreshed (they carried colliding identities). */
   staleIdentityLosses: number;
-  /** Streams on hold after a collision, waiting for refreshed counters. */
+  staleIdentityLossesByStream: Record<RecordingStream, number>;
+  /** Streams on hold after a collision, waiting for `seedCounters`. */
   heldStreams: RecordingStream[];
 }
 

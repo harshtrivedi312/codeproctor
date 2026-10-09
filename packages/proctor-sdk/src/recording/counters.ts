@@ -68,14 +68,6 @@ export class MediaCounters {
     return cur.nextSeq++;
   }
 
-  /** Reserve `count` contiguous seqs and return the first (a group moved into a new segment). */
-  reserveSeqs(stream: RecordingStream, count: number): number {
-    const cur = this.c.get(stream) as MediaCounter;
-    const first = cur.nextSeq;
-    cur.nextSeq += count;
-    return first;
-  }
-
   /** A new segment for the stream (a recorder start). Persisted before it is used. */
   async newSegment(stream: RecordingStream): Promise<number> {
     const cur = this.c.get(stream) as MediaCounter;
