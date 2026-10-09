@@ -11,8 +11,8 @@ email address, or a real candidate. Last checked against `main` on 2026-10-07 (c
 | See every screen with no backend at all          | `pnpm dev:web:mock` (section 5)                                | Works. Fake data, fake API.                                         |
 | Start everything with one command                | `pnpm demo:up` (section 2)                                     | Works on a free machine; `pnpm demo:down` stops it.                 |
 | Sign in as staff, browse questions, tests, users | the real stack (sections 1 to 4)                               | Works (checked).                                                    |
-| Open a candidate invitation link                 | `node infra/scripts/demo-invite.mjs` (section 4)               | The link opens; the one-time code cannot be sent yet (see below).   |
-| Take a test as a candidate, end to end           | the real stack                                                 | **Not on `main` yet**: needs a dev mail sink and a code runner.     |
+| Open a candidate invitation link                 | `node infra/scripts/demo-invite.mjs` (section 4)               | The link opens, and the one-time code arrives in Mailpit (#305).    |
+| Take a test as a candidate, end to end           | the real stack                                                 | The gate, code and consent work; code runs through the local stub.  |
 | Run candidate code                               | Judge0                                                         | **Not on `main` yet** on a Mac: Judge0 needs Linux x86 (section 7). |
 
 ## 1. Prerequisites
@@ -147,8 +147,9 @@ local-only fix (FU-BE-222, Backend A) is merged; this note will then be dropped.
 and the development password. You land on the staff dashboard. Questions (8) and Tests (2) show the
 seed.
 
-**Sign in as the admin** (needs a second factor, forced on first sign-in): after the password the page
-shows a QR code and a "manual key". You do not need a phone:
+**Sign in as the admin** (a second factor is optional and recommended for every staff role, D-70; the
+admin signs in with the password alone until it is set up, and the app nudges you to enrol). To enrol, open the
+security prompt; the page shows a QR code and a "manual key". You do not need a phone:
 
 ```bash
 node infra/scripts/demo-totp.mjs <the manual key shown on the page>
@@ -186,7 +187,7 @@ pnpm dev:web:mock
 Serves every API call from fake data in the browser. Nothing else needs to run, not even Docker. Open
 <http://localhost:3000/admin/login> (mock users and passwords are listed in `apps/web/README.md`; the
 admin's code is `123456`) and <http://localhost:3000/t/demo/test> for the candidate test screen preview.
-Screens that the real API does not serve yet (candidates, live, review, reports) can be seen here.
+Screens that the real API does not serve yet (candidates, live, reports) can be seen here.
 
 ## 6. What works today and what does not
 
@@ -197,10 +198,12 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | `pnpm db:migrate`, `pnpm db:seed`                     | Works. 358 seeded rows.                                                                                 |
 | API starts, `/api/v1/health`                          | Works (PostgreSQL, Redis).                                                                              |
 | Staff sign-in (recruiter), dashboard                  | Works through the web app.                                                                              |
-| Admin sign-in with the second factor                  | Works with `demo-totp.mjs` (checked against the API).                                                   |
+| Staff second factor (optional, D-70)                  | Works: sign in with the password alone, or enrol and use `demo-totp.mjs` (checked against the API).     |
 | Questions list (8) and Tests list (2)                 | Works against the real API.                                                                             |
 | Candidates list (`/admin/candidates`)                 | **Not on `main` yet**: the API has no `admin/candidates` route (the page stays on "Loading"). Mock mode shows it. |
-| Invite candidates, live view, review, reports         | **Not on `main` yet** in the API (no routes). Mock mode shows the screens.                              |
+| Invite candidates (`POST tests/:id/invitations`, #217) | Works against the real API (the invitation email goes to Mailpit).                                      |
+| Review: queue, session detail, recording playback, manual scoring and verdict (`/review/*`, #297, #358) | On `main` in the API. A HIGH-flag verdict gate (FR-902, FU-BE-268) is **not built yet**.                |
+| Live view, reports                                    | **Not on `main` yet** in the API (no routes). Mock mode shows the screens.                              |
 | Candidate link opens the gate                         | Works after `demo-invite.mjs`.                                                                          |
 | Mailpit (the inbox) in the stack                      | Works: the stack starts it and a test email sent to port 1025 shows in <http://localhost:8025> (checked). |
 | Candidate one-time email code                         | **Works (#305 is on `main`)**: with `EMAIL_PROVIDER=smtp-dev` (which `local-env.mjs` writes), asking for the code sends the mail to Mailpit (<http://localhost:8025>), and the code from that mail opens the session (checked 2026-10-07: link, code sent, code accepted, session `OPENED`). |
