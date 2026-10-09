@@ -1207,11 +1207,11 @@ export interface components {
             expectedRevision?: string;
         };
         /**
-         * @description The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED, IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added here when the web starts branching on them. Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web retries it automatically, bounded). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
+         * @description The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED, IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added here when the web starts branching on them. Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web retries it automatically, bounded, except on the credential, re-auth and candidate routes). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
          * @enum {string}
          */
         ProblemCode: "REAUTH_FAILED" | "SETTINGS_CONFLICT" | "VARIANT_HAS_AI_REFERENCES" | "BUSY" | "REASON_NOT_ENABLED" | "ANSWER_NOT_MANUAL" | "MANUAL_PENDING" | "SESSION_NOT_UNDER_REVIEW" | "VERDICT_ALREADY_SET";
-        /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference rows). The UI branches on status and endpoint, and on that code. */
+        /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one (see ProblemCode; on these routes mainly VARIANT_HAS_AI_REFERENCES, 409, deleting a variant that has AI reference rows, and BUSY, 503). The UI branches on status and endpoint, and on that code. */
         Problem: {
             type: string;
             title: string;

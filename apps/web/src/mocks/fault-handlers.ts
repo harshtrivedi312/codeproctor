@@ -10,6 +10,11 @@ import { apiBaseUrl } from '@/lib/env';
  *    500: no detail, no code, no Retry-After. The REAL action DID happen; this mock answers the
  *    500 WITHOUT applying it (a MSW handler cannot run the next one and rewrite its answer), so a
  *    test that needs "it happened" must check the list as the screen tells the user to.
+ *  - Outcome unknown (FU-BE-208): the five routes whose transaction may or may not have committed
+ *    (2FA setup/confirm, disable, recovery-code verify, staff invite and re-issue)
+ *    answer the SAME fixed 500 as the audit failure. `setMockOutcomeUnknown` adds an optional
+ *    `landed` callback that runs when the fault fires, so a test can leave the mock in the state a
+ *    committed action would have produced (for example `seedMockTwoFactor`), or omit it for "did not land".
  *  - A 503 without a code (Redis being down) is its own fault: not BUSY, never retried.
  * Matching is by method and path pattern only: no request data is read or kept.
  */
@@ -22,6 +27,8 @@ export interface FaultTarget {
 }
 interface Fault extends FaultTarget {
   kind: 'busy' | 'audit500' | 'plain503';
+  /** Runs when the fault fires: the effect of an action that did commit. */
+  landed?: () => void;
   remaining: number;
   retryAfter: string | null;
 }
@@ -51,6 +58,22 @@ export function setMockAuditFailure(target: FaultTarget & { count: number }): vo
   faults.push({ ...target, kind: 'audit500', remaining: target.count, retryAfter: null });
 }
 
+/**
+ * Answers the fixed unknown-outcome 500 `count` times. `landed` (optional) applies the action's
+ * effect to the mock, because a MSW handler cannot run the real handler and rewrite its answer.
+ */
+export function setMockOutcomeUnknown(
+  target: FaultTarget & { count: number; landed?: () => void },
+): void {
+  faults.push({
+    ...target,
+    kind: 'audit500',
+    remaining: target.count,
+    retryAfter: null,
+    ...(target.landed ? { landed: target.landed } : {}),
+  });
+}
+
 /** Answers a 503 with no BUSY code (Redis outage style) `count` times. */
 export function setMockPlain503(target: FaultTarget & { count: number }): void {
   faults.push({ ...target, kind: 'plain503', remaining: target.count, retryAfter: null });
@@ -74,6 +97,7 @@ export function createFaultHandlers() {
       if (!fault) return undefined;
       seen.push({ method: request.method, path });
       fault.remaining -= 1;
+      fault.landed?.();
       if (fault.kind === 'busy') {
         return HttpResponse.json(
           {
