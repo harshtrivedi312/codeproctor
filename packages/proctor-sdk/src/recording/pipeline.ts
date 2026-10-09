@@ -9,7 +9,13 @@ import {
 import { MediaCounters, type MediaCounter } from './counters';
 import { UploadQueue, type UploadQueueOptions } from './upload-queue';
 import type { CapabilityFlag } from '../core/types';
-import type { DeviceLoss, MediaApi, RecorderHealth, RecordingStream } from './types';
+import {
+  RECORDING_STREAMS,
+  type DeviceLoss,
+  type MediaApi,
+  type RecorderHealth,
+  type RecordingStream,
+} from './types';
 
 export interface RecordingPipelineOptions {
   sessionId: string;
@@ -63,6 +69,10 @@ export class RecordingPipeline {
       ...(o.put ? { put: o.put } : {}),
       ...(o.probe ? { probe: o.probe } : {}),
       onEnded: (info) => {
+        // Privacy: the session is over, so nothing more may be captured (recorders stop, their
+        // last chunk is refused by the queue, devices are released).
+        for (const stream of [...this.recorders.keys()])
+          void this.stopStream(stream).catch(() => undefined);
         o.onCapability?.({
           id: 'recording-ended',
           status: 'UNVERIFIABLE',
@@ -70,6 +80,34 @@ export class RecordingPipeline {
             'The server says the session is over: recording uploads stopped, chunks are kept.',
         });
         o.onEnded?.(info);
+      },
+      onSegmentLost: (info) => {
+        o.onCapability?.({
+          id: 'recording-segment-lost',
+          status: 'UNVERIFIABLE',
+          detail: `The first chunk of a ${info.stream.toLowerCase()} segment could not be buffered: that segment is lost.`,
+        });
+      },
+      onQuota: (info) => {
+        o.onCapability?.({
+          id: 'recording-quota',
+          status: 'UNVERIFIABLE',
+          detail: `The upload quota for ${info.stream.toLowerCase()} is used up for this session; chunks wait and may never be sent.`,
+        });
+      },
+      onSeqConflict: (info) => {
+        o.onCapability?.({
+          id: 'recording-seq-conflict',
+          status: 'UNVERIFIABLE',
+          detail: `A ${info.stream.toLowerCase()} chunk collided with an already confirmed one (counters were behind); it gets a new number.`,
+        });
+      },
+      // A chunk collided with a confirmed identity: jump the counter well past it and take a new seq.
+      rekey: async (ref, attempt) => {
+        this.counters.seed(ref.stream, { nextSeq: ref.seq + 1 + 1000 * attempt });
+        const seq = this.counters.allocSeq(ref.stream);
+        await this.counters.persist(ref.stream);
+        return seq;
       },
       onChunkBlocked: (info) => {
         o.onCapability?.({
@@ -109,7 +147,7 @@ export class RecordingPipeline {
     await this.queue.start();
     await this.counters.load();
     // Never restart below a chunk still waiting from an earlier page load.
-    for (const stream of ['SCREEN', 'WEBCAM', 'AUDIO'] as const) {
+    for (const stream of RECORDING_STREAMS) {
       this.counters.seed(stream, {
         nextSeq: this.queue.maxSeq(stream) + 1,
         nextSegment: this.queue.maxSegment(stream) + 1,
@@ -137,7 +175,10 @@ export class RecordingPipeline {
    */
   seedCounters(counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>): void {
     for (const [stream, v] of Object.entries(counters)) {
-      if (v) this.counters.seed(stream as RecordingStream, v);
+      // Streams this recorder does not know (a future ROOM_SCAN) are ignored, not an error.
+      if (!v || !(RECORDING_STREAMS as readonly string[]).includes(stream)) continue;
+      this.counters.seed(stream as RecordingStream, v);
+      void this.counters.persist(stream as RecordingStream); // best effort, also on later loads
     }
   }
 
@@ -252,10 +293,13 @@ export class RecordingPipeline {
 
   /**
    * End of session (FR-702). Stops recorders (final chunks are flushed), waits up to
-   * `drainTimeoutMs` for uploads, then deletes every chunk and segment counter of this session from
-   * IndexedDB. Chunks that did not make it are counted in `droppedChunks` and `droppedBytes`;
-   * the caller should show that gap. Only `${sessionId}:segment:` meta keys are removed, because
-   * the event queue keeps its own counter under the same session prefix.
+   * `drainTimeoutMs` for uploads, then deletes every buffered chunk of this session from IndexedDB.
+   * Chunks that did not make it are counted in `droppedChunks` and `droppedBytes`; the caller
+   * should show that gap. The per-stream media counters (`<sessionId>:media:<STREAM>`, small
+   * integers, no candidate data) are KEPT on purpose, like the event counter: a new load of the
+   * same session must continue the seq and segment numbers or the server answers SEQ_CONFLICT or
+   * `alreadyUploaded`. The stale-session sweep removes them later. The legacy
+   * `<sessionId>:segment:` keys are removed.
    */
   async finish(opts: { drainTimeoutMs?: number } = {}): Promise<RecorderHealth> {
     globalThis.removeEventListener?.('online', this.onOnline);

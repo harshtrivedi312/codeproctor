@@ -80,6 +80,20 @@ export interface UploadQueueOptions {
   onChunkBlocked?: (info: { code?: string; stream: RecordingStream; segment: number }) => void;
   /** A first chunk was admitted above the buffer cap because only protected chunks remain. */
   onCapExceeded?: () => void;
+  /** A first chunk could not be admitted: the per-stream overflow allowance is used up. */
+  onSegmentLost?: (info: { stream: RecordingStream; segment: number }) => void;
+  /** The presign quota ran out (PRESIGN_QUOTA_EXCEEDED): the cap is per session, waiting may not help. */
+  onQuota?: (info: { stream: RecordingStream }) => void;
+  /**
+   * The server said a chunk was already uploaded that this queue never got a URL for: our seq
+   * counter is behind (storage lost, two tabs). Gives the chunk a fresh seq (a number above the
+   * confirmed ones); without it the chunk is treated as a conflict (dropped, or kept if first).
+   */
+  rekey?: (ref: ChunkRef, attempt: number) => Promise<number>;
+  /** Called when a chunk's identity collided with a confirmed one (never carries content). */
+  onSeqConflict?: (info: { stream: RecordingStream; segment: number }) => void;
+  /** Probe timeout (default 15 s): a probe that never answers counts as "still offline". */
+  probeTimeoutMs?: number;
   concurrency?: number;
   maxBufferBytes?: number;
   backoffBaseMs?: number;
@@ -112,6 +126,8 @@ function makeDefaultPut(timeoutMs: number): NonNullable<UploadQueueOptions['put'
 
 /** Longest wait between tries for a first chunk the server refused for good. */
 const BLOCKED_RETRY_MS = 5 * 60_000;
+/** ADR 0013 5.5: an incoming first chunk may exceed the buffer cap by at most this much per stream. */
+const OVERFLOW_PER_STREAM_BYTES = 16 * 1024 * 1024;
 /** A cached presign is reused until this long before it expires. */
 const PRESIGN_REUSE_MARGIN_MS = 5000;
 
@@ -166,6 +182,17 @@ export class UploadQueue {
   private capExceeded = false;
   /** First chunks the server refused for good (kept, retried slowly). */
   private readonly blocked = new Set<string>();
+  /**
+   * Keys this queue obtained a URL for, or restored from IndexedDB. `alreadyUploaded` is believed
+   * only for these: for any other chunk it means our identity collides with a different confirmed
+   * chunk (counters behind), and deleting it would lose media without a trace.
+   */
+  private readonly trusted = new Set<string>();
+  private readonly rekeys = new Map<string, number>();
+  private rekeyed = 0;
+  private seqConflicts = 0;
+  /** Bytes of first chunks admitted above the cap, per chunk (ADR 0013 5.5: at most 16 MiB per stream). */
+  private readonly overflow = new Map<string, number>();
 
   constructor(private readonly o: UploadQueueOptions) {
     this.concurrency = o.concurrency ?? 2;
@@ -186,7 +213,10 @@ export class UploadQueue {
     try {
       for (const key of await this.o.store.keys(STORES.chunks, this.prefix())) {
         const ref = parseChunkKey(key);
-        if (ref) this.pending.set(key, ref);
+        if (ref) {
+          this.pending.set(key, ref);
+          this.trusted.add(key); // restored from IndexedDB: this identity was ours
+        }
       }
       await sweepStaleSessions(this.o.store, this.o.sessionId, Date.now(), this.o.staleAfterMs);
     } catch {
@@ -213,16 +243,26 @@ export class UploadQueue {
 
   async add(chunk: ChunkRef, data: ArrayBuffer): Promise<void> {
     const key = chunkKey(this.o.sessionId, chunk);
+    if (this.ended) {
+      // The session is over: nothing new is stored (privacy) and nothing can be sent.
+      this.drop(chunk);
+      this.report();
+      return;
+    }
     if (chunk.bytes > this.cap) {
       this.drop(chunk);
       return;
     }
-    if (!(await this.makeRoom(chunk))) {
+    const room = await this.makeRoom(chunk);
+    if (room === 'NO') {
       // Only protected first chunks are left and the cap is still exceeded: drop the incoming
       // chunk and say so; the buffer never grows past the cap silently.
       this.drop(chunk);
       this.report();
       return;
+    }
+    if (room === 'OVERFLOW') {
+      this.overflow.set(key, chunk.bytes);
     }
     let stored = false;
     const now = Date.now();
@@ -287,13 +327,21 @@ export class UploadQueue {
     this.droppedBytes += c.bytes;
   }
 
+  /** Bytes of first chunks above the cap that are still pending for a stream. */
+  private overflowOf(stream: RecordingStream): number {
+    let n = 0;
+    for (const [k, b] of this.overflow) if (this.pending.get(k)?.stream === stream) n += b;
+    return n;
+  }
+
   /**
    * Make room for `incoming` by dropping the OLDEST chunks that are not uploading. A segment's
-   * first chunk is never a victim (without it the whole segment is unplayable). Returns false when
-   * the cap cannot be met because only protected or uploading chunks remain; an incoming first
-   * chunk is then admitted anyway (flagged), any other is dropped by the caller.
+   * first chunk is never a victim (without it the whole segment is unplayable). When only
+   * protected or uploading chunks remain: an incoming first chunk is admitted above the cap
+   * ('OVERFLOW') while that stream's overflow stays within 16 MiB (ADR 0013 5.5), beyond that it
+   * is lost and reported ('NO'); an ordinary incoming chunk is 'NO'.
    */
-  private async makeRoom(incoming: ChunkRef): Promise<boolean> {
+  private async makeRoom(incoming: ChunkRef): Promise<'OK' | 'OVERFLOW' | 'NO'> {
     while (this.bytesPending() + incoming.bytes > this.cap) {
       // Oldest first: keys sort by stream, segment, seq.
       const victim = [...this.pending.keys()]
@@ -301,22 +349,28 @@ export class UploadQueue {
         .find((k) => !this.inFlight.has(k) && !this.pending.get(k)?.first);
       if (!victim) {
         if (incoming.first) {
+          if (this.overflowOf(incoming.stream) + incoming.bytes > OVERFLOW_PER_STREAM_BYTES) {
+            this.o.onSegmentLost?.({ stream: incoming.stream, segment: incoming.segment });
+            return 'NO';
+          }
           if (!this.capExceeded) {
             this.capExceeded = true;
             this.o.onCapExceeded?.();
           }
-          return true;
+          return 'OVERFLOW';
         }
-        return false;
+        return 'NO';
       }
       const ref = this.pending.get(victim);
       this.pending.delete(victim);
+      this.overflow.delete(victim);
       this.presigns.delete(victim);
+      this.trusted.delete(victim);
       this.dropMemory(victim);
       await this.o.store.delete(STORES.chunks, victim).catch(() => undefined);
       if (ref) this.drop(ref);
     }
-    return true;
+    return 'OK';
   }
 
   private backoffMs(attempt: number): number {
@@ -388,7 +442,15 @@ export class UploadQueue {
     this.probing = true;
     let ok: boolean;
     try {
-      ok = (await this.o.probe?.()) === true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<boolean>((res) => {
+        timer = setTimeout(() => res(false), this.o.probeTimeoutMs ?? 15_000);
+      });
+      try {
+        ok = (await Promise.race([this.o.probe?.() ?? Promise.resolve(false), timeout])) === true;
+      } finally {
+        clearTimeout(timer);
+      }
     } catch {
       ok = false;
     }
@@ -424,10 +486,19 @@ export class UploadQueue {
       if (!put) {
         // Lazy: one chunk, right before its PUT. Every presign request counts against the quota.
         const r = await this.o.api.presign(ref);
-        if (r.alreadyUploaded === true) alreadyUploaded = true;
-        else {
+        if (r.alreadyUploaded === true) {
+          if (!this.trusted.has(key)) {
+            // Never got a URL for this identity and did not restore it: the server confirmed
+            // ANOTHER chunk under it. Believing it would delete this one unseen.
+            throw new MediaApiError('SEQ_COLLISION', 'identity already confirmed', {
+              code: 'SEQ_CONFLICT',
+            });
+          }
+          alreadyUploaded = true;
+        } else {
           put = { ...r, expiresAtMs: r.expiresAtMs ?? Date.now() + 30_000 };
           this.presigns.set(key, put);
+          this.trusted.add(key);
         }
       }
       if (put && !alreadyUploaded) {
@@ -438,6 +509,10 @@ export class UploadQueue {
             ...put.headers, // exactly what the presign returned wins (it signs Content-Type)
           });
         } catch {
+          throw new MediaApiError('NETWORK', 'network');
+        }
+        if (status === 0) {
+          // Some PUT helpers answer 0 for a network error: offline, not a refused URL.
           throw new MediaApiError('NETWORK', 'network');
         }
         if (status === 412) {
@@ -454,6 +529,9 @@ export class UploadQueue {
       }
       this.presigns.delete(key);
       this.blocked.delete(key);
+      this.trusted.delete(key);
+      this.overflow.delete(key);
+      this.rekeys.delete(key);
       this.dropMemory(key);
       await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
       this.pending.delete(key);
@@ -500,10 +578,18 @@ export class UploadQueue {
         this.failures++;
         this.notBefore.set(key, backoff());
         return;
+      case 'SEQ_COLLISION':
+        if (ref) await this.onCollision(key, ref);
+        return;
       case 'QUOTA': {
-        // Never drop for a quota: wait for it, for the whole stream (every presign counts).
+        // Never drop for a quota: wait for it, for the whole stream (every presign counts). The
+        // server cap is per session, so waiting may never help: say so.
         const until = Date.now() + Math.max(1000, e.retryAfterMs ?? 30_000);
-        if (ref) this.streamHold.set(ref.stream, until);
+        if (ref) {
+          const first = !this.streamHold.has(ref.stream);
+          this.streamHold.set(ref.stream, until);
+          if (first) this.o.onQuota?.({ stream: ref.stream });
+        }
         this.notBefore.set(key, until);
         return;
       }
@@ -531,6 +617,8 @@ export class UploadQueue {
           return;
         }
         this.presigns.delete(key);
+        this.trusted.delete(key);
+        this.overflow.delete(key);
         this.dropMemory(key);
         await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
         if (ref) this.drop(ref);
@@ -539,10 +627,80 @@ export class UploadQueue {
     }
   }
 
+  /**
+   * The server confirmed another chunk under this identity. Give the chunk a fresh seq (moving its
+   * data) when `rekey` is available, at most 3 times; otherwise it is a conflict like a FATAL one
+   * (dropped and counted, or kept when it is a segment's first chunk).
+   */
+  private async onCollision(key: string, ref: ChunkRef): Promise<void> {
+    this.seqConflicts++;
+    this.o.onSeqConflict?.({ stream: ref.stream, segment: ref.segment });
+    const tries = (this.rekeys.get(key) ?? 0) + 1;
+    if (this.o.rekey && tries <= 3) {
+      try {
+        const seq = await this.o.rekey(ref, tries);
+        const next: ChunkRef = { ...ref, seq };
+        const nextKey = chunkKey(this.o.sessionId, next);
+        const mem = this.memory.get(key);
+        const stored: StoredChunk | undefined = mem
+          ? { data: mem }
+          : await this.o.store.get<StoredChunk>(STORES.chunks, key).catch(() => undefined);
+        if (stored) {
+          if (mem) {
+            this.memory.set(nextKey, mem);
+          } else {
+            // Write the new key before removing the old one: a crash in between keeps the data.
+            await this.o.store.put(STORES.chunks, nextKey, stored).catch(() => {
+              this.memory.set(nextKey, stored.data);
+              this.memBytes += stored.data.byteLength;
+            });
+          }
+          this.dropMemoryKeepBytes(key, mem !== undefined);
+          await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
+          this.pending.delete(key);
+          this.presigns.delete(key);
+          this.trusted.delete(key);
+          this.overflow.delete(key);
+          this.blocked.delete(key);
+          this.attempts.delete(key);
+          this.notBefore.delete(key);
+          this.rekeys.delete(key);
+          this.pending.set(nextKey, next);
+          this.rekeys.set(nextKey, tries);
+          this.rekeyed++;
+          return;
+        }
+      } catch {
+        // fall through to the conflict handling below
+      }
+    }
+    // No way to give it a new identity: a conflict. Never drop a segment's first chunk.
+    if (ref.first) {
+      this.blocked.add(key);
+      this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
+      this.notBefore.set(key, Date.now() + BLOCKED_RETRY_MS);
+      this.o.onChunkBlocked?.({ code: 'SEQ_CONFLICT', stream: ref.stream, segment: ref.segment });
+      return;
+    }
+    this.presigns.delete(key);
+    this.trusted.delete(key);
+    this.dropMemory(key);
+    await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
+    this.drop(ref);
+    this.pending.delete(key);
+  }
+
+  /** Remove the in-memory copy of `key` from the map; its bytes stay counted when moved to a new key. */
+  private dropMemoryKeepBytes(key: string, moved: boolean): void {
+    if (!moved) return;
+    this.memory.delete(key); // the new key holds the same buffer: the byte count stays
+  }
+
   /** Retry everything now, for the browser `online` event. */
   retryNow(): void {
     this.notBefore.clear();
-    this.streamHold.clear();
+    // streamHold is kept on purpose: a quota hold is not a connection problem, and the browser
+    // `online` event must not cause presigns that are certain to be refused.
     this.offline = false; // the browser says it is online again: try, do not wait for a probe
     this.offlineAttempts = 0;
     this.pump();
@@ -572,6 +730,8 @@ export class UploadQueue {
       quotaWait: [...this.streamHold.values()].some((t) => t > Date.now()),
       blockedChunks: this.blocked.size,
       capExceeded: this.capExceeded,
+      seqConflicts: this.seqConflicts,
+      rekeyedChunks: this.rekeyed,
     };
   }
 

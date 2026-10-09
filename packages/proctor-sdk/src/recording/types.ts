@@ -70,7 +70,15 @@ export type PresignResult = PresignedPut;
  * - FATAL: the server will never take this chunk (never applied to a segment's first chunk).
  */
 export type MediaApiErrorKind =
-  'NETWORK' | 'RETRY' | 'REPRESIGN' | 'REUPLOAD' | 'QUOTA' | 'ENDED' | 'FATAL';
+  | 'NETWORK'
+  | 'RETRY'
+  | 'REPRESIGN'
+  | 'REUPLOAD'
+  | 'QUOTA'
+  /** The server confirmed ANOTHER chunk under this identity (alreadyUploaded for a chunk never presigned). */
+  | 'SEQ_COLLISION'
+  | 'ENDED'
+  | 'FATAL';
 
 /**
  * Server side of the pipeline (ADR 0013 5.5): presign returns a PUT URL valid 60 s or
@@ -125,6 +133,10 @@ export interface RecorderHealth {
   blockedChunks: number;
   /** A first chunk was admitted above the buffer cap because only protected chunks remain. */
   capExceeded: boolean;
+  /** Chunks whose identity collided with a confirmed chunk (counters were behind). */
+  seqConflicts: number;
+  /** Of those, chunks that were given a fresh seq and kept. */
+  rekeyedChunks: number;
 }
 
 export type DeviceLossReason = 'TRACK_ENDED' | 'RECORDER_ERROR';

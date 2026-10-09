@@ -319,10 +319,18 @@ Done
 - `/dev/proctor` mock: PRESIGN_QUOTA_EXCEEDED after 140 presigns per stream (repeats count, a confirmed chunk is free), `If-None-Match: *` with 412 on a second PUT, segments up to 9999, the demo uses the real `createFetchMediaApi` (no seq bridge).
 
 For Frontend (apps/web `candidate-test/proctor/media-api.ts`, not touched here)
-- The SDK types stay compatible with your bridge (`ChunkRef` new fields are optional, `PresignedPut.headers` and `expiresAtMs` optional, `alreadyUploaded` is a flag on `PresignedPut`; `MediaApiError` kinds are a superset). You can now drop the `segment * 100000 + seq` bridge and the `ALREADY_UPLOADED_URL` marker and use `createFetchMediaApi` (or map the same codes) with the real `seq`; seed the pipeline with `pipeline.seedCounters(counters.media)` instead of writing `<sid>:segment:<STREAM>`.
+- The SDK types stay compatible with your bridge (`ChunkRef` new fields are optional, `PresignedPut.headers` and `expiresAtMs` optional, `alreadyUploaded` is a flag on `PresignedPut`; `MediaApiError` kinds are a superset). You can drop the `segment * 100000 + seq` bridge and the `ALREADY_UPLOADED_URL` marker and use `createFetchMediaApi` with the real `seq`; seed the pipeline with `pipeline.seedCounters(counters.media)` instead of writing `<sid>:segment:<STREAM>`.
+- Keep FU-FEB-36's guard in mind: the SDK queue now implements it itself. `alreadyUploaded` is believed only for chunks the queue got a URL for or restored from IndexedDB in `start()`; for any other chunk it counts as an identity collision (flag `recording-seq-conflict`, health `seqConflicts`), and the chunk gets a fresh seq (counter jumped past the confirmed ones) instead of being deleted unseen. If you keep your own `presigned` set, it is now redundant but harmless.
 
 Open
 - `probe` is not wired to the session heartbeat yet (heartbeat PR); until then one chunk is let through as the probe.
 - Transport hardening still has to purge or drain on `recording-ended` (the queue only stops and keeps the chunks).
 - The cap (`presignCap`) is cumulative per stream and session on the server; a very long session or many restarts can exhaust it. The SDK only waits (Retry-After), it cannot get more.
 - A new device restarts local counters at 0 until `seedCounters` is called with the `proctor-key` answer.
+
+### Review round 1 for PR #366 (media alignment)
+Fixed: B1 (alreadyUploaded trusted only for URL-given or restored chunks, else collision with a fresh seq or a counted drop; first chunk kept), B2 (first-chunk overflow above the cap bounded to 16 MiB per stream, then the segment is lost, counted and flagged `recording-segment-lost`), B3 (after SESSION_NOT_ACTIVE the pipeline stops all recorders and the queue refuses and counts new chunks, nothing is written to IndexedDB), S1 (timeout covers the response body), S2 (probe timeout 15 s), S3 (PUT status 0 is offline), S4 (`recording-quota` flag, the online event no longer clears a quota hold), S5 tests, S6 (finish docstring), S7 (unknown streams in `seedCounters` ignored, counters persisted on seed).
+
+Filed
+- S8 legacy 6-part chunk keys from an earlier SDK version load with `first: false` (their segment's first chunk loses the protection).
+- Nits: `schedule()` ignores an earlier target than the one already set; an IndexedDB read error in `upload()` removes the chunk from `pending` without a counted drop; the queue is single-use (document); a presign expiry should be `min(expiresAt, receivedAt + 60 s)` against client clock skew; read a `retryAfterSeconds` body field when the header is absent; a test comment says `0,1,2,3` for five chunks; `vi.unstubAllGlobals()` in afterEach of `media-align.test.ts`; a hard-coded stream list remains in the dev mock (`STREAMS`); the mock clamps segments at 9999 like the server.

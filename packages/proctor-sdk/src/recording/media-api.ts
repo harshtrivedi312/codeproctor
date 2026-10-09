@@ -60,28 +60,39 @@ async function errorFor(res: Response): Promise<MediaApiError> {
  */
 export function createFetchMediaApi(o: FetchMediaApiOptions): MediaApi {
   const f = o.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
-  const post = async (path: string, body: unknown): Promise<Response> => {
+  /**
+   * POST and read the answer under ONE timeout: the timer is cleared only after the body has been
+   * read, so a stalled body cannot hold an upload slot forever.
+   */
+  const call = async (path: string, body: unknown): Promise<unknown> => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), o.timeoutMs ?? 15_000);
-    let res: Response;
     try {
-      res = await f(`${o.baseUrl}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${o.getToken()}` },
-        body: JSON.stringify(body),
-        signal: ctl.signal,
-      });
-    } catch {
-      throw new MediaApiError('NETWORK', 'network');
+      let res: Response;
+      try {
+        res = await f(`${o.baseUrl}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${o.getToken()}` },
+          body: JSON.stringify(body),
+          signal: ctl.signal,
+        });
+      } catch {
+        throw new MediaApiError('NETWORK', 'network');
+      }
+      if (!res.ok) throw await errorFor(res);
+      try {
+        return (await res.json()) as unknown;
+      } catch {
+        if (ctl.signal.aborted) throw new MediaApiError('NETWORK', 'network');
+        return null; // an empty or non-JSON success body (confirm)
+      }
     } finally {
       clearTimeout(timer);
     }
-    if (res.ok) return res;
-    throw await errorFor(res);
   };
   return {
     async presign(c: ChunkRef): Promise<PresignResult> {
-      const res = await post(o.presignPath ?? '/candidate/session/media/presign', {
+      const j = (await call(o.presignPath ?? '/candidate/session/media/presign', {
         stream: c.stream,
         segment: c.segment,
         seq: c.seq,
@@ -90,15 +101,14 @@ export function createFetchMediaApi(o: FetchMediaApiOptions): MediaApi {
         contentType: contentTypeFor(c.stream),
         startedAt: new Date(c.startedAtMs ?? Date.now() - 10_000).toISOString(),
         durationMs: Math.min(60_000, Math.max(1, Math.round(c.durationMs ?? 10_000))),
-      });
-      const j = (await res.json()) as {
+      })) as {
         alreadyUploaded?: unknown;
         url?: unknown;
         headers?: unknown;
         expiresAt?: unknown;
-      };
-      if (j.alreadyUploaded === true) return { alreadyUploaded: true, url: '' };
-      if (typeof j.url !== 'string') throw new MediaApiError('RETRY', 'bad presign response');
+      } | null;
+      if (j?.alreadyUploaded === true) return { alreadyUploaded: true, url: '' };
+      if (typeof j?.url !== 'string') throw new MediaApiError('RETRY', 'bad presign response');
       const headers: Record<string, string> = {};
       if (j.headers && typeof j.headers === 'object') {
         for (const [k, v] of Object.entries(j.headers as Record<string, unknown>)) {
@@ -114,7 +124,7 @@ export function createFetchMediaApi(o: FetchMediaApiOptions): MediaApi {
       };
     },
     async confirm(c: ChunkRef): Promise<void> {
-      await post(o.confirmPath ?? '/candidate/session/media/confirm', {
+      await call(o.confirmPath ?? '/candidate/session/media/confirm', {
         stream: c.stream,
         segment: c.segment,
         seq: c.seq,
