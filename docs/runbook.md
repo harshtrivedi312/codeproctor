@@ -72,17 +72,19 @@ The erasure service (DB-06) calls, in this order:
 
 A zero-byte "folder" object at `<prefix>erasure-list/` (some consoles create one) makes every restore stop, by design: any key there that is not `<stamp>-<uuid>.json` could be an erasure. Delete the folder object.
 
-What the re-application does (FU-DBB-01, ADR 0004 9.7): the full fence for every session of each listed
+What the re-application does (FU-DBB-01, ADR 0004 10.6): the full fence for every session of each listed
 candidate (`ERASED`, open appeals `CLOSED_ERASED`, epoch raised, keys cleared), the data deletes, the
 accommodations reduced as the service does (ADR 0015 section 7), and the candidate row anonymised **at
 once**. This is ADR 0004 10.6 (accepted, D-83; it replaces the first sub-bullet of 9.7): the list does not
-record the stage, and an erasure request is a right already exercised. Not yet done (FU-DBB-32): the 10.6
-limits (a) active legal holds are respected (the off-database legal-hold list does not exist yet) and
-(b) a candidate in the 60-day hold window is re-applied as of the request (held sessions partially erased,
-anonymisation waits for the hold end). Until the legal-hold table exists no hold can be placed, so no
-held record can be erased by mistake today. The notice mail is not re-sent: the candidate row is already
-anonymised (the list records no notice; FU-DBB-31b). `erasure_requested_at` is set from the list when the
-backup did not have it, so the erasure sweep finishes the purge and the completion row.
+record the stage, and an erasure request is a right already exercised. Not built yet, both FU-DBB-32:
+(a) **active legal holds** are not respected on a restore (the legal-hold table and the off-database hold
+list do not exist yet, so no legal hold can be placed and none can be violated today); (b) **the review and
+appeal hold (10.2; its 60-day cap is not built either)** is not applied: a restore erases in full every
+listed candidate's sessions, including ones the live service would still be holding for a review or an
+appeal, and closes their appeals. Note which reviews and appeals were open before a restore. The notice
+mail is not sent: the candidate row is already anonymised and the list records no notice (10.6's "sent
+only if no notice was recorded" is unmet until FU-DBB-31b). `erasure_requested_at` is set from the list
+when the backup did not have it, so the erasure sweep finishes the purge and the completion row.
 
 ### Restore drill (run on a throwaway server)
 

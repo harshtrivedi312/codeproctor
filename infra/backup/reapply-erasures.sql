@@ -1,20 +1,17 @@
--- Re-applies erasures after a restore (ADR 0004 R-7 and 9.7, DB-07). restore.sh runs this in one
+-- Re-applies erasures after a restore (ADR 0004 R-7 and 10.6, DB-07). restore.sh runs this in one
 -- psql session after it created the temp table
 --   _reapply_erasures (candidate_id uuid, erased_at timestamptz)
 -- from the erasure list kept outside the backup. Idempotent, except that sessions.auth_epoch only ever increases.
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
--- Follows ADR 0004 9.7 and the erasure service (FU-DBB-01, FU-DBB-23): the FULL fence (every session
--- ERASED, open appeals CLOSED_ERASED, epoch bumped; the review/appeal hold is not applied on a
--- re-application, since the erasure was already requested), the accommodations reduced as the service
--- does (ADR 0015 section 7), and the candidate row anonymised AT ONCE for every listed candidate. The list
--- cannot say whether the service had anonymised the candidate before the backup (it marks an erasure
--- complete only after the whole run), so anonymising early is the privacy-safe reading of "only if it had
--- already happened". The request is recorded (erasure_requested_at) so the erasure sweep still finishes the
--- purge. Known limits: the notice mail that would have gone out at the end of the run is not sent
--- (the candidate row is already anonymised), and a candidate's pending erasure shows no ERASURE_* audit rows
--- (a restore wipes them).
+-- Follows ADR 0004 10.6 (accepted, D-83) and the erasure service (FU-DBB-01, FU-DBB-23): the list does not
+-- record the stage, so every listed candidate gets the full fence (every session ERASED, open appeals
+-- CLOSED_ERASED, epoch bumped), the accommodations reduced as the service does (ADR 0015 section 7), and the
+-- candidate row anonymised at once. The request is recorded (erasure_requested_at) so the erasure sweep still
+-- finishes the purge. Not built (FU-DBB-32): active legal holds and the review/appeal hold window of 10.6
+-- (a), (b) are not applied. Known limit (FU-DBB-31b): no completion notice is sent (the candidate row is
+-- already anonymised and the list records no notice), and a restore wipes the ERASURE_* audit rows.
 \set ON_ERROR_STOP on
 BEGIN;
 
