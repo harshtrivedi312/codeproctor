@@ -3,7 +3,7 @@ import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { downloadTextFile, formatRecoveryCode, recoveryCodesFileText } from './recovery-codes';
 
-/** The one-time recovery code list with a download button. Shared by forced enrollment and the Security page. */
+/** The one-time recovery code list with a download button. Used by the Security page. */
 export function RecoveryCodesPanel({
   email,
   codes,

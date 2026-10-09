@@ -40,7 +40,7 @@ describe('DB-04 seed (supports TC-001, TC-003; seeded data for FR-201, FR-804)',
     expect(await countRows(appClient)).toEqual(before);
   });
 
-  it('TC-001: all four seeded staff accounts sign in with the development password; roles needing 2FA are forced to enroll (TC-003)', async () => {
+  it('TC-001: all four seeded staff accounts sign in with the development password; every role signs in with the password alone since 2FA is optional (TC-003, FR-102)', async () => {
     const outcomes: Record<string, string> = {};
     for (const user of plan.content.staff) {
       const res = await request(h.app.getHttpServer())
@@ -50,10 +50,10 @@ describe('DB-04 seed (supports TC-001, TC-003; seeded data for FR-201, FR-804)',
       outcomes[user.role] = (res.body as Body).status;
     }
     expect(outcomes).toEqual({
-      SUPER_ADMIN: 'two_factor_enrollment_required',
+      SUPER_ADMIN: 'authenticated',
       RECRUITER: 'authenticated',
       AUTHOR: 'authenticated',
-      REVIEWER: 'two_factor_enrollment_required',
+      REVIEWER: 'authenticated',
     });
   });
 

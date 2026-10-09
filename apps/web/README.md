@@ -70,7 +70,6 @@ Routes (all under the `(staff)/admin` group; one `AuthProvider` in `admin/layout
 | ------------------------ | -------------------------------------------------------------------------------- |
 | `/admin/login`           | Email + password (FR-101), one neutral failed-sign-in message, "Forgot password" |
 | `/admin/2fa`             | 6-digit code or recovery code (FR-102)                                           |
-| `/admin/2fa/enroll`      | Forced enrollment: QR code, manual key, confirm, recovery codes                  |
 | `/admin/forgot-password` | Same confirmation for any email (FR-107)                                         |
 | `/admin/reset-password`  | Set a new password from the emailed link (FR-107, D-22)                          |
 | `/admin/set-password`    | Same page for a staff invite (ADR 0003 section 4)                                |
@@ -83,12 +82,12 @@ Try it: `pnpm dev:web:mock`, then open <http://localhost:3000/admin/login>. Mock
 | `recruiter@example.test` | `Recruiter-Pass-1`  | RECRUITER   | No 2FA, goes straight in                                                          |
 | `admin@example.test`     | `Admin-Pass-12345`  | SUPER_ADMIN | TOTP already set up: code `123456`, or recovery code `ABCD-EFGH-2345-6723` (once) |
 | `author@example.test`    | `Author-Pass-12345` | AUTHOR      | No 2FA, goes straight in                                                          |
-| `reviewer@example.test`  | `Reviewer-Pass-12`  | REVIEWER    | Not enrolled: forced to enroll, confirm with `123456`                             |
+| `reviewer@example.test`  | `Reviewer-Pass-12`  | REVIEWER    | No 2FA: goes straight in and sees the recommendation to set it up                 |
 
 Five wrong passwords for a known email lock it for 15 minutes (a sixth, correct attempt is refused). Wrong password, unknown email and locked account all get the same generic 401, and the login screen shows one message for all of them (FU-BE-22).
 Reset link: `/admin/reset-password#token=mock-reset-token` (works once; `mock-expired-token` is always
 refused). Invite link: `/admin/set-password#token=mock-invite-token`. The mock keeps its state
-(failed logins, enrolled users, used tokens, the fake refresh "cookie") in one mock-only cookie,
+(failed logins, users with 2FA on, used tokens, the fake refresh "cookie") in one mock-only cookie,
 `mock_auth_state`, so it survives reloads; clear cookies to reset. After a reset the mock still
 accepts the original passwords above.
 
@@ -99,8 +98,9 @@ How it works:
   (`POST /v1/auth/refresh`, one call at a time). `AuthProvider` runs it on first load. The API client
   retries a staff request once after a 401 and a refresh; if the refresh fails the user is sent to
   `/admin/login?reason=expired&next=...`.
-- The 2FA challenge token is held in `AuthProvider` state only; a reload goes back to login. No
-  access token is issued until enrollment is confirmed, so no staff page opens before that (TC-003).
+- The 2FA challenge token is held in `AuthProvider` state only; a reload goes back to login. Two-factor
+  sign-in is optional for every role (D-70): a user without it signs in with the password alone and
+  sees a dismissible recommendation until it is turned on (`user.twoFactorRecommended`).
 - Reset and invite links should carry the token in the fragment (`#token=...`) so it never reaches a
   server log; a `?token=` query is accepted and both are removed from the address bar on load. The
   page sends `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, and the token is only
@@ -114,13 +114,12 @@ auth page.
 
 ## Security page (FR-102, mock mode)
 
-`/admin/security` (user menu, "Security"), open to every staff role. Set up 2FA (QR, manual key, first
-code, one-time recovery codes with download), Disable 2FA (hidden for SUPER_ADMIN and REVIEWER, who
-get an explanation), and Regenerate recovery codes. Each action opens one shared dialog that first asks
+`/admin/security` (user menu, "Security"), open to every staff role. Set up 2FA (optional, recommended; "Skip for now" closes it) (QR, manual key, first
+code, one-time recovery codes with download), Disable 2FA (offered to every role), and Regenerate recovery codes. Each action opens one shared dialog that first asks
 for the current password and sends it as `currentPassword`. A wrong password is 403 `REAUTH_FAILED`
 and shows "Password incorrect" in the dialog without signing out. Try it as `recruiter@example.test`
 (`Recruiter-Pass-1`) or `author@example.test`: set up with code `123456`, then sign out and in again
-to see the code prompt, and disable. `admin@example.test` and an enrolled reviewer see Regenerate only.
+to see the code prompt, and disable. `admin@example.test` can disable it too.
 The mock keeps this state in the same `mock_auth_state` cookie. Code: `src/features/security`.
 Playwright: `e2e/security.spec.ts`.
 
@@ -150,7 +149,6 @@ prefill, a web-only placeholder. See `docs/followups/frontend.md` ("BE-04a/b/c s
 | ------------------------ | -------------------------------------------------------------------------------- |
 | `/admin/login`           | Email + password (FR-101), one neutral failed-sign-in message, "Forgot password" |
 | `/admin/2fa`             | 6-digit code or recovery code (FR-102)                                           |
-| `/admin/2fa/enroll`      | Forced enrollment: QR code, manual key, confirm, recovery codes                  |
 | `/admin/forgot-password` | Same confirmation for any email (FR-107)                                         |
 | `/admin/reset-password`  | Set a new password from the emailed link (FR-107, D-22)                          |
 | `/admin/set-password`    | Same page for a staff invite (ADR 0003 section 4)                                |
@@ -163,12 +161,12 @@ Try it: `pnpm dev:web:mock`, then open <http://localhost:3000/admin/login>. Mock
 | `recruiter@example.test` | `Recruiter-Pass-1`  | RECRUITER   | No 2FA, goes straight in                                                          |
 | `admin@example.test`     | `Admin-Pass-12345`  | SUPER_ADMIN | TOTP already set up: code `123456`, or recovery code `ABCD-EFGH-2345-6723` (once) |
 | `author@example.test`    | `Author-Pass-12345` | AUTHOR      | No 2FA, goes straight in                                                          |
-| `reviewer@example.test`  | `Reviewer-Pass-12`  | REVIEWER    | Not enrolled: forced to enroll, confirm with `123456`                             |
+| `reviewer@example.test`  | `Reviewer-Pass-12`  | REVIEWER    | No 2FA: goes straight in and sees the recommendation to set it up                 |
 
 Five wrong passwords for a known email lock it for 15 minutes (a sixth, correct attempt is refused). Wrong password, unknown email and locked account all get the same generic 401, and the login screen shows one message for all of them (FU-BE-22).
 Reset link: `/admin/reset-password#token=mock-reset-token` (works once; `mock-expired-token` is always
 refused). Invite link: `/admin/set-password#token=mock-invite-token`. The mock keeps its state
-(failed logins, enrolled users, used tokens, the fake refresh "cookie") in one mock-only cookie,
+(failed logins, users with 2FA on, used tokens, the fake refresh "cookie") in one mock-only cookie,
 `mock_auth_state`, so it survives reloads; clear cookies to reset. After a reset the mock still
 accepts the original passwords above.
 
@@ -179,8 +177,9 @@ How it works:
   (`POST /v1/auth/refresh`, one call at a time). `AuthProvider` runs it on first load. The API client
   retries a staff request once after a 401 and a refresh; if the refresh fails the user is sent to
   `/admin/login?reason=expired&next=...`.
-- The 2FA challenge token is held in `AuthProvider` state only; a reload goes back to login. No
-  access token is issued until enrollment is confirmed, so no staff page opens before that (TC-003).
+- The 2FA challenge token is held in `AuthProvider` state only; a reload goes back to login. Two-factor
+  sign-in is optional for every role (D-70): a user without it signs in with the password alone and
+  sees a dismissible recommendation until it is turned on (`user.twoFactorRecommended`).
 - Reset and invite links should carry the token in the fragment (`#token=...`) so it never reaches a
   server log; a `?token=` query is accepted and both are removed from the address bar on load. The
   page sends `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, and the token is only
@@ -194,13 +193,12 @@ auth page.
 
 ## Security page (FR-102, mock mode)
 
-`/admin/security` (user menu, "Security"), open to every staff role. Set up 2FA (QR, manual key, first
-code, one-time recovery codes with download), Disable 2FA (hidden for SUPER_ADMIN and REVIEWER, who
-get an explanation), and Regenerate recovery codes. Each action opens one shared dialog that first asks
+`/admin/security` (user menu, "Security"), open to every staff role. Set up 2FA (optional, recommended; "Skip for now" closes it) (QR, manual key, first
+code, one-time recovery codes with download), Disable 2FA (offered to every role), and Regenerate recovery codes. Each action opens one shared dialog that first asks
 for the current password and sends it as `currentPassword`. A wrong password is 403 `REAUTH_FAILED`
 and shows "Password incorrect" in the dialog without signing out. Try it as `recruiter@example.test`
 (`Recruiter-Pass-1`) or `author@example.test`: set up with code `123456`, then sign out and in again
-to see the code prompt, and disable. `admin@example.test` and an enrolled reviewer see Regenerate only.
+to see the code prompt, and disable. `admin@example.test` can disable it too.
 The mock keeps this state in the same `mock_auth_state` cookie. Code: `src/features/security`.
 Playwright: `e2e/security.spec.ts`.
 

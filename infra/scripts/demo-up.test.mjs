@@ -14,7 +14,7 @@ import {
   judgePort,
   parseDockerPs,
 } from './demo-ports.mjs';
-import { failureHint, planSteps, summary } from './demo-up.mjs';
+import { INVITE_NONE_EXIT, failureHint, judgeStep, planSteps, summary } from './demo-up.mjs';
 import { REPO_ROOT } from './test-support.mjs';
 
 const names = (steps) => steps.map((s) => s.name);
@@ -139,6 +139,34 @@ describe('port checks (local demo)', () => {
       },
       { name: 'web', configFiles: [], ports: [3000, 3000] },
     ]);
+  });
+
+  it('parses a published port range (MinIO: 9000-9001) into every port in it', () => {
+    const text =
+      'codeproctor-demo-minio-1\t/work/infra/docker-compose.yml\t127.0.0.1:9000-9001->9000-9001/tcp\n' +
+      'mailpit\t\t127.0.0.1:1025->1025/tcp, 127.0.0.1:8025->8025/tcp\n' +
+      'odd\t\t127.0.0.1:9005-9003->9005-9003/tcp\n';
+    const [minio, mailpit, odd] = parseDockerPs(text);
+    assert.deepEqual(minio.ports, [9000, 9001]);
+    assert.deepEqual(mailpit.ports, [1025, 8025]);
+    assert.deepEqual(odd.ports, [9005], 'a backwards range is not expanded');
+    const ourCompose = '/work/infra/docker-compose.yml';
+    const own = { ...minio, project: 'codeproctor-demo' };
+    for (const port of [9000, 9001]) {
+      const spec = DEMO_PORTS.find((p) => p.port === port);
+      assert.equal(
+        judgePort({
+          spec,
+          free: false,
+          containers: [own],
+          ourCompose,
+          ourAppUp: false,
+          project: 'codeproctor-demo',
+        }).ok,
+        true,
+        String(port),
+      );
+    }
   });
 
   it('DL-57: a stopped container of another checkout in the shared project is a clash even when its ports are free', () => {
@@ -352,6 +380,35 @@ describe('demo:up compose project (local demo)', () => {
         project: 'codeproctor-demo',
       }).ok,
       true,
+    );
+  });
+});
+
+describe('demo:up invitation step (local demo)', () => {
+  const invite = planSteps({ hasEnv: true, hasModules: true, startApps: true }).find((s) =>
+    s.cmd?.join(' ').includes('demo-invite'),
+  );
+
+  it('"no unused seeded invitation" is not fatal: the run goes on to the apps', () => {
+    assert.equal(judgeStep(invite, 0), 'ok');
+    assert.equal(judgeStep(invite, INVITE_NONE_EXIT), 'skip');
+    assert.equal(judgeStep(invite, 1), 'fail', 'a real failure still stops the run');
+    assert.equal(judgeStep(invite, null), 'fail');
+  });
+
+  it('only the invitation step may be skipped that way', () => {
+    const others = planSteps({ hasEnv: false, hasModules: false, startApps: true }).filter(
+      (s) => s.cmd && !s.cmd.join(' ').includes('demo-invite'),
+    );
+    for (const s of others) assert.equal(judgeStep(s, INVITE_NONE_EXIT), 'fail', s.name);
+  });
+
+  it('--no-invite leaves the step out and the rest of the plan unchanged', () => {
+    const without = planSteps({ hasEnv: true, hasModules: true, startApps: true, invite: false });
+    assert.ok(!names(without).some((n) => /real link/.test(n)));
+    assert.equal(
+      without.length,
+      planSteps({ hasEnv: true, hasModules: true, startApps: true }).length - 1,
     );
   });
 });

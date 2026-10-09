@@ -5,21 +5,19 @@ import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/features/admin/page-header';
 import { useAuth } from '@/features/auth/auth-provider';
 import { ActionDialog, type SecurityAction, type SecurityResult } from './action-dialog';
-import { isTwoFactorMandatory } from './schemas';
 
 const NOTICES: Record<SecurityResult, string> = {
   enabled: 'Two-factor sign-in is now on. Next time you sign in you will be asked for a code.',
   regenerated: 'New recovery codes are ready. Your old recovery codes no longer work.',
 };
 
-/** FR-102: set up, turn off and refresh recovery codes for TOTP. Open to every signed-in staff role. */
+/** FR-102: set up, turn off and refresh recovery codes for TOTP. Optional for every signed-in staff role. */
 export function SecurityPage(): React.JSX.Element {
-  const { user, role } = useAuth();
+  const { user } = useAuth();
   const [action, setAction] = React.useState<SecurityAction | null>(null);
   const [notice, setNotice] = React.useState<SecurityResult | null>(null);
   // The session user carries `totpEnabled`; undefined (an older session) is treated as unknown.
   const known = typeof user?.totpEnabled === 'boolean';
-  const mandatory = isTwoFactorMandatory(role);
   const enabled = user?.totpEnabled === true;
 
   return (
@@ -50,9 +48,7 @@ export function SecurityPage(): React.JSX.Element {
             <p className="text-sm" data-testid="two-factor-status">
               {enabled
                 ? 'Two-factor sign-in is on for your account.'
-                : mandatory
-                  ? 'Two-factor sign-in is off, but your role requires it. Set it up now.'
-                  : 'Two-factor sign-in is off. It is optional for your role, and adds protection if your password leaks.'}
+                : 'Two-factor sign-in is off. It is optional, and we recommend it: it adds protection if your password leaks.'}
             </p>
             <div className="flex flex-wrap gap-2">
               {!enabled ? (
@@ -65,18 +61,12 @@ export function SecurityPage(): React.JSX.Element {
                   Regenerate recovery codes
                 </Button>
               ) : null}
-              {enabled && !mandatory ? (
+              {enabled ? (
                 <Button type="button" variant="outline" onClick={() => setAction('disable')}>
                   Disable 2FA
                 </Button>
               ) : null}
             </div>
-            {mandatory ? (
-              <p className="text-sm text-muted-foreground" data-testid="two-factor-required">
-                Two-factor sign-in is required for your role, so it cannot be turned off. If you
-                lose your phone, use a recovery code, or ask a Super Admin for help.
-              </p>
-            ) : null}
           </>
         )}
       </section>

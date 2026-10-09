@@ -22,10 +22,13 @@ import { findProblems } from './local-db-guard.mjs';
 const NAME = 'demo-invite';
 const WEB_ORIGIN = 'http://localhost:3000';
 
-function fail(message) {
+function fail(message, code = 1) {
   console.error(`${NAME}: ${message}`);
-  process.exit(1);
+  process.exit(code);
 }
+
+/** Exit status for "nothing to hand out" (not an error): demo:up carries on when it sees this one. */
+const EXIT_NONE_INVITED = 3;
 
 if (process.argv.length > 2) fail('takes no arguments.');
 
@@ -86,7 +89,10 @@ try {
   );
   if (picked.rowCount === 0) {
     await client.query('ROLLBACK');
-    fail('no seeded invitation is still INVITED. Run pnpm db:seed on a fresh database first.');
+    fail(
+      'no seeded invitation is still INVITED. Run pnpm db:seed on a fresh database first.',
+      EXIT_NONE_INVITED,
+    );
   }
   const { id, email } = picked.rows[0];
   await client.query(

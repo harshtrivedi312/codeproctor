@@ -7,4 +7,6 @@ export interface ProctorBridge {
   enterFullscreen: () => Promise<boolean>;
   startRecorders: () => Promise<void>;
   clearNotice: () => void;
+  /** The candidate's own last-section finish is under way (on) or did not go through (off). */
+  setSubmitting: (on: boolean) => void;
 }

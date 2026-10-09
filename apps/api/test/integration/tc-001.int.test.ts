@@ -41,6 +41,7 @@ describe('TC-001 (FR-101): valid staff login', () => {
       role: 'RECRUITER',
       orgName: 'QA Org A',
       totpEnabled: false,
+      twoFactorRecommended: true,
     });
     const claims = claimsOf(body.session.accessToken);
     expect(claims.exp - claims.iat).toBe(15 * 60);

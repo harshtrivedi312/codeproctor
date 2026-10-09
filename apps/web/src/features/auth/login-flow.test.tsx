@@ -2,12 +2,19 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MOCK_USERS } from '@/mocks/auth-handlers';
+import { http, HttpResponse } from 'msw';
+import { MOCK_USERS, seedMockTwoFactor } from '@/mocks/auth-handlers';
+import { getAccessToken } from '@/lib/auth-token';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
 import { api } from '@/lib/api/client';
 import { LoginForm, SIGN_IN_FAILED_MESSAGE } from './login-form';
+import { useAuth } from './auth-provider';
+
+function Status() {
+  return <p data-testid="status">{useAuth().status}</p>;
+}
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
@@ -36,12 +43,55 @@ describe('LoginForm', () => {
     await waitFor(() => expect(router.push).toHaveBeenCalledWith('/admin/2fa?next=%2Fadmin'));
   });
 
-  it('TC-003 FR-102: reviewer without TOTP is sent to enrollment before any page', async () => {
-    renderWithAuth(<LoginForm />);
-    await signIn(MOCK_USERS.reviewer.email, MOCK_USERS.reviewer.password);
-    await waitFor(() =>
-      expect(router.push).toHaveBeenCalledWith('/admin/2fa/enroll?next=%2Fadmin'),
+  it.each([
+    ['reviewer', MOCK_USERS.reviewer],
+    ['recruiter', MOCK_USERS.recruiter],
+    ['author', MOCK_USERS.author],
+  ])(
+    'FR-102 TC-003 (D-70): a %s without TOTP signs in with a password alone, no enrolment step',
+    async (_name, user) => {
+      renderWithAuth(<LoginForm />);
+      await signIn(user.email, user.password);
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/admin'));
+      expect(router.push).not.toHaveBeenCalled();
+    },
+  );
+
+  it('FR-102: an unknown login status (two_factor_enrollment_required) shows the generic error, publishes no session, does not navigate', async () => {
+    server.use(
+      http.post('*/v1/auth/login', () =>
+        HttpResponse.json({
+          status: 'two_factor_enrollment_required',
+          challengeToken: 'mock-challenge-x',
+        }),
+      ),
     );
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Status />
+      </>,
+    );
+    await signIn(MOCK_USERS.reviewer.email, MOCK_USERS.reviewer.password);
+    expect(await screen.findByRole('alert')).toHaveTextContent('We could not sign you in');
+    expect(getAccessToken()).toBeNull();
+    expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated');
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it('FR-102: an enrolled user of another role (recruiter) gets the challenge and no session yet', async () => {
+    seedMockTwoFactor(MOCK_USERS.recruiter.email);
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Status />
+      </>,
+    );
+    await signIn(MOCK_USERS.recruiter.email, MOCK_USERS.recruiter.password);
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith('/admin/2fa?next=%2Fadmin'));
+    expect(screen.getByTestId('status')).toHaveTextContent('unauthenticated');
+    expect(getAccessToken()).toBeNull();
     expect(router.replace).not.toHaveBeenCalledWith('/admin');
   });
 

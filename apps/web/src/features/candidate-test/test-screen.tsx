@@ -116,6 +116,10 @@ export function TestScreen({
   const [advancing, setAdvancing] = React.useState(false);
   const [advanceNote, setAdvanceNote] = React.useState<string | null>(null);
 
+  // The server closed the session while the candidate's last-section close was still pending: it
+  // is submitted. Show the submitted page (which runs the finish) instead of waiting for a click.
+  const serverClosed = proctor?.state.serverClosed ?? false;
+
   const finishedNow =
     finishedSection !== null && finishedSection.sectionId === session.data?.section.id;
   React.useEffect(
@@ -150,7 +154,13 @@ export function TestScreen({
     );
   }
   const current = session.data;
-  if (finishedSection?.submitted) return <SubmittedPanel onShown={onSubmitted} />;
+  // Only the CURRENT section's pending close counts: an earlier section's stale entry must not show
+  // the submitted page while the candidate is still working in the last section.
+  const pendingHere =
+    finishedSection?.pending === true && finishedSection.sectionId === current.section.id;
+  if (finishedSection?.submitted || (serverClosed && pendingHere)) {
+    return <SubmittedPanel onShown={onSubmitted} />;
+  }
   const finishedHere = finishedSection?.sectionId === current.section.id ? finishedSection : null;
 
   const advance = async () => {
@@ -449,12 +459,21 @@ function TestScreenInner({
   const finishSection = async () => {
     setFinishing(true);
     setFinishError(null);
+    // The last section's finish is the candidate's own submit: from the request on, the server's
+    // "not active" (the session is SUBMITTED once the close lands) must not end the test as "no
+    // longer running" or purge the recording. Turned off again if the finish did not go through.
+    const isLastSection = section.position === section.totalSections;
+    let finishedOk = false;
+    if (isLastSection) proctor?.setSubmitting(true);
     const markFinished = (
       nextSectionId: string | null,
       next?: Schemas['CandidateSession'],
       submitted = false,
       pending = false,
     ) => {
+      finishedOk = true;
+      // Another section opened: this was not the end of the test after all.
+      if (isLastSection && !submitted && !pending) proctor?.setSubmitting(false);
       onFinished({
         sectionId: section.id,
         title: section.title,
@@ -534,6 +553,7 @@ function TestScreenInner({
         'We could not reach the server, so the section is not finished. Check your connection and try again.',
       );
     } finally {
+      if (isLastSection && !finishedOk) proctor?.setSubmitting(false);
       setFinishing(false);
     }
   };

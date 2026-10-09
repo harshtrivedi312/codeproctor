@@ -414,7 +414,7 @@ export async function signInWithTotp(
 
 /**
  * The session user of a successful auth response. The contract puts it under `session` for login
- * and enroll/confirm ('nested') and at the top level for 2fa/verify and refresh ('flat').
+ * ('nested') and at the top level for 2fa/verify and refresh ('flat').
  */
 export function sessionUser(body: unknown, shape: 'nested' | 'flat'): Record<string, unknown> {
   const b = body as { session?: { user?: unknown }; user?: unknown };

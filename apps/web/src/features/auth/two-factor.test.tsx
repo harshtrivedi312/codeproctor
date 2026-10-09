@@ -1,21 +1,12 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  MOCK_ADMIN_RECOVERY_CODE,
-  MOCK_RECOVERY_CODES,
-  MOCK_TOTP_CODE,
-  MOCK_USERS,
-} from '@/mocks/auth-handlers';
-import { getAccessToken } from '@/lib/auth-token';
-import { apiBaseUrl } from '@/lib/env';
+import { MOCK_ADMIN_RECOVERY_CODE, MOCK_TOTP_CODE, MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
 import { http, HttpResponse } from 'msw';
 import { LoginForm } from './login-form';
-import { TwoFactorEnroll } from './two-factor-enroll';
 import { TwoFactorVerifyForm } from './two-factor-verify-form';
 import { formatRecoveryCode, recoveryCodesFileText } from './recovery-codes';
 
@@ -31,11 +22,11 @@ afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
 
 /** Signs in through the real login form so the provider holds the pending challenge, then swaps screens. */
-function Flow({ second }: { second: 'verify' | 'enroll' }) {
+function Flow({ second }: { second: 'verify' }) {
   return (
     <>
       <LoginForm />
-      {second === 'verify' ? <TwoFactorVerifyForm /> : <TwoFactorEnroll />}
+      {second === 'verify' ? <TwoFactorVerifyForm /> : null}
     </>
   );
 }
@@ -122,121 +113,6 @@ describe('TwoFactorVerifyForm', () => {
   it('FR-102: without a pending sign-in step the page returns to login', async () => {
     renderWithAuth(<TwoFactorVerifyForm />);
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/admin/login'));
-  });
-});
-
-describe('TwoFactorEnroll', () => {
-  it('TC-003 FR-102: shows QR code and manual key, then recovery codes, then continues only after saving', async () => {
-    renderWithAuth(<Flow second="enroll" />);
-    const u = await loginAs(MOCK_USERS.reviewer);
-    expect(await screen.findByAltText(/QR code/)).toBeInTheDocument();
-    expect(screen.getByTestId('manual-key')).toHaveTextContent('JBSW Y3DP EHPK 3PXP');
-
-    // No token yet: nothing signed in before enrollment is confirmed.
-    expect(router.replace).not.toHaveBeenCalledWith('/admin');
-
-    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    const list = await screen.findByTestId('recovery-codes');
-    expect(list.querySelectorAll('li')).toHaveLength(10);
-    expect(list).toHaveTextContent(formatRecoveryCode(MOCK_RECOVERY_CODES[0]!));
-
-    const cont = screen.getByRole('button', { name: 'Continue to CodeProctor' });
-    expect(cont).toBeDisabled();
-    await u.click(screen.getByLabelText(/I have saved these recovery codes/));
-    await u.click(cont);
-    expect(router.replace).toHaveBeenCalledWith('/admin');
-  });
-
-  it('FR-102: recovery codes can be downloaded as a text file', async () => {
-    const createObjectURL = vi.fn(() => 'blob:x');
-    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() }));
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, 'click')
-      .mockImplementation(() => undefined);
-    renderWithAuth(<Flow second="enroll" />);
-    const u = await loginAs(MOCK_USERS.reviewer);
-    await u.type(await screen.findByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    await u.click(await screen.findByRole('button', { name: 'Download recovery codes' }));
-    expect(click).toHaveBeenCalled();
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
-    click.mockRestore();
-  });
-
-  it('FR-102 TC-003 (#184): a 401 from enroll/start sends the user to sign-in with the expired notice, clears the challenge and publishes no session', async () => {
-    server.use(
-      http.post('*/v1/auth/2fa/enroll/start', () =>
-        HttpResponse.json(
-          {
-            type: 'about:blank',
-            title: 'Unauthorized',
-            status: 401,
-            detail: 'Your sign-in has expired. Sign in again.',
-            instance: '/x',
-            traceId: 't',
-          },
-          { status: 401 },
-        ),
-      ),
-    );
-    const calls: string[] = [];
-    server.events.on('request:start', ({ request }) => calls.push(new URL(request.url).pathname));
-    renderWithAuth(<Flow second="enroll" />);
-    // The provider's own silent refresh at mount is not what is being watched.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    calls.length = 0;
-    router.replace.mockClear();
-    await loginAs(MOCK_USERS.reviewer);
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=expired'));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    // The pending-challenge effect must not replace the reason with plain /admin/login.
-    expect(router.replace).toHaveBeenLastCalledWith('/admin/login?reason=expired');
-    expect(screen.queryByText('We could not start set-up')).not.toBeInTheDocument();
-    expect(getAccessToken()).toBeNull();
-    expect(calls.some((c) => /\/auth\/(refresh|logout)$/.test(c))).toBe(false);
-    server.events.removeAllListeners();
-  });
-
-  it('FR-102: any other failure of enroll/start keeps the set-up error', async () => {
-    server.use(
-      http.post('*/v1/auth/2fa/enroll/start', () =>
-        HttpResponse.json({ detail: 'down' }, { status: 500 }),
-      ),
-    );
-    renderWithAuth(<Flow second="enroll" />);
-    router.replace.mockClear();
-    await loginAs(MOCK_USERS.reviewer);
-    expect(await screen.findByText('We could not start set-up')).toBeInTheDocument();
-    expect(router.replace).not.toHaveBeenCalledWith('/admin/login?reason=expired');
-  });
-
-  it('FR-102 TC-003: the mock answers enroll/start for an unknown challenge with the 401 problem body', async () => {
-    const res = await fetch(`${apiBaseUrl}/v1/auth/2fa/enroll/start`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ challengeToken: 'stale' }),
-    });
-    expect(res.status).toBe(401);
-    expect(await res.json()).toMatchObject({
-      status: 401,
-      detail: 'Your sign-in has expired. Sign in again.',
-    });
-  });
-
-  it('FR-102: a wrong first code asks for a fresh one', async () => {
-    renderWithAuth(<Flow second="enroll" />);
-    const u = await loginAs(MOCK_USERS.reviewer);
-    await u.type(await screen.findByLabelText('6-digit code'), '999999');
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    expect(await screen.findByText('That code did not match')).toBeInTheDocument();
-  });
-
-  it('WCAG 2.1 AA: enrollment page has no axe violations', async () => {
-    const { container } = renderWithAuth(<Flow second="enroll" />);
-    await loginAs(MOCK_USERS.reviewer);
-    await screen.findByAltText(/QR code/);
-    expect(await axe(container)).toHaveNoViolations();
   });
 });
 
