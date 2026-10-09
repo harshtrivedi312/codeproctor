@@ -58,6 +58,11 @@ export const SYSTEM_SCOPE_REASONS = {
     'loads its target in scope and treats a miss as a poison job (ADR 0001 C-1, ADR 0006 8.4).',
   RETENTION_ERASURE:
     'Retention and erasure sweeps (FR-704, NFR-05): they select sessions of every org by date.',
+  SCHEDULE_CAPACITY:
+    'The cross-organisation read of scheduled_windows (ADR 0017 section 4.7, C-53): capacity ' +
+    '(FR-306), the stale-ceiling rule and the monthly instance-hours. findMany, count, aggregate ' +
+    'and groupBy of ScheduledWindow only, naming starts_at, ends_at, ceiling_at, status and kind ' +
+    'only (schedule-capacity.ts); no other model, no write. Every write stays org-scoped.',
 } as const;
 
 export type SystemScopeReason = keyof typeof SYSTEM_SCOPE_REASONS;

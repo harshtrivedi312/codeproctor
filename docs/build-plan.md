@@ -684,3 +684,157 @@ Follow-up files (CLAUDE.md rules 2 and 17): each track keeps one file, `docs/fol
 Single-runner rules: the Database A session is the only one that starts or stops the local Docker stack (rule 14), and the Frontend A session is the only one that runs the web dev server (rule 15). The B sessions use Testcontainers or throwaway containers, and builds and tests rather than the dev server.
 
 Shared-file rule: `apps/api/src/app.module.ts`, `apps/worker/src/worker/app.py` and `apps/web/src/lib/**` have one owner (Backend A, Integrity A, Frontend A). The second session adds only its own module registration line or router include, in a small commit announced to the owner, and resolves conflicts by keeping both sides.
+
+## 12. Production readiness plan (after the owner's instruction D-80, 2026-10-09; a Delivery Lead plan, not yet approved by the owner)
+
+The owner: "demo looks good. go ahead and get this project finished and ready for production." The demo sprint (D-67) is over. This plan is compiled from each track's production inventory (2026-10-09). Sizes: S under a day, M 1 to 3 days, L 3 to 5 days, XL more than a week. All estimates are rough.
+
+**The path to production.** The BRD puts a pilot before production. So "ready for production" means four stages:
+1. finish the product;
+2. clear the pilot entry blockers (B-05) and stand up the pilot stack;
+3. run the pilot;
+4. pass the pilot exit review and the legal review, then decide on and build the production layout.
+
+Production itself has no ADR yet (see R6); it needs owner decisions on cost and availability.
+
+### R1. Finish the end-to-end candidate flow (priority 1, in flight)
+
+The local run found that the web and the API were built against mocks and don't meet on about ten candidate and reviewer routes (DL-71).
+
+| Item | Track | Size | State |
+| --- | --- | --- | --- |
+| POST /candidate/session/system-check | Backend B | M | #340, in review |
+| Candidate render projection (GET /candidate/session/test, GET /candidate/questions/:id) | Backend B with Frontend B | L | Building |
+| Accommodations GET, practice GET and run (LOCAL_STUB) | Backend A | M | #339 and #342, with the Frontend B stub-rendering pair |
+| Web /t#token entry route | Frontend B | S | Building |
+| Upload URLs: http allowed only for localhost in a development build | Frontend B | S | Queued |
+| Identity step moved to the canonical /identity/* routes | Frontend B | M | Queued |
+| Phone step doesn't block when there's no side camera | Frontend B | S | Queued |
+| Keystroke batches (SDK and Monaco binding) | Proctor SDK and Frontend B | S | #345, in review |
+| The smoke run D-01..D-13 passes on the local stack | QA A | S | D-01..D-04 pass |
+
+### R2. Finish the product (features still unbuilt against the FSD)
+
+| Item | Track | Size |
+| --- | --- | --- |
+| BE-13 manual scoring and verdict (PATCH answers/:sqid, POST verdict) | Backend A | M-L, building |
+| D-76: email the account holder when 2FA is turned on, off or reset | Backend A | M, building |
+| FR-306/FR-303 slot-based invitations (#261 scheduled_windows, then slots, SLOT_CAPACITY, the 50-hour budget and its 30-hour alert) | Database A, then Backend A | L |
+| Invitation resend, revoke and bulk (FU-BE-166/167/243); accommodations on invitations (ADR 0015, FR-305) | Backend A | M + L |
+| Candidate token renewal route (ADR 0013) | Backend A | M |
+| BE-08c identity re-check every 2 minutes (FR-606, C-34) | Integrity B with Integrity A, Frontend B and the SDK | M-L |
+| BE-12 worker integration and risk scoring wired to sessions | Integrity A | to be confirmed by Integrity A |
+| BE-14 live gateway, reports and webhooks | Backend A | to be confirmed |
+| FE-11 review workspace (flags, synced players, keystroke replay, code diff, identity panel) | Frontend A | XL |
+| FE-12 live proctoring grid (needs BE-14) | Frontend A | XL |
+| FE-13 dashboard, reports and the final unmock sweep | Frontend A | L-XL |
+| Slot picker and review-window schedule view (C-46) | Frontend A | M |
+| Users page: unlock, locked alert, resend invite | Frontend A | M |
+| ADR 0013 transport conformance in the SDK (key epochs, 409 handling without evidence loss, server sequence counters, finish timeouts) | Proctor SDK | L |
+| Models: models.lock pinning, licence gate, same-origin model path | Proctor SDK with Integrity B | M |
+| ADR 0012 generated-contract sync (replace the hand-written openapi.yaml and schema.d.ts) | Frontend A with the hub | L |
+| Integration pass of every staff screen against the real API (Playwright on the local stack) | Frontend A with QA A | M-L |
+
+### R3. Pilot entry blockers (B-05 and the engineering pre-pilot list)
+
+Engineering (security items are blockers under rule 3):
+- **CS-4 conformance:** the P-24 interim exception ends. That needs FU-BEB-15/66 and the CS-4 PR 2 grants for BE-11 (D-68). Owner: Backend B.
+- **Identity jobs onto SessionJobProcessor:** FU-INB-42, 29 and 43a. Owners: Integrity B, with a helper from Backend B.
+- **The PAUSED→PAUSED edge and the stale pause_reasons write gate:** owner Backend B. Concurrent proctor batches leave a stale pause (BE-10 S2): owner Integrity A.
+- **Erasure integrity:** FU-DBB-02, FU-DBB-01/23 and FU-DBB-27 (Database B). The waiver after images exist: FU-INB-30/34 (Database A, Backend A).
+- **An invitation lost on an unknown commit can't be fixed:** FU-BE-246 (Backend A, plus the hub's contract text).
+- **The demo consent refused outside development:** done, #332 (D-79).
+- **Pilot S3:** the S3_REGION pin and the refusal of static keys (deploy).
+- **Face-match threshold:** INT-01, with the owner (P-14, volunteers); the landmarker download P-13; the AuraFace licence gate (Integrity B, owner).
+- **Worker image:** amd64, pinned, healthcheck, key-rotation runbook, and the WORKER_* go-live check FU-INB-36 (Integrity B, deploy).
+
+Compliance (D-77: the compliance review session drafts, the owner decides, a lawyer confirms where noted):
+- **Owner decisions:**
+  - C-36..C-42 and the C-02 amendment;
+  - OQ-9..OQ-15 and OQ-18..OQ-21;
+  - California retention (S4);
+  - EU/UK representatives or a US-only start (S9);
+  - "own hiring only" (M1).
+- **Consent v0.5:** B1..B6 plus the code prerequisites for withdrawal, the alternative path and review of every session. Owner approves; lawyer on BIPA and Art. 9.
+- **Retention schedule v0.4:** includes the /retention page. Database and Backend make DB-06 match it.
+- **DPIA v0.4:** EU/UK. Lawyer on Art. 36 and the AI-law positions.
+- **Processors and DPAs:** the owner signs the AWS and Cloudflare DPAs with SCCs and checks the DPF list.
+- **Notices and policy:** the privacy notice, the CCPA notice at collection, and the Colorado biometric policy and incident plan.
+- **AI-use notice:** in the invitation email and job postings.
+- **Real details:** the privacy@ address, the company address and the recruiter fields.
+- **Reviewers:** staffed and trained (C-28, R-21).
+
+### R4. Pilot stack (DEP-01, DEP-03; the owner performs every AWS action, C-63)
+
+- **DEP-01, #239, reshaped:**
+  - OIDC trust from main only;
+  - SSM approved-release deny;
+  - Terraform in infra/terraform/pilot;
+  - bootstrap state;
+  - the CloudShell runbook;
+  - release summary and SNS;
+  - 443-only access, with Judge0 private.
+
+  Code by Backend A (XL); needs the hub's ADR 0017 §6/§7 text.
+- **Pilot backups:** the scheduler and runbook (Database B, S). Then the owner runs the first backup and a restore drill on a throwaway instance.
+- **SES sending domain** (DKIM, SPF, DMARC), production access and a server-only role (owner).
+- **CloudWatch alarms** from FU-BE-191/213: Backend A writes the Terraform, the owner applies it.
+- **Worker deployment and a Linux x86 Judge0:** Integrity B (the worker image) and Backend A (Judge0) write the code, the owner applies it.
+
+### R5. Assurance
+
+| Item | Track | Size |
+| --- | --- | --- |
+| Test matrix: refresh from real runs, then the remaining P1 TCs (6 of 87 are Verified today) | QA A | 0.5 day + 4-6 days |
+| Candidate-flow Playwright spec | QA A | 2 days |
+| Load: k6 TC-090/091 and the TC-105 five-candidate pilot gate (owner-run, about 3 hours, about $0.30) | QA A and QA B | 3 days |
+| Accessibility manual passes (NVDA, VoiceOver, M-01..M-06) | QA B with testers | 2 days |
+| OWASP ZAP baseline run and triage, then an authenticated scan | QA B | 1 day+ |
+| Red team RT-01..RT-74, rounds 1-3 and the report (synthetic faces, IDs and voice only) | QA B, Integrity A | about 5 days |
+| Real-browser verification of the proctor SDK (Chrome/Edge matrix, offline run TC-063, CPU budget) | owner or a tester with a webcam, plus the SDK | M |
+| Professional legal review pack (C-15, R-17) | compliance review session drafts, external lawyer | S + L |
+
+### R6. Production (after the pilot exit review)
+
+There's no production ADR. ADR 0017 is the pilot layout, and architecture.md leaves production "unchanged until the owner decides". The hub drafts a production ADR once the owner sets the cost and availability targets: layout and HA, RPO and RTO, KMS and key rotation for SESSION_KEY_ENC, observability and alerting, capacity beyond 5 candidates, and release and rollback at scale. Also before production:
+- the host-application sign-in change request (D-78, #343), which brings DPIA R1 down from High;
+- the external legal review;
+- the pilot exit review (D-05: error rates by group, reviewer workload).
+
+### Owner checklist (only the owner can do these)
+
+1. **Decisions:**
+   - the batch above in R3 (compliance);
+   - the hub's #343 (FR-402, the candidate-permission amendment, the host sign-in change request and its 5 questions);
+   - #268, the CLAUDE.md rule 7 text;
+   - the pinned-ADR amendment batch (the hub drafts it as one PR);
+   - P-39;
+   - the ADR 0018 presigned POST against ADR 0001 PUT-only;
+   - OQ-22;
+   - whether C-65 also removes R2;
+   - the v1 scope of review features (flags, synced playback, keystroke replay);
+   - bulk invitations in scope or not;
+   - the erase-confirmation wording (FU-FEB-14).
+2. **Models:**
+   - P-13 is approved (D-74); Integrity B needs the same yes typed in its own window before it downloads;
+   - the AuraFace licence decision;
+   - P-14, where INT-01 tuning runs, and the volunteer call (C-11, C-20).
+3. **AWS (console and CloudShell, after the reviewed code lands):**
+   - the account and region decisions;
+   - the pilot backup bucket (versioned, SSE, public access blocked);
+   - the instance role limited to that bucket's db/ prefix;
+   - confirm S3_REGION and that no static keys are set;
+   - apply Terraform;
+   - SES domain and production access;
+   - delete the `staging` GitHub environment.
+4. **Legal:** sign the AWS and Cloudflare DPAs; engage a qualified lawyer for the review pack; provide the real privacy@ address, the company address and the recruiter fields.
+5. **People:** staff and train reviewers; a tester with desktop Chrome/Edge and a webcam for the real-browser SDK pass and the manual accessibility passes.
+
+### Rough timeline
+
+- **R1:** 1 to 2 days.
+- **R2 and the engineering part of R3:** in parallel across tracks, about 2 to 3 weeks.
+- **R4 code:** about 1 to 2 weeks. The owner's AWS steps can run alongside it once the code is reviewed.
+- **R5:** starts now on the local stack; the pilot-only gates follow R4.
+- **Pilot start:** depends most on the owner's compliance decisions, the DPAs, INT-01 volunteers and the lawyer. The engineering side aims to be pilot-ready in about 4 to 5 weeks.
+- **Production:** follows the pilot and its exit review.
