@@ -48,6 +48,12 @@ export interface ProctorUiState {
   shared: boolean;
   /** Why the test cannot go on: the session is over, or a new code is needed. */
   endedBecause: null | 'not-active' | 'reauth' | 'key';
+  /**
+   * The server said "not active" while the candidate's own last-section submit was under way: the
+   * session is submitted. Nothing was purged or ended; the test screen moves to its submitted page,
+   * which then calls finish().
+   */
+  serverClosed: boolean;
   /** A blocked action to tell the candidate about (paste, drop, shortcut), cleared by the UI. */
   notice: null | { kind: NoticeKind; at: number };
   /** Recording that did not start (camera or microphone denied, recording not supported). */
@@ -63,6 +69,7 @@ export const initialProctorState: ProctorUiState = {
   online: true,
   shared: false,
   endedBecause: null,
+  serverClosed: false,
   notice: null,
   unavailable: [],
 };
@@ -223,6 +230,10 @@ export class ProctorController {
   private dropping = false;
   private stopped = false;
   private finishing = false;
+  /** The candidate's own last-section finish is in flight or accepted: "not active" is the normal end. */
+  private submitting = false;
+  /** A "not active" met while submitting; acted on as soon as the submit settles without a submit. */
+  private notActiveWhileSubmitting = false;
   private torn = false;
 
   constructor(private readonly o: ProctorControllerOptions) {}
@@ -244,9 +255,36 @@ export class ProctorController {
     this.set({ notice: null });
   }
 
+  /**
+   * Called by the test screen around the candidate's own last-section finish (on before the request,
+   * off again if the finish did not go through, or when another section opens). While it is on, the
+   * server's "not active" (the session is SUBMITTED once the close lands) is the normal end of the
+   * candidate's own submit, not a reason to purge and show "no longer running": it is remembered
+   * (state.serverClosed) and the test screen moves to its submitted page, which calls finish().
+   * Turning it off acts on a remembered "not active" at once, so a real time-out or proctor end
+   * is never swallowed for good.
+   */
+  setSubmitting(on: boolean): void {
+    this.submitting = on;
+    if (!on && this.notActiveWhileSubmitting) {
+      this.notActiveWhileSubmitting = false;
+      // end() only acts if the test is still running. If finish() already started (the submitted
+      // page is up) the page must not be withdrawn, so serverClosed stays as it is.
+      if (this.finishing || this.stopped || this.state.endedBecause) return;
+      this.set({ serverClosed: false });
+      this.end('not-active', true);
+    }
+  }
+
   private end(because: NonNullable<ProctorUiState['endedBecause']>, purge: boolean): void {
     // While finishing (or already stopped) the server's "not active" is the normal end.
     if (this.state.endedBecause || this.stopped || this.finishing) return;
+    // The same holds from the moment the candidate submits their last section: remember it.
+    if (this.submitting && because === 'not-active') {
+      this.notActiveWhileSubmitting = true;
+      this.set({ serverClosed: true });
+      return;
+    }
     this.set({ phase: 'ended', endedBecause: because });
     void this.teardown({ purge });
   }
@@ -320,7 +358,9 @@ export class ProctorController {
     });
     this.session.on('connection', (c) => {
       // A failed heartbeat only means "offline" if the session is still alive.
-      if (!this.state.endedBecause) this.set({ online: c.online });
+      // (Also not while a submit is under way: a "not active" heartbeat is not "offline".)
+      if (!this.state.endedBecause && !this.notActiveWhileSubmitting)
+        this.set({ online: c.online });
     });
     this.session.on('capability', (f) => this.noteCapability(f.id, f.status));
     this.session.on('event', (e) => this.onEvent(e));

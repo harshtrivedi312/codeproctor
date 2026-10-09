@@ -43,12 +43,8 @@ async function signIn(page: Page, role: Role): Promise<void> {
     await page.getByLabel(/Authenticator code/).fill(TOTP);
     await page.getByRole('button', { name: 'Verify and sign in' }).click();
   }
-  if (role === 'REVIEWER') {
-    await page.getByLabel('6-digit code').fill(TOTP);
-    await page.getByRole('button', { name: 'Confirm and continue' }).click();
-    await page.getByLabel(/I have saved these recovery codes/).check();
-    await page.getByRole('button', { name: 'Continue to CodeProctor' }).click();
-  }
+  // Two-factor sign-in is optional for every role (owner decision, D-67): a REVIEWER without TOTP
+  // gets a full session straight after the password. There is no forced enrolment screen any more.
   await expect(page.getByRole('navigation', { name: 'Main' })).toBeVisible();
 }
 

@@ -75,9 +75,17 @@ export function parseDockerPs(text) {
   for (const line of text.split('\n')) {
     const [name, configFiles = '', ports = ''] = line.split('\t');
     if (!name) continue;
-    const published = [...ports.matchAll(/(?:\d+\.\d+\.\d+\.\d+|\[::\]|::):(\d+)->/g)].map((m) =>
-      Number(m[1]),
-    );
+    // `127.0.0.1:5432->5432/tcp`, or a range `127.0.0.1:9000-9001->9000-9001/tcp` (docker joins
+    // consecutive ports of one container into one entry).
+    const published = [
+      ...ports.matchAll(/(?:\d+\.\d+\.\d+\.\d+|\[::\]|::):(\d+)(?:-(\d+))?->/g),
+    ].flatMap((m) => {
+      const from = Number(m[1]);
+      const to = m[2] === undefined ? from : Number(m[2]);
+      return to >= from && to - from < 1000
+        ? Array.from({ length: to - from + 1 }, (_, k) => from + k)
+        : [from];
+    });
     out.push({ name, configFiles: configFiles.split(',').filter(Boolean), ports: published });
   }
   return out;

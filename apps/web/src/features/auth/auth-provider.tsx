@@ -31,13 +31,29 @@ export type StaffRole = Schemas['StaffRole'];
 
 /** Second login step waiting for a code. Held in memory only; a page reload starts again at login. */
 export interface PendingChallenge {
-  kind: 'verify' | 'enroll';
+  kind: 'verify';
   challengeToken: string;
 }
 
 export const LOGIN_PATH = '/admin/login';
 /** Shown once on the login page after turning 2FA off. A fixed word, nothing about the user. */
 export const TWO_FACTOR_OFF_LOGIN_PATH = '/admin/login?reason=two-factor-off';
+/** Shown once after 2FA was turned on: the server ended every session, so sign in again with a code. */
+export const TWO_FACTOR_ON_LOGIN_PATH = '/admin/login?reason=two-factor-on';
+/** Set-up confirm had an unknown outcome: the notice does not claim whether 2FA is on. */
+export const TWO_FACTOR_UNCONFIRMED_LOGIN_PATH = '/admin/login?reason=two-factor-unconfirmed';
+
+/**
+ * Why the user is signed out after a two-factor change. The server has ended (or may have ended)
+ * every session; the web still forgets the session first and sends one POST /auth/logout, where a
+ * 401 counts as confirmed.
+ */
+export type SessionRevokedReason = 'off' | 'on' | 'unconfirmed';
+const REVOKED_PATHS: Record<SessionRevokedReason, string> = {
+  off: TWO_FACTOR_OFF_LOGIN_PATH,
+  on: TWO_FACTOR_ON_LOGIN_PATH,
+  unconfirmed: TWO_FACTOR_UNCONFIRMED_LOGIN_PATH,
+};
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
 
@@ -54,24 +70,19 @@ interface AuthContextValue {
   /** Where staff pages send a signed-out user: /admin/login, or with a notice after a server-side revoke. */
   loginPath: string;
   /**
-   * The server already ended every session of this user (turning 2FA off revokes all refresh
-   * tokens and clears the cookie): forget the session here without a refresh or a logout call, and
-   * go to login with a one-time notice. Nothing is left pending afterwards, so no "could not
-   * confirm sign-out" warning and no logout retry. The sign-out marker is set briefly as a
-   * cross-tab broadcast (other tabs sign out) and cleared last.
+   * A 2FA change ended the sessions on the server (turning 2FA off or on revokes every refresh
+   * token and clears the cookie), or the outcome of the change is unknown. Runs the normal
+   * sign-out (api-contract: the UI calls POST /auth/logout, then goes to sign-in) and ends at the
+   * login page with the notice for `reason`. After a revoke the logout normally answers 401, which
+   * counts as confirmed (no loop, marker cleared); a failed logout keeps the pending marker and the
+   * login page offers Retry sign-out (FR-104).
    */
-  signOutRevoked: () => Promise<void>;
+  signOutRevoked: (reason: SessionRevokedReason) => Promise<void>;
   /** The silent refresh got 503 BUSY and gave up: nobody was signed out; offer a manual retry. */
   refreshBusy: boolean;
   retryRefresh: () => void;
-  /**
-   * The server just set this user's refresh cookie but the session is not published yet (forced
-   * enrollment: the recovery codes are still on screen). Clears the sign-out marker and tells
-   * other tabs now, so no tab retries a logout with the new cookie. Does not sign in.
-   */
-  announceSession: (userId: string) => void;
   setPending: (pending: PendingChallenge | null) => void;
-  /** Called after a successful login, 2FA verify or enrollment. */
+  /** Called after a successful login or 2FA verify. */
   signIn: (session: AuthSession) => void;
   signOut: () => Promise<void>;
 }
@@ -230,58 +241,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     [queryClient],
   );
 
-  const signOut = React.useCallback(async () => {
-    setSignedOutByUser(true);
-    setLoginPath(LOGIN_PATH);
-    // Blocks new refreshes at once and forgets the session at once: a refresh already running
-    // may take seconds, and until it settles the old token must not be used. Logout works from
-    // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
-    // late 401 cannot start a refresh.
-    const settled = beginSignOut();
-    publishSession(null);
-    await settled;
-    try {
-      // The session listener also cancels and clears on the user change; this is explicit so the
-      // cache is empty even if the user id did not change.
-      await queryClient.cancelQueries();
-      queryClient.clear();
-      setPending(null);
-    } catch {
-      // Nothing to do: the logout call below must still run.
-    }
-    try {
-      await confirmLogout();
-    } finally {
-      // Whatever the server said, this browser has forgotten the session. If the server did not
-      // confirm, the pending marker stays set so a reload does not restore it (FR-104).
-      router.replace('/admin/login');
-    }
-  }, [router, confirmLogout, queryClient]);
+  const runSignOut = React.useCallback(
+    async (target: string) => {
+      setSignedOutByUser(true);
+      setLoginPath(target);
+      // Blocks new refreshes at once and forgets the session at once: a refresh already running
+      // may take seconds, and until it settles the old token must not be used. Logout works from
+      // the httpOnly cookie alone, so a slow logout sends no staff request with the old token and a
+      // late 401 cannot start a refresh.
+      const settled = beginSignOut();
+      publishSession(null);
+      await settled;
+      try {
+        // The session listener also cancels and clears on the user change; this is explicit so the
+        // cache is empty even if the user id did not change.
+        await queryClient.cancelQueries();
+        queryClient.clear();
+        setPending(null);
+      } catch {
+        // Nothing to do: the logout call below must still run.
+      }
+      try {
+        await confirmLogout();
+      } finally {
+        // Whatever the server said, this browser has forgotten the session. If the server did not
+        // confirm, the pending marker stays set so a reload does not restore it (FR-104).
+        router.replace(target);
+      }
+    },
+    [router, confirmLogout, queryClient],
+  );
 
-  const announceSession = React.useCallback((userId: string) => {
-    unconfirmedGen.current = null;
-    setSignOutUnconfirmed(false);
-    beginSession(userId);
-  }, []);
-
-  const signOutRevoked = React.useCallback(async () => {
-    setSignedOutByUser(true);
-    setLoginPath(TWO_FACTOR_OFF_LOGIN_PATH);
-    // Synchronously blocks every new refresh (and tells other tabs through the marker, which is
-    // set briefly on purpose as a cross-tab broadcast: do not optimise it away), then forget the
-    // session at once. A request that gets a 401 from here on cannot start a refresh against a
-    // family the server just revoked (that would look like token reuse, TC-005).
-    const settled = beginSignOut();
-    publishSession(null);
-    await settled;
-    await queryClient.cancelQueries();
-    queryClient.clear();
-    setPending(null);
-    setSignOutUnconfirmed(false);
-    // The server already revoked the session: nothing to confirm, no logout to retry. Cleared last.
-    confirmSignedOut();
-    router.replace(TWO_FACTOR_OFF_LOGIN_PATH);
-  }, [router, queryClient]);
+  const signOut = React.useCallback(() => runSignOut(LOGIN_PATH), [runSignOut]);
+  const signOutRevoked = React.useCallback(
+    (reason: SessionRevokedReason) => runSignOut(REVOKED_PATHS[reason]),
+    [runSignOut],
+  );
 
   const value = React.useMemo<AuthContextValue>(
     () => ({
@@ -296,7 +291,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       signOutRevoked,
       refreshBusy,
       retryRefresh,
-      announceSession,
       setPending,
       signIn,
       signOut,
@@ -312,7 +306,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       signOutRevoked,
       refreshBusy,
       retryRefresh,
-      announceSession,
       signIn,
       signOut,
     ],

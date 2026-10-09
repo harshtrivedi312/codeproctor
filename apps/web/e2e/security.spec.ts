@@ -43,7 +43,7 @@ test.describe('FR-102 Security page', () => {
     await dialog.getByRole('button', { name: 'Continue' }).click();
     await expect(dialog.getByTestId('manual-key')).toBeVisible();
     await expect(dialog.getByAltText(/QR code/)).toBeVisible();
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await dialog.getByRole('button', { name: 'Skip for now' }).click();
     await expect(dialog).toBeHidden();
 
     // Still signed in after the failure: a reload restores the session and the page.
@@ -72,6 +72,12 @@ test.describe('FR-102 Security page', () => {
     await expectNoAxeViolations(page);
     await dialog.getByRole('checkbox').check();
     await dialog.getByRole('button', { name: 'Done' }).click();
+    // Turning 2FA on ends every session: sign in again, now with a code.
+    await expect(page).toHaveURL(/\/admin\/login\?reason=two-factor-on/);
+    await login(page, RECRUITER);
+    await page.getByLabel(/Authenticator code/).fill(TOTP);
+    await page.getByRole('button', { name: 'Verify and sign in' }).click();
+    await openSecurity(page);
     await expect(page.getByRole('button', { name: 'Disable 2FA' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Regenerate recovery codes' }).click();
@@ -110,14 +116,21 @@ test.describe('FR-102 Security page', () => {
     await expect(page).toHaveURL(/\/admin$/);
   });
 
-  test('FR-102: Super Admin cannot disable 2FA and sees why', async ({ page }) => {
+  test('FR-102: Super Admin with 2FA on can disable it, and is signed out everywhere', async ({
+    page,
+  }) => {
     await login(page, ADMIN);
     await page.getByLabel(/Authenticator code/).fill(TOTP);
     await page.getByRole('button', { name: 'Verify and sign in' }).click();
     await openSecurity(page);
-    await expect(page.getByRole('button', { name: 'Disable 2FA' })).toHaveCount(0);
-    await expect(page.getByTestId('two-factor-required')).toContainText('required for your role');
     await expect(page.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Disable 2FA' })).toBeVisible();
+    await expect(page.getByText('required for your role')).toHaveCount(0);
     await expectNoAxeViolations(page);
+    await page.getByRole('button', { name: 'Disable 2FA' }).click();
+    await page.getByLabel('Current password').fill(ADMIN.password);
+    await page.getByLabel('6-digit code').fill(TOTP);
+    await page.getByRole('button', { name: 'Turn off 2FA' }).click();
+    await expect(page).toHaveURL(/\/admin\/login\?reason=two-factor-off/);
   });
 });
