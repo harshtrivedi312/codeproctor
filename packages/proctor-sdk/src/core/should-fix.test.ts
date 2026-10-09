@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UploadQueue } from '../recording/upload-queue';
 import { MediaApiError, type MediaApi } from '../recording/types';
+import { chunkRef, okPresign } from '../test/media-helpers';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { EventQueue, type SendResult, type SignedBatch } from './event-queue';
 import { importSessionKey } from './hmac';
@@ -337,16 +338,10 @@ describe('ProctorSession start timeout (SF5, FR-609)', () => {
 
 describe('UploadQueue storage recovery and memory counter (S6, FR-702)', () => {
   const api: MediaApi = {
-    presign: () => Promise.resolve({ url: 'https://store.invalid/x' }),
+    presign: () => Promise.resolve(okPresign('https://store.invalid/x')),
     confirm: () => Promise.resolve(),
   };
-  const chunk = (seq: number) => ({
-    stream: 'WEBCAM' as const,
-    segment: 0,
-    seq,
-    bytes: 10,
-    contentType: 'video/webm',
-  });
+  const chunk = (seq: number) => chunkRef(seq, 10, 'WEBCAM');
 
   it('FR-702: after a transient write failure the queue probes IndexedDB again and leaves memory-only mode', async () => {
     const store = newStore();
@@ -406,7 +401,7 @@ describe('UploadQueue storage recovery and memory counter (S6, FR-702)', () => {
       presign: () =>
         fatal
           ? Promise.reject(new MediaApiError('FATAL', 'session ended'))
-          : Promise.resolve({ url: 'https://store.invalid/x' }),
+          : Promise.resolve(okPresign('https://store.invalid/x')),
       confirm: () => Promise.resolve(),
     };
     const q = new UploadQueue({

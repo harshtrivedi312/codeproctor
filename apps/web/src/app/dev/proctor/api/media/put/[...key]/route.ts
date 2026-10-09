@@ -42,5 +42,14 @@ export async function PUT(
       return toResponse(problem(403, 'FORBIDDEN', 'Not presigned', st));
     return toResponse(evidencePut(st));
   }
-  return toResponse(mediaPut(st, sessionId, path, bytes, req.headers.get('content-type')));
+  return toResponse(
+    mediaPut(
+      st,
+      sessionId,
+      path,
+      bytes,
+      req.headers.get('content-type'),
+      req.headers.get('if-none-match'),
+    ),
+  );
 }
