@@ -1611,6 +1611,9 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'GET /candidate/questions/:questionId', permission: 'candidate_session:read' },
   // BE-08 accommodations projection (Backend A, PR #339): read-only, reuses the session read permission.
   { key: 'GET /candidate/session/accommodations', permission: 'candidate_session:read' },
+  // FR-406 practice question (Backend A, PR #342): fixed content, nothing stored; run reuses the answer-run permission.
+  { key: 'GET /candidate/session/practice', permission: 'candidate_session:read' },
+  { key: 'POST /candidate/session/practice/run', permission: 'candidate_answer:run' },
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
   // System check (Backend B, PR #340): reuses the heartbeat permission (FU-BEB-152).
