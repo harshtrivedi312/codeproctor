@@ -5,7 +5,7 @@ import {
   draftSavedSchema,
   isOverStatus,
   questionViewSchema,
-  runResultSchema,
+  runResponseSchema,
   sectionFinishAcceptedSchema,
   sessionStateSchema,
   testLayoutSchema,
@@ -160,7 +160,7 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
       };
     },
     async run(questionId, language, code) {
-      const r = await requestAt(runResultSchema, `/answers/${encodeURIComponent(questionId)}/run`, {
+      const r = await requestAt(runResponseSchema, `/answers/${encodeURIComponent(questionId)}/run`, {
         method: 'POST',
         body: { language, code },
         authed: true,

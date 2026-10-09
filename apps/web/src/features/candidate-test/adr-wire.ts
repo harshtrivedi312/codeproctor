@@ -93,7 +93,13 @@ export type QuestionView = z.infer<typeof questionViewSchema>;
 /** PROVISIONAL: the draft save answers with the server time (the screen re-syncs its clock). */
 export const draftSavedSchema = z.object({ savedAt: z.string() });
 
-/** PROVISIONAL shape for Run (FR-502), sample tests only. */
+/**
+ * The local execution stub (DL-54, DL-58, API verdict LOCAL_STUB): nothing ran, so it is never a
+ * pass or a fail. The panel says so in these words.
+ */
+export const LOCAL_STUB_LABEL = 'local stub, not real execution';
+
+/** The shape the screen shows for a run (FR-502), sample tests only. */
 export const runResultSchema = z.object({
   outcome: z.enum(['completed', 'compile_error', 'runtime_error', 'time_limit_exceeded']),
   tests: z.array(
@@ -109,7 +115,85 @@ export const runResultSchema = z.object({
   ),
   stdout: z.string(),
   stderr: z.string(),
+  /** Local stub only: nothing ran. Never set on a real run. */
+  stub: z.literal(true).optional(),
+  message: z.string().optional(),
 });
+
+/**
+ * POST /candidate/session/answers/:questionId/run, the real response (apps/api submissions
+ * RunResultDto): one result per sample with a verdict. Mapped to the shape above by
+ * `toRunView`. LOCAL_STUB is a verdict like the others and is never a pass or a fail.
+ */
+export const runResultDtoSchema = z.object({
+  serverTime: z.string(),
+  passed: z.number().int().min(0),
+  total: z.number().int().min(0),
+  results: z.array(
+    z.object({
+      index: z.number().int().min(1),
+      verdict: z.string(),
+      passed: z.boolean(),
+      timeMs: z.number().nullable().optional(),
+      memoryKb: z.number().nullable().optional(),
+      stdout: z.string().optional(),
+      stdoutTruncated: z.boolean().optional(),
+      message: z.string().optional(),
+      stub: z.literal(true).optional(),
+    }),
+  ),
+});
+type RunDto = z.infer<typeof runResultDtoSchema>;
+
+/** Maps the real run response to what the output panel shows. Pure; tested. */
+export function toRunView(dto: RunDto): z.infer<typeof runResultSchema> {
+  const rs = dto.results;
+  const isStub = (r: RunDto['results'][number]): boolean =>
+    r.verdict === 'LOCAL_STUB' || r.stub === true;
+  if (rs.length > 0 && rs.every(isStub)) {
+    return {
+      outcome: 'completed',
+      tests: [],
+      stdout: '',
+      stderr: '',
+      stub: true,
+      message: rs[0]?.message ?? LOCAL_STUB_LABEL,
+    };
+  }
+  const tests = rs
+    .filter((r) => !isStub(r) && (r.verdict === 'PASSED' || r.verdict === 'FAILED'))
+    .map((r) => ({
+      id: `sample-${r.index}`,
+      name: `Sample ${r.index}`,
+      status: r.passed ? ('passed' as const) : ('failed' as const),
+      ...(r.verdict === 'FAILED' && r.stdout !== undefined ? { actualOutput: r.stdout } : {}),
+      ...(r.timeMs != null ? { durationMs: r.timeMs } : {}),
+    }));
+  const problem = rs.find((r) => !isStub(r) && r.verdict !== 'PASSED' && r.verdict !== 'FAILED');
+  const printed = rs
+    .filter((r) => r.stdout)
+    .map((r) => (rs.length > 1 ? `Sample ${r.index}:\n${r.stdout}` : (r.stdout ?? '')))
+    .join('\n');
+  if (!problem) return { outcome: 'completed', tests, stdout: printed, stderr: '' };
+  const outcome =
+    problem.verdict === 'COMPILE_ERROR'
+      ? 'compile_error'
+      : problem.verdict === 'RUNTIME_ERROR' || problem.verdict === 'INTERNAL_ERROR'
+        ? 'runtime_error'
+        : 'time_limit_exceeded';
+  return {
+    outcome,
+    tests,
+    stdout: printed,
+    stderr: problem.message ?? 'The run could not be completed. Try again.',
+  };
+}
+
+/** Either the real response (mapped) or the screen's own shape (demo and tests). */
+export const runResponseSchema = z.union([
+  runResultDtoSchema.transform(toRunView),
+  runResultSchema,
+]);
 
 /**
  * `POST /candidate/session/section/finish` (ADR 0013 section 5.11; BE-11, documented, not yet

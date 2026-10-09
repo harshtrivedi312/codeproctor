@@ -224,4 +224,7 @@ export const practiceRunSchema = z.object({
   ),
   stdout: z.string(),
   stderr: z.string(),
+  /** Local execution stub only (DL-58): nothing ran, `tests` is empty, never a pass or a fail. */
+  stub: z.literal(true).optional(),
+  message: z.string().optional(),
 });

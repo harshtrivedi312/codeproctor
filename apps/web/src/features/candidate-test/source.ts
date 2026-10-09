@@ -7,6 +7,12 @@ import type { Schemas } from '@/lib/api/client';
  * candidate source on the ADR 0013 routes (`adr-source.ts`, PROVISIONAL, used by the real flow).
  * The screen never talks to the network itself, so it stays one component for both.
  */
+/**
+ * What the output panel shows for a run: the generated shape plus the local-stub marker (DL-58,
+ * verdict LOCAL_STUB). When `stub` is true nothing ran and nothing was graded.
+ */
+export type RunResultView = Schemas['RunResult'] & { stub?: true; message?: string };
+
 export type DraftBody =
   | { kind: 'code'; language: CodeLanguage; code: string }
   | { kind: 'mcq'; selectedOptionId: string };
@@ -17,7 +23,7 @@ export type DraftResult =
   | { ok: false; paused: boolean };
 
 export type RunOutcome =
-  | { kind: 'result'; result: Schemas['RunResult'] }
+  | { kind: 'result'; result: RunResultView }
   | { kind: 'rate-limited'; retryAfterSeconds: number | null }
   | { kind: 'paused' }
   | { kind: 'error' };

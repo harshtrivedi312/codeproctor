@@ -1,5 +1,6 @@
 import { CheckCircle2, XCircle } from 'lucide-react';
-import type { Schemas } from '@/lib/api/client';
+import { LOCAL_STUB_LABEL } from './adr-wire';
+import type { RunResultView } from './source';
 
 export function OutputPanel({
   running,
@@ -7,7 +8,7 @@ export function OutputPanel({
   errorMessage,
 }: {
   running: boolean;
-  result: Schemas['RunResult'] | null;
+  result: RunResultView | null;
   errorMessage: string | null;
 }): React.JSX.Element {
   return (
@@ -31,6 +32,18 @@ export function OutputPanel({
       )}
       {!running && result && (
         <div className="space-y-3">
+          {result.stub === true && (
+            <p
+              role="status"
+              data-testid="run-stub-notice"
+              className="rounded-md border border-dashed p-3 font-medium"
+            >
+              {/* Nothing ran: this is neither a pass nor a fail (DL-58). */}
+              Local stub, not real execution. Your code was not run and nothing was checked against
+              the sample tests.
+              <span className="sr-only"> ({result.message ?? LOCAL_STUB_LABEL})</span>
+            </p>
+          )}
           {result.outcome !== 'completed' && (
             <pre className="whitespace-pre-wrap rounded-md bg-destructive-soft p-3 font-mono text-destructive">
               {result.stderr}
@@ -58,18 +71,22 @@ export function OutputPanel({
                     </div>
                     {t.status === 'failed' && (
                       <dl className="mt-2 grid grid-cols-2 gap-2 font-mono text-xs">
-                        <div>
-                          <dt className="font-sans text-muted-foreground">Expected</dt>
-                          <dd>
-                            <pre>{t.expectedOutput}</pre>
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="font-sans text-muted-foreground">Your output</dt>
-                          <dd>
-                            <pre>{t.actualOutput}</pre>
-                          </dd>
-                        </div>
+                        {t.expectedOutput !== undefined && (
+                          <div>
+                            <dt className="font-sans text-muted-foreground">Expected</dt>
+                            <dd>
+                              <pre>{t.expectedOutput}</pre>
+                            </dd>
+                          </div>
+                        )}
+                        {t.actualOutput !== undefined && (
+                          <div>
+                            <dt className="font-sans text-muted-foreground">Your output</dt>
+                            <dd>
+                              <pre>{t.actualOutput}</pre>
+                            </dd>
+                          </div>
+                        )}
                       </dl>
                     )}
                   </li>
