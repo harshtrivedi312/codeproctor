@@ -43,3 +43,32 @@ pipeline.seedCounters(counters?.media ?? {}); // media streams continue at max(l
   - `queue`: pending event and keystroke batches and rejected batches.
 - Answer: the server state goes to `onHeartbeat`; a renewed token goes to `onToken` and is never stored or logged by the SDK. 409 SESSION_NOT_ACTIVE stops the heartbeat and fires `ended` (the queues keep draining during the grace). Three consecutive 401 stop the heartbeat and call `onReauthRequired` once; `session.resume()` or `setKey()` beat again. A 401 is "reachable", not offline.
 - `session.probe()` is the reachability probe for the recording pipeline: `new RecordingPipeline({ probe: () => session.probe() })`. A fresh acknowledged beat answers true at once, otherwise one beat is sent now.
+
+## System check before the start (ADR 0013 section 5.4; FR-604, FR-605, FR-610)
+
+```ts
+// 1. Before the start (no session, no key yet), on a user gesture:
+const outcome = await requestScreenShare(() => assertConsent()); // asks for the whole screen once
+// 2. The system check. A missing share is NOT "unverified": surfaceOf() gives null and
+//    runSystemCheck throws SystemCheckError('NO_SCREEN_SHARE') without sending anything.
+const { passed, blocking } = await runSystemCheck({
+  baseUrl,
+  getToken: () => token,
+  // MONITOR, OTHER (a window or tab: the gate blocks), UNVERIFIABLE (shared, but the browser does
+  // not report the surface) or null (no share obtained)
+  screenShare: surfaceOf(outcome),
+});
+// 3. After the session started, hand the SAME stream to the monitor: the candidate is not asked twice.
+screenShareMonitor.adopt(outcome);
+```
+
+The APP owns the pre-start stream until `adopt()`: if the system check is blocked or fails, or the candidate leaves before the start, call `releaseScreenShare(outcome)` so the screen is not captured any longer. `adopt()` refuses a share that already ended (lock stays, the app asks again).
+
+If the app keeps its own pre-check share (as the precheck step does), it passes its own enum
+(`MONITOR`, `OTHER`, `UNVERIFIABLE`) and keeps the stream for `adopt()` the same way.
+
+- A pure function: it only looks (no camera, microphone or screen prompt; `getScreenDetails()` is used only when the window-management permission is already granted, otherwise `screen.isExtended`; each browser step is cut after 3 s and reported UNVERIFIABLE) and posts `POST /candidate/session/system-check` with the candidate token. No key exists yet, so there is no HMAC. `collectSystemCheck()` builds the same body without a request for the app's own pre-flight screen.
+- Body: browser brand and major version, network downlink/rtt when the browser reports them, `devices` as booleans plus the screen-share surface enum, MULTI_MONITOR and VIRTUAL_CAMERA findings, and capability flags (`multi-screen`, `virtual-camera`, `camera-permission`, `microphone-permission`, `screen-share`, `screen-share-surface`, `media-recorder` WebM VP8/Opus, `fullscreen-api`, `idb`, `web-crypto`). A check the browser cannot make is UNSUPPORTED or UNVERIFIABLE, never a pass.
+- Privacy: device labels and ids are never sent; the only label is the one of a camera that matched a virtual-camera name (the VIRTUAL_CAMERA payload carries `deviceLabel`). Errors carry a kind and a problem code only.
+- Answers: 200 `{ passed, blocking }`; 400 `REJECTED`, 401 `UNAUTHENTICATED`, 409 SESSION_NOT_ACTIVE `NOT_ACTIVE` are final; 408, 429, 5xx (503 BUSY) retry with Retry-After, then `UNAVAILABLE` (a `SystemCheckError`). The start gate answers 409 `SYSTEM_CHECK_BLOCKED` when the latest check is missing, stale or not passed.
+- After the start the same checks repeat inside signed batches: `MultiScreenMonitor` and `VirtualCameraMonitor` emit MULTI_MONITOR and VIRTUAL_CAMERA events through the session.
