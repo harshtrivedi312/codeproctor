@@ -89,7 +89,9 @@ function answers(pendingShort: boolean): Answer[] {
       score: pendingShort ? null : 30,
       scoring: pendingShort ? 'MANUAL_PENDING' : 'AUTO',
       scoringNote: null,
-      answer: { text: 'Calling it many times has the same effect on the server as calling it once.' },
+      answer: {
+        text: 'Calling it many times has the same effect on the server as calling it once.',
+      },
     },
   ];
 }

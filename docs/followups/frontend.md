@@ -789,3 +789,45 @@ None of this exists in the API yet. Every route, body, limit and error word belo
 - **FU-FEA-SFR-4 [Frontend A]** With full or blocked storage the epoch write in `announceSignIn` also fails, so no `cp.sessionEpoch` event fires. A logout queued in tab A (marker not writable there) can then revoke tab B's fresh login. It fails closed (tab B is asked to sign in again), but it is a signed-in user losing a session. Fix idea: send the epoch over the existing BroadcastChannel as well.
 - **FU-FEA-SFR-5 [Frontend A]** Nonce compare-and-clear for the sign-out marker: write a per-sign-out nonce as the value and clear it only if it still matches. This closes a narrow cross-tab race where tab C's late `confirmSignedOut` clears tab A's marker. Today a superseded tab stays signed out until it signs in or reloads, which fails safe.
 **Review of PR #364 (MANUAL_PENDING; no blockers):** ask the hub to add one sentence to section 7 "Effect on the verdict" saying a failed compare-and-set answers `VERDICT_ALREADY_SET` or `SESSION_NOT_UNDER_REVIEW`, which win over `MANUAL_PENDING`; the verdict is also blocked on undecided HIGH flags (TC-078) and a missing identity decision (ADR 0004, `docs/prompts/backend.md:151`) with no contract code yet (the panel shows its generic message); name the three codes in the verdict 409 description in openapi; add a test that a verdict 409 `MANUAL_PENDING` shows "Some short answers still need scoring".
+
+## PILOT-AUDIT (D-84, Frontend A, branch frontend/pilot-reviewer-audit): staff web vs the merged API
+
+Scope: REVIEWER path, RECRUITER invite flow, staff auth. Read against apps/api/src/{review,invitations,tests,auth}, route-permissions.ts and the e2e specs.
+
+**Found and fixed (web)**
+
+1. Review answer shapes. The API stores MCQ as `{ optionIds }` and short answers as `{ text }` (`grading/answer-shapes.ts`); the web only knew `selectedOptionIds`, a bare string or an array, so a real short answer showed as the JSON text `{"text":"..."}`. Fixed in `review/model.ts` (`answerBody`), mock answers use the real shapes.
+2. Scoring and verdict gating followed hard-coded type checks and `UNDER_REVIEW` only. It now follows the answer's `scoring` field and the session status: controls show for any answer whose `scoring` is not AUTO, and for a coding answer whose runs are `LOCAL_STUB` (dev stub grading); the verdict form shows for GRADED and UNDER_REVIEW without a verdict. The API stays the judge and a 409 reloads the page.
+3. Scoring and verdict errors: 404, 400 and non-BUSY 503 got the generic "check your connection" text; each has its own message now.
+4. openapi.yaml review routes: uuid path params, the recording id pattern, 400 responses on PATCH and POST, "REAL" markers, the real answer shapes; `schema.d.ts` regenerated with gen:api.
+5. Playback in `next dev` without `apps/web/.env.local`: `NEXT_PUBLIC_UPLOAD_ORIGINS` empty meant the browser CSP blocked the MinIO part URLs. A dev server now falls back to `http://127.0.0.1:9000` (never in production builds). The playback error text now points at storage reachability and CORS.
+6. Auth: a 429 on `POST /auth/login` showed "the server did not answer as expected"; it now says to wait a minute. A 429 on the silent refresh signed the user out (the API's auth throttle is 10 requests a minute per address and covers /auth/refresh); it now keeps the session (treated like BUSY).
+7. Candidates page: `GET /admin/candidates` is not an API route (404), so the page said "check your connection" with a retry. It now explains that the list is not available yet and keeps the Invite candidates button.
+
+**Found, not fixed in the web (needs someone else)**
+
+- Invite dialog (handled separately by another engineer, files not touched here): it ignores the API's `mail` outcome (`queued|failed|disabled`; with EMAIL_PROVIDER=noop the link is never delivered and the recruiter is told "created"), and every 422 reads "The window has already closed" (the real 422 is a test whose random slots cannot be filled, reasons in `errors[]`).
+- Invite dialog still sends `accommodations` when a recruiter fills extra time, tools, notes or a waiver: the real `CreateInvitationDto` has only `candidate{email,name}`, `windowStart`, `windowEnd`, and the global ValidationPipe uses `forbidNonWhitelisted`, so the API answers 400 "property accommodations should not exist". The CSV bulk upload calls `POST /tests/:id/invitations/bulk`, which does not exist (404 on the first chunk). Until Backend adds them, hide the accommodations section and the "Several, from a CSV file" choice (owner: Frontend, after the separate dialog PR merges; or Backend adds the fields, ADR 0015 / FR-304).
+- `timeZone` (migration `invitations_time_zone`, C-53, FR-304): the column exists, but `CreateInvitationDto` has no `timeZone` and the web has no field. Backend must accept it first (an unknown property is a 400), then the web adds an IANA zone select.
+- Two 409s on the invite route differ only by detail text ("This candidate cannot be invited." for an erasure request versus "already has an active invitation"); no `code`. Web 409 text says "open invitation" for both. Backend: add codes.
+- Routes the web calls that the API does not have: `GET /admin/candidates`, `GET /admin/candidates/:id/invitations`, `POST /admin/candidates/:id/erasure`, `POST /tests/:id/invitations/bulk`, `GET|PATCH /admin/settings` (API: `/admin/org-settings`), `GET|POST /admin/consent-texts`, `PUT /admin/consent-texts/:id/current`, `POST /questions/:id/prefill`. Settings screens of a SUPER_ADMIN are affected; not in the reviewer or recruiter pilot path.
+- BLOCKER for live reviewer flow: nothing consumes `analyze-session` and nothing moves GRADED to UNDER_REVIEW (BE-12). A session submitted on the local stack stays GRADED, and scoring or verdict answers 409 SESSION_NOT_UNDER_REVIEW. Backend A is adding a development-only transition; the seed's UNDER_REVIEW session works today.
+- The review bundle gives MCQ answers as opaque option ids (`{ optionIds }`), with no option labels, and the question's correct options are not exposed; the reviewer sees ids only. Backend: add option labels to the bundle answer.
+- Event `detail` is only "duration N ms, confidence X"; no event payload. Informational.
+- The default API throttle (auth 10 per minute and default 100 per minute per address) will be hit when several volunteers share one machine or NAT address. Set `THROTTLE_AUTH_LIMIT` and `THROTTLE_DEFAULT_LIMIT` higher for the pilot (see below).
+- Reviewer nav also shows Live and Reports; both are placeholder pages (no API). The dashboard at `/admin` is a links page, not a redirect.
+- Web default `NEXT_PUBLIC_API_URL` and the `.env.example` value are `http://localhost:4000`, the API serves `/api/v1` (QA-D-02 stays open). `infra/scripts/local-env.mjs` writes the right `apps/web/.env.local`; a hand-made one must end in `/api`.
+
+**Env values needed for recording playback on the local stack**
+
+- `.env` (API): `S3_ENDPOINT=http://127.0.0.1:9000` (this host is put into the presigned URLs, and the browser must be able to reach it; never `minio:9000`), `S3_FORCE_PATH_STYLE=true`, `S3_MEDIA_BUCKET=codeproctor-media`, `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` equal to `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `WEB_ORIGIN=http://localhost:3000`. Without storage configured the API answers 503 and the web says playback is not available.
+- `apps/web/.env.local`: `NEXT_PUBLIC_API_URL=http://localhost:4000/api` and `NEXT_PUBLIC_UPLOAD_ORIGINS=http://127.0.0.1:9000` (both written by `node infra/scripts/local-env.mjs`). The second feeds the CSP connect-src; a dev server now also falls back to it. Restart `pnpm dev:web` after changing it.
+- MinIO (infra/docker-compose.yml): `MINIO_API_CORS_ALLOW_ORIGIN=http://localhost:3000` is already set. The web app MUST be opened as `http://localhost:3000`, not `http://127.0.0.1:3000` (CORS would refuse the part fetch).
+- Pilot throttle: `THROTTLE_AUTH_LIMIT=60`, `THROTTLE_DEFAULT_LIMIT=600` in `.env` if several people sign in from one machine.
+
+**Residual risks**
+
+- Playback downloads every part into memory (cap 500 MB) and concatenates; long screen recordings may be refused ("too large").
+- The mocks still use non-UUID ids (`rs-1`); the real API answers 400 for those, so mock-mode tests do not prove UUID handling.
+- A GRADED session shows a verdict form that the API refuses until BE-12 (or the dev transition) runs; the 409 message explains and reloads.
+- No Playwright contract test against a running API was possible here (no dev server, docker or database allowed); the audit is by reading both sides plus vitest on the web side.

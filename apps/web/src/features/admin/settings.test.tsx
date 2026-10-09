@@ -445,7 +445,10 @@ describe('Candidate erasure (NFR-05, D-19, TC-094)', () => {
   it('FR-303: when the API has no candidate list route (404) the page says so and keeps Invite candidates', async () => {
     server.use(
       http.get('*/v1/admin/candidates', () =>
-        HttpResponse.json({ status: 404, title: 'Not Found', detail: 'Route not found.' }, { status: 404 }),
+        HttpResponse.json(
+          { status: 404, title: 'Not Found', detail: 'Route not found.' },
+          { status: 404 },
+        ),
       ),
     );
     renderAsStaff(<CandidatesPage />, MOCK_USERS.recruiter);

@@ -15,11 +15,7 @@ import { useAuth } from './auth-provider';
 import { safeNextPath } from './schemas';
 
 type Banner =
-  | { kind: 'failed' }
-  | { kind: 'network' }
-  | { kind: 'busy' }
-  | { kind: 'throttled' }
-  | null;
+  { kind: 'failed' } | { kind: 'network' } | { kind: 'busy' } | { kind: 'throttled' } | null;
 
 /**
  * One neutral message for every failed sign-in (wrong password, unknown email, locked account), so
