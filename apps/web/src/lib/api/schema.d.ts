@@ -910,7 +910,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Final verdict (review_verdict:set). 409 with code MANUAL_PENDING while a manual answer is pending (TC-099), then VERDICT_ALREADY_SET / SESSION_NOT_UNDER_REVIEW win over it (docs/api-contract.md section 7). */
+        /** Final verdict (review_verdict:set). 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). The request body (SetVerdict) is the web's; it is not defined in section 7 yet. */
         post: operations["setReviewVerdict"];
         delete?: never;
         options?: never;
