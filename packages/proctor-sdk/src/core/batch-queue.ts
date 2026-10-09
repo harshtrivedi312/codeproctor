@@ -37,6 +37,14 @@ export interface SignedBatch {
  * RETRY: network or 5xx, keep the batch and back off.
  * REJECTED: the server refused it for good (4xx); drop it so one bad batch cannot block the rest.
  */
+/** The key provider did not answer in time. */
+export class ProviderTimeoutError extends Error {
+  constructor() {
+    super('key provider timed out');
+    this.name = 'ProviderTimeoutError';
+  }
+}
+
 export type SendResult = 'OK' | 'RETRY' | 'REJECTED' | SendOutcome;
 
 /** Why the server will accept nothing more from this session. */
@@ -101,6 +109,8 @@ export interface BatchQueueOptions {
    * resume the new key is already here and the server issues it only once).
    */
   onKeyStale?: (staleKey: CryptoKey) => Promise<CryptoKey | null>;
+  /** A held key problem is over (a key arrived through setKey or the provider). */
+  onKeyRestored?: () => void;
   /** A hung key provider is given up after this long and treated as a transient failure (default 10 s). */
   keyProviderTimeoutMs?: number;
   /** The queue holds its batches because it has no usable key (once per episode). */
@@ -206,7 +216,10 @@ export class BatchQueue<TItem> {
   /** No usable key: retrying cannot help until the app provides one. */
   private keyBlocked = false;
   private keyStaleRounds = 0;
-  private providerTimeouts = 0;
+  /** Consecutive provider failures (timeouts or errors); 3 means "no key". */
+  private providerFailures = 0;
+  /** A batch has been cut from pending and is not yet in the outbox (counted by endSession). */
+  private inCut = false;
   private auth401 = 0;
   /** 3 consecutive 401: stopped until resume(). */
   private authHold = false;
@@ -395,11 +408,14 @@ export class BatchQueue<TItem> {
       const seq = this.nextSeq++;
       const { body, consumed } = this.spec.cut(this.pending, seq);
       this.pending.splice(0, Math.max(1, consumed));
+      this.inCut = true;
       let usedKey = this.key;
       let signature = await signHex(usedKey, body);
       if (this.closed) {
-        // finish() closed the queue while this batch was being signed: nothing may be persisted.
-        this.lostAtClose++;
+        // finish() or the end of the session closed the queue while this batch was being signed:
+        // nothing may be persisted. (endSession already counted the batch that was in the cut.)
+        if (!this.ended) this.lostAtClose++;
+        this.inCut = false;
         break;
       }
       let batch: SignedBatch = { seq, body, signature };
@@ -412,6 +428,7 @@ export class BatchQueue<TItem> {
         if (probe) this.lastProbe = now;
         try {
           await this.opts.store.put(STORES.eventBatches, this.batchKey(seq), batch);
+          await this.dropIfClosed(seq);
           if (this.storageDegraded) {
             this.storageDegraded = false;
             this.opts.onStorageRecovered?.();
@@ -439,19 +456,28 @@ export class BatchQueue<TItem> {
         usedKey = newer;
         batch = { seq, body, signature };
         this.signedWith.set(batch, usedKey);
+        if (this.closed) break; // never write after the purge
         if (!this.storageDegraded) {
           await this.opts.store
             .put(STORES.eventBatches, this.batchKey(seq), batch)
             .catch(() => undefined);
+          await this.dropIfClosed(seq);
         }
       }
+      this.inCut = false;
       if (this.closed) {
-        this.lostAtClose++;
+        if (!this.ended) this.lostAtClose++;
         break;
       }
       this.outbox.push(batch);
       void this.touch.touch();
     }
+  }
+
+  /** A put that raced the purge (end of session or finish): remove what it wrote. */
+  private async dropIfClosed(seq: number): Promise<void> {
+    if (this.closed)
+      await this.opts.store.delete(STORES.eventBatches, this.batchKey(seq)).catch(() => undefined);
   }
 
   private async drain(): Promise<void> {
@@ -470,7 +496,7 @@ export class BatchQueue<TItem> {
     }
     this.draining = true;
     try {
-      while (this.outbox.length > 0 && !this.ended) {
+      while (this.outbox.length > 0 && !this.ended && (this.started || this.finishing)) {
         const head = this.outbox[0];
         if (!head) break;
         let out: SendOutcome;
@@ -480,6 +506,7 @@ export class BatchQueue<TItem> {
           out = { kind: 'RETRY' };
         }
         if (this.ended || this.finished) return; // the session ended or finish() cleared everything meanwhile
+        if (!this.started && !this.finishing) return; // stop(): the batch stays for the next load, no hooks, no flags
         if (out.kind !== 'AUTH') this.auth401 = 0;
         switch (out.kind) {
           case 'RETRY':
@@ -528,6 +555,7 @@ export class BatchQueue<TItem> {
               .delete(STORES.eventBatches, this.batchKey(head.seq))
               .catch(() => undefined);
             this.keyBlocked = false;
+            this.providerFailures = 0;
             this.keyStaleRounds = 0;
             if (out.kind === 'OK') this.sent++;
             else {
@@ -609,13 +637,14 @@ export class BatchQueue<TItem> {
     }
     const askedWith = this.key;
     let fresh: CryptoKey | null = null;
-    let failed: 'TIMEOUT' | 'ERROR' | null = null;
+    let failed = false;
     try {
       fresh = await this.withTimeout(provider(askedWith), this.opts.keyProviderTimeoutMs ?? 10_000);
     } catch (err) {
-      failed = err instanceof Error && err.message === 'timeout' ? 'TIMEOUT' : 'ERROR';
+      void err;
+      failed = true; // timeout (ProviderTimeoutError) or error: both count toward the hold
     }
-    if (this.ended || this.finished) return false;
+    if (this.ended || this.finished || (!this.started && !this.finishing)) return false; // stopped: no flag, no hook
     if (this.key !== askedWith) {
       // setKey() delivered a key while we waited: ignore this answer (null, error or another key)
       // and sign again with what the app set. No hold, no flag.
@@ -625,16 +654,16 @@ export class BatchQueue<TItem> {
     }
     if (failed) {
       // Transient (network, hung provider); three timeouts in a row count as "no key".
-      this.providerTimeouts = failed === 'TIMEOUT' ? this.providerTimeouts + 1 : 0;
-      if (this.providerTimeouts >= 3) {
-        this.providerTimeouts = 0;
+      this.providerFailures++;
+      if (this.providerFailures >= 3) {
+        this.providerFailures = 0;
         this.holdForKey('STALE_NO_KEY');
         return false;
       }
       this.scheduleRetry();
       return false;
     }
-    this.providerTimeouts = 0;
+    this.providerFailures = 0;
     if (!fresh) {
       this.holdForKey('STALE_NO_KEY');
       return false;
@@ -649,14 +678,17 @@ export class BatchQueue<TItem> {
   private withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('timeout')), ms);
+      timer = setTimeout(() => reject(new ProviderTimeoutError()), ms);
     });
     return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
   }
 
   private setKeyInternal(k: CryptoKey): void {
     this.key = k; // batches cut from now on use it too
-    this.keyBlocked = false;
+    if (this.keyBlocked) {
+      this.keyBlocked = false;
+      this.safely(() => this.opts.onKeyRestored?.());
+    }
   }
 
   /**
@@ -666,7 +698,7 @@ export class BatchQueue<TItem> {
   async setKey(k: CryptoKey): Promise<void> {
     if (this.ended || this.closed) return;
     this.keyStaleRounds = 0;
-    this.providerTimeouts = 0;
+    this.providerFailures = 0;
     // A new key means the OTP resume happened and the app holds a fresh token: lift the 401 hold.
     this.auth401 = 0;
     this.authHold = false;
@@ -687,7 +719,7 @@ export class BatchQueue<TItem> {
     if (this.ended) return;
     this.ended = reason;
     this.closed = true;
-    this.lostAtEnd = this.outbox.length + this.pending.length;
+    this.lostAtEnd = this.outbox.length + this.pending.length + (this.inCut ? 1 : 0);
     this.outbox = [];
     this.pending = [];
     if (this.flushTimer) clearTimeout(this.flushTimer);
@@ -745,7 +777,7 @@ export class BatchQueue<TItem> {
       droppedInvalidItems: this.invalid,
       nextSeq: this.nextSeq,
       ended: this.ended,
-      lostBatches: this.lostAtEnd,
+      lostBatches: this.lostAtEnd + this.lostAtClose,
       storageDegraded: this.storageDegraded,
     };
   }

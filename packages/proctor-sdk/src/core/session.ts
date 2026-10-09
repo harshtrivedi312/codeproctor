@@ -9,6 +9,7 @@ import { EventQueue, type EventQueueStats, type EventTransport } from './event-q
 import type { SendResult, SignedBatch } from './batch-queue';
 import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
 import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
+import { ProviderTimeoutError } from './batch-queue';
 import { Heartbeat } from './heartbeat';
 import { importSessionKey } from './hmac';
 import { IdbStore, STORES } from './idb';
@@ -121,6 +122,7 @@ export class ProctorSession {
   /** Bumped by setKey(): a provider answer that started earlier must not overwrite it. */
   private keyGen = 0;
   private reauthSignalled = false;
+  private takenOverSignalled = false;
   private keyRefresh: Promise<CryptoKey | null> | null = null;
   private endedFired = false;
   private queuesEnded = false;
@@ -184,6 +186,10 @@ export class ProctorSession {
     const shared = () => ({
       ...(config.keyProvider ? { onKeyStale: (stale: CryptoKey) => this.refreshKey(stale) } : {}),
       ...(config.authLostAfter === undefined ? {} : { authLostAfter: config.authLostAfter }),
+      ...(config.keyProviderTimeoutMs === undefined
+        ? {}
+        : { keyProviderTimeoutMs: config.keyProviderTimeoutMs }),
+      onKeyRestored: () => this.fire('capability', { id: 'signing-key', status: 'SUPPORTED' }),
       onKeyUnavailable: (why: 'STALE_NO_KEY' | 'ALREADY_ISSUED') => {
         if (why === 'STALE_NO_KEY') {
           try {
@@ -433,14 +439,16 @@ export class ProctorSession {
     if (this.currentKey && this.currentKey !== stale) return Promise.resolve(this.currentKey);
     const gen = this.keyGen;
     const ms = this.config?.keyProviderTimeoutMs ?? 10_000;
-    this.keyRefresh ??= (async () => {
+    if (this.keyRefresh) return this.keyRefresh;
+    let run: Promise<CryptoKey | null> | null = null;
+    run = (async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         // `.then` so a synchronous throw of getKey() becomes a rejection after the promise is stored.
         const b64 = await Promise.race([
           Promise.resolve().then(() => provider.getKey()),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('timeout')), ms);
+            timer = setTimeout(() => reject(new ProviderTimeoutError()), ms);
           }),
         ]);
         if (gen !== this.keyGen) return this.currentKey; // setKey() won the race
@@ -451,9 +459,10 @@ export class ProctorSession {
         return key;
       } finally {
         clearTimeout(timer);
-        this.keyRefresh = null; // a hung provider must not block later refreshes
+        if (this.keyRefresh === run) this.keyRefresh = null; // never clear a newer session's refresh
       }
     })();
+    this.keyRefresh = run;
     return this.keyRefresh;
   }
 
@@ -503,8 +512,8 @@ export class ProctorSession {
           detail: `${lost} batches (events and editor changes) were discarded when the session ended.`,
         });
       }
-      if (reason === 'TAKEN_OVER' && !this.reauthSignalled) {
-        this.reauthSignalled = true;
+      if (reason === 'TAKEN_OVER' && !this.takenOverSignalled) {
+        this.takenOverSignalled = true;
         try {
           this.config.onReauthRequired?.('SESSION_TAKEN_OVER');
         } catch {
@@ -586,6 +595,8 @@ export class ProctorSession {
     this.queuesEnded = false;
     this.stopping = false;
     this.reauthSignalled = false;
+    this.takenOverSignalled = false;
+    this.keyGen++; // a provider call still pending must not touch the next session
     this.currentKey = null;
     this.keyRefresh = null;
     this.eventRejected = 0;
