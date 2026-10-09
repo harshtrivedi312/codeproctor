@@ -19,6 +19,7 @@ export class Heartbeat {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
+    this.endedBy = null;
     void this.beat();
     this.timer = setInterval(() => void this.beat(), this.intervalMs);
   }
@@ -32,7 +33,11 @@ export class Heartbeat {
         if (this.endedBy === null && !this.stopped) {
           this.endedBy = r.ended;
           this.stop();
-          this.onEnded?.(r.ended);
+          try {
+            this.onEnded?.(r.ended);
+          } catch {
+            // a faulty callback must not look like a lost connection
+          }
         }
         return;
       }

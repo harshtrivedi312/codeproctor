@@ -73,6 +73,8 @@ async function eventQueue(
   return { q, store, ...t };
 }
 
+const eventsOf = (b: SignedBatch): number[] =>
+  (JSON.parse(b.body) as { events: { durationMs: number }[] }).events.map((e) => e.durationMs);
 const stored = (store: IdbStore) => store.keys(STORES.eventBatches, 's:');
 
 describe('transport timeouts (FR-601, FR-609, TC-063)', () => {
@@ -150,7 +152,7 @@ describe('transport timeouts (FR-601, FR-609, TC-063)', () => {
   });
 });
 
-describe('errors by RFC 7807 code, then status (ADR 0013 5.8)', () => {
+describe('errors by RFC 7807 code, then status (ADR 0013 5.8; FR-601, TC-063)', () => {
   const answer = (status: number, code = '', retryAfterMs?: number) =>
     classifyAnswer({ status, code, retryAfterMs });
 
@@ -247,9 +249,9 @@ describe('KEY_EPOCH_STALE: re-sign and retry (FR-601, TC-063)', () => {
     const resigned = calls.filter((c) => c.signature === hmacHex(KEY2_B64, c.body));
     expect(first.length).toBeGreaterThan(0);
     expect(resigned.map((c) => c.seq)).toEqual([0, 1, 2]);
-    for (const c of resigned) {
-      expect(first.find((o) => o.seq === c.seq)?.body ?? c.body).toBe(c.body); // same body
-    }
+    // seq i carries event i: the body was not rebuilt, only signed again
+    for (const c of resigned) expect(eventsOf(c)).toEqual([c.seq]);
+    expect(eventsOf(first[0] as SignedBatch)).toEqual([first[0]?.seq]);
     expect(await stored(store)).toEqual([]);
     await q.stop();
   });
@@ -425,7 +427,7 @@ describe('SESSION_NOT_ACTIVE and takeover: stop, signal once, purge (FR-702)', (
   });
 });
 
-describe('4xx drops are counted and carry no content', () => {
+describe('4xx drops are counted and carry no content (FR-601, TC-063)', () => {
   it('REJECTED with a code reaches onRejected(code) and the next batch still goes out', async () => {
     const codes: (string | undefined)[] = [];
     const { q, calls } = await eventQueue([{ kind: 'REJECTED', code: 'SEQ_CONFLICT' }, 'OK'], {
@@ -443,7 +445,7 @@ describe('4xx drops are counted and carry no content', () => {
   });
 });
 
-describe('Retry-After (429, 503 BUSY)', () => {
+describe('Retry-After (429, 503 BUSY; FR-601, TC-063)', () => {
   it('waits at least Retry-After even when the backoff is short', async () => {
     const { q, calls } = await eventQueue([{ kind: 'RETRY', retryAfterMs: 400 }, 'OK'], {
       backoffBaseMs: 10,
@@ -458,17 +460,59 @@ describe('Retry-After (429, 503 BUSY)', () => {
   });
 });
 
-describe('401: lost authentication (FR-601, TC-063)', () => {
-  it('three consecutive 401 while live call onAuthLost once; sending continues and recovers after a new token', async () => {
-    let lost = 0;
-    const { q } = await eventQueue(
-      [{ kind: 'AUTH' }, { kind: 'AUTH' }, { kind: 'AUTH' }, { kind: 'AUTH' }, 'OK'],
-      { onAuthLost: () => lost++ },
-    );
+describe('401: lost authentication (FR-601, TC-063, ADR 0013 5.2)', () => {
+  it('three consecutive 401 STOP the queue: onReauthRequired once, no more retries, batches stay persisted', async () => {
+    const reasons: string[] = [];
+    const { q, calls, store } = await eventQueue([{ kind: 'AUTH' }], {
+      onReauthRequired: (r) => reasons.push(r),
+    });
     q.enqueue(ev(1));
     await q.flush();
+    await new Promise((r) => setTimeout(r, 250));
+    expect(reasons).toEqual(['UNAUTHENTICATED']);
+    const n = calls.length;
+    expect(n).toBe(3);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(calls).toHaveLength(n); // never retries forever
+    expect(await stored(store)).toHaveLength(1);
+    // online events and new flushes do not clear the hold
+    q.retryNow();
+    q.enqueue(ev(2));
+    await q.flush();
+    expect(calls).toHaveLength(n);
+    await q.stop();
+  });
+
+  it('resume() after the token was refreshed sends again', async () => {
+    let n = 0;
+    const calls: SignedBatch[] = [];
+    const { q } = await eventQueue([], {
+      transport: {
+        sendBatch: (b) => {
+          calls.push(b);
+          return Promise.resolve(++n <= 3 ? { kind: 'AUTH', code: 'TOKEN_EXPIRED' } : 'OK');
+        },
+      },
+      onReauthRequired: () => undefined,
+    });
+    q.enqueue(ev(1));
+    await q.flush();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(q.stats().sentBatches).toBe(0);
+    q.resume();
     await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
-    expect(lost).toBe(1);
+    await q.stop();
+  });
+
+  it('TOKEN_EXPIRED reports its reason', async () => {
+    const reasons: string[] = [];
+    const { q } = await eventQueue([{ kind: 'AUTH', code: 'TOKEN_EXPIRED' }], {
+      authLostAfter: 1,
+      onReauthRequired: (r) => reasons.push(r),
+    });
+    q.enqueue(ev(1));
+    await q.flush();
+    await vi.waitFor(() => expect(reasons).toEqual(['TOKEN_EXPIRED']));
     await q.stop();
   });
 
@@ -476,25 +520,12 @@ describe('401: lost authentication (FR-601, TC-063)', () => {
     let lost = 0;
     const { q } = await eventQueue(
       [{ kind: 'AUTH' }, { kind: 'AUTH' }, 'RETRY', { kind: 'AUTH' }, { kind: 'AUTH' }, 'OK'],
-      { onAuthLost: () => lost++ },
+      { onReauthRequired: () => lost++ },
     );
     q.enqueue(ev(1));
     await q.flush();
     await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
     expect(lost).toBe(0);
-    await q.stop();
-  });
-
-  it('authLostAfter is configurable', async () => {
-    let lost = 0;
-    const { q } = await eventQueue([{ kind: 'AUTH' }, 'OK'], {
-      authLostAfter: 1,
-      onAuthLost: () => lost++,
-    });
-    q.enqueue(ev(1));
-    await q.flush();
-    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
-    expect(lost).toBe(1);
     await q.stop();
   });
 
@@ -510,22 +541,203 @@ describe('401: lost authentication (FR-601, TC-063)', () => {
     expect(await stored(store)).toEqual([]);
   });
 
-  it('TOKEN_EXPIRED while live is NOT given up on: it counts toward authLost and is retried', async () => {
-    let lost = 0;
-    const { q, calls } = await eventQueue([{ kind: 'AUTH', code: 'TOKEN_EXPIRED' }], {
-      onAuthLost: () => lost++,
+  it('finish() while held after repeated 401 returns at once and counts the loss', async () => {
+    const { q, store } = await eventQueue([{ kind: 'AUTH' }], { authLostAfter: 1 });
+    q.enqueue(ev(1));
+    await q.flush();
+    const t0 = Date.now();
+    const r = await q.finish(10_000);
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(r.lostBatches).toBe(1);
+    expect(await stored(store)).toEqual([]);
+  });
+});
+
+describe('Retry-After binds every caller (FR-601, TC-063)', () => {
+  it('retryNow(), a new flush and finish() nudges do not send before Retry-After', async () => {
+    const { q, calls } = await eventQueue([{ kind: 'RETRY', retryAfterMs: 500 }, 'OK'], {
+      backoffBaseMs: 10,
+      backoffMaxMs: 10,
     });
     q.enqueue(ev(1));
     await q.flush();
-    await new Promise((r) => setTimeout(r, 150));
-    expect(calls.length).toBeGreaterThanOrEqual(3);
-    expect(lost).toBe(1);
+    expect(calls).toHaveLength(1);
+    q.retryNow();
+    q.enqueue(ev(2));
+    await q.flush();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(calls).toHaveLength(1);
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(2), { timeout: 3000 });
+    await q.stop();
+  });
+});
+
+describe('re-sign uses the key each batch was signed with (ADR 0013 section 2; FR-601, TC-063)', () => {
+  it('(a) batches stored under an old key and a queue that already has the new key: re-signed without asking the provider', async () => {
+    const store = newStore();
+    const key1 = await importSessionKey(TEST_KEY_B64);
+    const key2 = await importSessionKey(KEY2_B64);
+    // First page load: K1, offline, two batches persisted.
+    const off = new EventQueue({
+      sessionId: 's',
+      key: key1,
+      store,
+      transport: scripted(['RETRY']).transport,
+      jitter: 0,
+      backoffBaseMs: 600_000,
+      flushIntervalMs: 10_000,
+    });
+    await off.start();
+    off.enqueue(ev(0));
+    await off.flush();
+    off.enqueue(ev(1));
+    await off.flush();
+    await off.stop();
+    // Reload after an OTP resume: the queue is built with K2; the server calls K1 batches stale.
+    let asked = 0;
+    const sent: SignedBatch[] = [];
+    const q = new EventQueue({
+      sessionId: 's',
+      key: key2,
+      store,
+      transport: {
+        sendBatch: (b) => {
+          sent.push(b);
+          return Promise.resolve(
+            b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' },
+          );
+        },
+      },
+      onKeyStale: () => {
+        asked++;
+        return Promise.resolve(null); // the real server answers KEY_ALREADY_ISSUED
+      },
+      onKeyUnavailable: () => undefined,
+      jitter: 0,
+      backoffBaseMs: 20,
+    });
+    await q.start();
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(2), { timeout: 3000 });
+    expect(asked).toBe(0);
+    expect(sent.filter((b) => b.signature === hmacHex(KEY2_B64, b.body)).map((b) => b.seq)).toEqual(
+      [0, 1],
+    );
+    expect(q.stats().lostBatches).toBe(0);
+    await q.stop();
+  });
+
+  it('only a batch signed with the CURRENT key that is itself stale asks the provider, passing that key', async () => {
+    const key1 = await importSessionKey(TEST_KEY_B64);
+    const key2 = await importSessionKey(KEY2_B64);
+    const seen: CryptoKey[] = [];
+    const { q } = await eventQueue([{ kind: 'KEY_STALE' }, 'OK'], {
+      key: key1,
+      onKeyStale: (k) => {
+        seen.push(k);
+        return Promise.resolve(key2);
+      },
+    });
+    q.enqueue(ev(1));
+    await q.flush();
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
+    expect(seen).toEqual([key1]);
+    await q.stop();
+  });
+
+  it('(b) a key change while a batch is being signed: the batch joins the outbox signed with the NEW key', async () => {
+    const key2 = await importSessionKey(KEY2_B64);
+    const { q, calls } = await eventQueue(['OK']);
+    // Hold the next sign() so the key can change while the cut is in its awaits.
+    const realSign = crypto.subtle.sign.bind(crypto.subtle);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let held = false;
+    vi.spyOn(crypto.subtle, 'sign').mockImplementation(async (...a) => {
+      if (!held) {
+        held = true;
+        await gate;
+      }
+      return realSign(...a);
+    });
+    q.enqueue(ev(1));
+    const flushing = q.flush();
+    await new Promise((r) => setTimeout(r, 20));
+    const swapped = q.setKey(key2); // while the cut is mid-signing with the old key
+    release();
+    await Promise.all([flushing, swapped]);
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
+    vi.restoreAllMocks();
+    expect(calls[0]?.signature).toBe(hmacHex(KEY2_B64, calls[0]?.body ?? ''));
+    await q.stop();
+  });
+
+  it('(c) a signing failure halfway through the re-sign leaves nothing dropped and every batch ends up valid', async () => {
+    const key2 = await importSessionKey(KEY2_B64);
+    const { q, calls } = await eventQueue(
+      [{ kind: 'RETRY' }, { kind: 'RETRY' }, { kind: 'RETRY' }, 'OK'],
+      { backoffBaseMs: 600_000, backoffMaxMs: 600_000 },
+    );
+    for (let i = 0; i < 3; i++) {
+      q.enqueue(ev(i));
+      await q.flush();
+    }
+    const real = crypto.subtle.sign.bind(crypto.subtle);
+    let n = 0;
+    vi.spyOn(crypto.subtle, 'sign').mockImplementation((...a) => {
+      if (++n === 2) return Promise.reject(new Error('boom'));
+      return real(...a);
+    });
+    await q.setKey(key2); // seq 0 re-signed, seq 1 fails
+    vi.restoreAllMocks();
+    expect(q.stats().sentBatches).toBe(0);
+    // The server rejects whatever is still signed with the old key; the head check re-signs the rest.
+    q.retryNow();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(q.stats().rejectedBatches).toBe(0);
+    expect(calls.length).toBeGreaterThan(3);
+    await q.stop();
+  });
+
+  it('a hung key provider is given up and the batch is kept (timeout)', async () => {
+    const { q } = await eventQueue([{ kind: 'KEY_STALE' }], {
+      keyProviderTimeoutMs: 50,
+      onKeyStale: () => new Promise<CryptoKey | null>(() => undefined),
+    });
+    q.enqueue(ev(1));
+    await q.flush();
+    await new Promise((r) => setTimeout(r, 200));
     expect(q.stats().unsentBatches).toBe(1);
     await q.stop();
   });
 });
 
-describe('session wiring', { timeout: 15_000 }, () => {
+describe('end of session and stop() (FR-702, TC-063)', () => {
+  it('SESSION_TAKEN_OVER arriving after stop() does not delete the outbox kept for the next load', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const { q, store } = await eventQueue([], {
+      transport: {
+        sendBatch: async (): Promise<SendResult> => {
+          calls++;
+          if (calls === 1) return 'RETRY';
+          await gate; // the retry-timer send is still in flight when stop() runs
+          return { kind: 'ENDED', reason: 'TAKEN_OVER' };
+        },
+      },
+    });
+    q.enqueue(ev(1));
+    await q.flush();
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await q.stop();
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await stored(store)).toHaveLength(1);
+    expect(q.stats().ended).toBeNull();
+  });
+});
+
+describe('session wiring (FR-601, FR-609, FR-702, TC-063)', { timeout: 15_000 }, () => {
   function rig(over: Partial<ProctorSessionConfig> = {}, send?: () => SendResult) {
     const heartbeat = vi.fn((): Promise<boolean | { ended: 'SESSION_NOT_ACTIVE' | 'TAKEN_OVER' }> =>
       Promise.resolve(true),
@@ -558,42 +770,101 @@ describe('session wiring', { timeout: 15_000 }, () => {
     return { cfg, sent, ksSent, heartbeat };
   }
 
-  it('one key refresh serves both queues: the provider is asked once', async () => {
+  /** A detector that exposes ctx.emit so a test can produce an event batch. */
+  function emitter() {
+    let emit: (() => void) | null = null;
+    const detector = {
+      id: 'test-emitter',
+      start: (ctx: Parameters<import('./types').Detector['start']>[0]) => {
+        emit = () => ctx.emit('TAB_SWITCH', {}, { durationMs: 1 });
+      },
+      stop: () => undefined,
+    };
+    return { detector, fire: () => emit?.() };
+  }
+
+  it('one key refresh serves both queues: the event and the keystroke queue hit KEY_STALE, the provider is asked once', async () => {
     let asked = 0;
+    const em = emitter();
     const r = rig({
+      detectors: [em.detector],
       keyProvider: {
-        getKey: () => {
+        getKey: async () => {
           asked++;
-          return Promise.resolve(KEY2_B64);
+          await new Promise((x) => setTimeout(x, 30));
+          return KEY2_B64;
         },
       },
     });
-    let stale = true;
+    const staleIfOld = (b: SignedBatch): SendResult =>
+      b.signature === hmacHex(TEST_KEY_B64, b.body) ? { kind: 'KEY_STALE' } : 'OK';
     r.cfg.transport.sendBatch = (b) => {
       r.sent.push(b);
-      return Promise.resolve(
-        b.signature === hmacHex(TEST_KEY_B64, b.body) && stale ? { kind: 'KEY_STALE' } : 'OK',
-      );
+      return Promise.resolve(staleIfOld(b));
     };
     r.cfg.transport.sendKeystrokeBatch = (b) => {
       r.ksSent.push(b);
+      return Promise.resolve(staleIfOld(b));
+    };
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    em.fire();
+    s.keystrokes?.reset(Q1, 'python', 'a');
+    await vi.waitFor(
+      () => {
+        expect(s.getKeystrokeStats()?.sentBatches).toBe(1);
+        expect(s.getQueueStats()?.sentBatches).toBe(1);
+      },
+      { timeout: 6000 },
+    );
+    expect(asked).toBe(1);
+    await s.stop();
+  });
+
+  it('setKey() hands a new key to both queues; onKeyStale is raised when no provider exists (ADR 0013 section 2)', async () => {
+    const em = emitter();
+    let staleCalls = 0;
+    const r = rig({ detectors: [em.detector], onKeyStale: () => staleCalls++ });
+    r.cfg.transport.sendBatch = (b) => {
+      r.sent.push(b);
       return Promise.resolve(
-        b.signature === hmacHex(TEST_KEY_B64, b.body) && stale ? { kind: 'KEY_STALE' } : 'OK',
+        b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' },
       );
     };
     const s = new ProctorSession();
     await s.start(r.cfg);
-    s.keystrokes?.reset(Q1, 'python', 'a');
-    s.keystrokes?.recordChange({ offset: 1, deleteLength: 0, text: 'b' });
-    // an event from a detector-less session: use the queue through emit via capability path is not
-    // possible, so push one through the public recorder only and check the key is shared below
-    await vi.waitFor(() => expect(s.getKeystrokeStats()?.sentBatches).toBeGreaterThan(0), {
-      timeout: 6000,
+    em.fire();
+    await vi.waitFor(() => expect(staleCalls).toBe(1), { timeout: 6000 });
+    expect(s.getQueueStats()?.unsentBatches).toBe(1);
+    await s.setKey(KEY2_B64);
+    await vi.waitFor(() => expect(s.getQueueStats()?.sentBatches).toBe(1), { timeout: 6000 });
+    await s.stop();
+  });
+
+  it('a throwing getKey() does not stick: the next KEY_STALE asks again', async () => {
+    const em = emitter();
+    let asked = 0;
+    const r = rig({
+      detectors: [em.detector],
+      keyProvider: {
+        getKey: () => {
+          asked++;
+          if (asked === 1) throw new Error('sync boom');
+          return Promise.resolve(KEY2_B64);
+        },
+      },
     });
-    stale = false;
-    expect(asked).toBe(1);
-    const last = r.ksSent[r.ksSent.length - 1];
-    expect(last?.signature).toBe(hmacHex(KEY2_B64, last?.body ?? ''));
+    r.cfg.transport.sendBatch = (b) => {
+      r.sent.push(b);
+      return Promise.resolve(
+        b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' },
+      );
+    };
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    em.fire();
+    await vi.waitFor(() => expect(s.getQueueStats()?.sentBatches).toBe(1), { timeout: 8000 });
+    expect(asked).toBe(2);
     await s.stop();
   });
 
@@ -604,7 +875,10 @@ describe('session wiring', { timeout: 15_000 }, () => {
     s.on('ended', (e) => ended.push(e.reason));
     await s.start(r.cfg);
     s.keystrokes?.reset(Q1, 'python', 'a');
+    const flags: string[] = [];
+    s.on('capability', (f) => flags.push(f.id));
     await vi.waitFor(() => expect(ended).toEqual(['SESSION_NOT_ACTIVE']), { timeout: 6000 });
+    expect(flags).toContain('batches-lost');
     const beats = r.heartbeat.mock.calls.length;
     await new Promise((x) => setTimeout(x, 120));
     expect(r.heartbeat.mock.calls.length).toBe(beats);
@@ -613,26 +887,64 @@ describe('session wiring', { timeout: 15_000 }, () => {
     await s.stop();
   });
 
-  it('a heartbeat that learns the session was taken over ends both queues', async () => {
+  it('a heartbeat that learns the session was taken over ends both queues and asks for re-authentication', async () => {
     const r = rig();
     r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' as const }));
+    const reauth: string[] = [];
+    r.cfg.onReauthRequired = (x) => reauth.push(x);
     const s = new ProctorSession();
     const ended: string[] = [];
     s.on('ended', (e) => ended.push(e.reason));
     await s.start(r.cfg);
     await vi.waitFor(() => expect(ended).toEqual(['TAKEN_OVER']));
     expect(s.getKeystrokeStats()?.ended).toBe('TAKEN_OVER');
+    expect(reauth).toEqual(['SESSION_TAKEN_OVER']);
     await s.stop();
   });
 
-  it('repeated 401 fires auth-lost; rejected batches raise counted flags without content', async () => {
-    const r = rig({ authLostAfter: 2 }, () => ({ kind: 'AUTH' }));
+  it('a heartbeat SESSION_NOT_ACTIVE stops the heartbeat and fires ended but the queued batches STILL go out (post-submit grace)', async () => {
+    const em = emitter();
+    // Batches fail (offline) until the heartbeat has reported the end; then the grace accepts them.
+    let accept = false;
+    const r = rig({ detectors: [em.detector] }, () => (accept ? 'OK' : 'RETRY'));
     const s = new ProctorSession();
+    const ended: { reason: string; lostBatches: number }[] = [];
+    s.on('ended', (e) => ended.push(e));
+    await s.start(r.cfg);
+    em.fire();
+    s.keystrokes?.reset(Q1, 'python', 'a');
+    await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'SESSION_NOT_ACTIVE' as const }));
+    await vi.waitFor(() => expect(ended).toHaveLength(1), { timeout: 3000 });
+    expect(ended[0]).toEqual({ reason: 'SESSION_NOT_ACTIVE', lostBatches: 0 });
+    expect(s.getQueueStats()?.unsentBatches).toBe(1); // not purged
+    expect(s.getQueueStats()?.ended).toBeNull();
+    accept = true;
+    await vi.waitFor(() => expect(s.getQueueStats()?.sentBatches).toBe(1), { timeout: 6000 });
+    await s.stop();
+  });
+
+  it('a late takeover after stop() leaves the kept outbox alone and fires nothing', async () => {
+    const r = rig();
+    const s = new ProctorSession();
+    const ended: string[] = [];
+    s.on('ended', (e) => ended.push(e.reason));
+    await s.start(r.cfg);
+    await s.stop();
+    r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' as const }));
+    await new Promise((x) => setTimeout(x, 100));
+    expect(ended).toEqual([]);
+  });
+
+  it('repeated 401 raises onReauthRequired; rejected batches raise counted flags without content', async () => {
     const lost: string[] = [];
-    s.on('auth-lost', (e) => lost.push(e.stream));
+    const r = rig({ authLostAfter: 2, onReauthRequired: (x) => lost.push(x) }, () => ({
+      kind: 'AUTH',
+    }));
+    const s = new ProctorSession();
     await s.start(r.cfg);
     s.keystrokes?.reset(Q1, 'python', 'secret code');
-    await vi.waitFor(() => expect(lost).toEqual(['keystroke']), { timeout: 6000 });
+    await vi.waitFor(() => expect(lost).toEqual(['UNAUTHENTICATED']), { timeout: 6000 });
     await s.stop();
 
     const r2 = rig({}, () => ({ kind: 'REJECTED', code: 'SEQ_CONFLICT' }));

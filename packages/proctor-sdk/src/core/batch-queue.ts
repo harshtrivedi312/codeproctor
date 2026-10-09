@@ -91,20 +91,30 @@ export interface BatchQueueOptions {
   /** Called when the server refused a batch for good (4xx): the batch is dropped. `code` is the problem code, never content. */
   onRejected?: (code?: string) => void;
   /**
-   * 409 KEY_EPOCH_STALE: return the new signing key (or null when there is none). The queue then
-   * signs every unsent batch AGAIN from its stored body (same body, same seq) and retries at once.
-   * Without it, or when it returns null, the batches are held and kept (never dropped).
-   * Receives the key the failed batch was signed with, so a provider shared by several queues can
-   * hand out an already refreshed key instead of asking the server twice.
+   * 409 KEY_EPOCH_STALE on a batch that was signed with the queue's CURRENT key: ask for a newer
+   * key (or null when there is none). The queue then signs every unsent batch AGAIN from its stored
+   * body (same body, same seq) and retries at once. Without it, or when it returns null, the
+   * batches are held and kept (never dropped). Receives that current key, so a provider shared by
+   * several queues can hand out an already refreshed key instead of asking the server twice.
+   * A batch that was signed with an OLDER key (or loaded from IndexedDB, key unknown) is simply
+   * signed again with the current key first, without asking (ADR 0013 section 2: after an OTP
+   * resume the new key is already here and the server issues it only once).
    */
   onKeyStale?: (staleKey: CryptoKey) => Promise<CryptoKey | null>;
+  /** A hung key provider is given up after this long and treated as a transient failure (default 10 s). */
+  keyProviderTimeoutMs?: number;
   /** The queue holds its batches because it has no usable key (once per episode). */
   onKeyUnavailable?: (why: 'STALE_NO_KEY' | 'ALREADY_ISSUED') => void;
-  /** 409 SESSION_NOT_ACTIVE or SESSION_TAKEN_OVER: called once, the queue has stopped and purged. */
+  /** 409 SESSION_NOT_ACTIVE (batch route) or SESSION_TAKEN_OVER: called once, the queue has stopped and purged. */
   onEnded?: (reason: EndReason) => void;
-  /** This many consecutive 401 answers while live call onAuthLost once (default 3); retries continue slowly. */
+  /**
+   * After this many consecutive 401 answers (default 3) the queue STOPS: no more retries, the
+   * batches stay persisted, and `onReauthRequired` is called once (ADR 0013 section 5.2: never retry
+   * forever). Only resume() continues, after the app refreshed the token; online events and finish()
+   * do not clear the hold.
+   */
   authLostAfter?: number;
-  onAuthLost?: () => void;
+  onReauthRequired?: (reason: 'TOKEN_EXPIRED' | 'UNAUTHENTICATED') => void;
   /** Called when IndexedDB works again after a degraded period. */
   onStorageRecovered?: () => void;
   /** Called when the sequence counter could not be read and the queue seeded it high (holes, no collisions). */
@@ -197,7 +207,12 @@ export class BatchQueue<TItem> {
   private keyBlocked = false;
   private keyStaleRounds = 0;
   private auth401 = 0;
-  private authLostSignalled = false;
+  /** 3 consecutive 401: stopped until resume(). */
+  private authHold = false;
+  /** Retry-After: nothing is sent before this time, whoever asks (flush, online, finish nudges). */
+  private notBefore = 0;
+  /** The key each unsent batch was signed with (memory only; a batch loaded from IndexedDB is unknown). */
+  private readonly signedWith = new WeakMap<SignedBatch, CryptoKey>();
 
   constructor(
     private readonly opts: BatchQueueOptions,
@@ -379,13 +394,15 @@ export class BatchQueue<TItem> {
       const seq = this.nextSeq++;
       const { body, consumed } = this.spec.cut(this.pending, seq);
       this.pending.splice(0, Math.max(1, consumed));
-      const signature = await signHex(this.key, body);
+      let usedKey = this.key;
+      let signature = await signHex(usedKey, body);
       if (this.closed) {
         // finish() closed the queue while this batch was being signed: nothing may be persisted.
         this.lostAtClose++;
         break;
       }
-      const batch: SignedBatch = { seq, body, signature };
+      let batch: SignedBatch = { seq, body, signature };
+      this.signedWith.set(batch, usedKey);
       // Persist before sending: if the tab dies mid-request the batch is replayed (idempotent seq).
       const now = Date.now();
       const probe =
@@ -406,6 +423,24 @@ export class BatchQueue<TItem> {
       // a localStorage backup), so a reload never restarts below an acknowledged seq.
       await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
       this.writeBackup();
+      // The key may have been replaced while this batch was being signed or stored (setKey or a
+      // refresh after KEY_EPOCH_STALE): sign again with the current one before it joins the outbox.
+      // No await sits between the last check and the push.
+      while (usedKey !== this.key && !this.closed) {
+        usedKey = this.key;
+        signature = await signHex(usedKey, body);
+        batch = { seq, body, signature };
+        this.signedWith.set(batch, usedKey);
+        if (!this.storageDegraded) {
+          await this.opts.store
+            .put(STORES.eventBatches, this.batchKey(seq), batch)
+            .catch(() => undefined);
+        }
+      }
+      if (this.closed) {
+        this.lostAtClose++;
+        break;
+      }
       this.outbox.push(batch);
       void this.touch.touch();
     }
@@ -413,6 +448,18 @@ export class BatchQueue<TItem> {
 
   private async drain(): Promise<void> {
     if (this.draining || !this.started || this.finished || this.ended) return;
+    if (this.authHold) return; // stopped after repeated 401 until resume()
+    const wait = this.notBefore - Date.now();
+    if (wait > 0) {
+      // Retry-After is binding for every caller (flush, online, finish nudges).
+      if (!this.retryTimer && this.outbox.length > 0) {
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          void this.drain();
+        }, wait);
+      }
+      return;
+    }
     this.draining = true;
     try {
       while (this.outbox.length > 0 && !this.ended) {
@@ -428,6 +475,9 @@ export class BatchQueue<TItem> {
         if (out.kind !== 'AUTH') this.auth401 = 0;
         switch (out.kind) {
           case 'RETRY':
+            if (out.retryAfterMs !== undefined) {
+              this.notBefore = Date.now() + Math.min(MAX_RETRY_AFTER_MS, out.retryAfterMs);
+            }
             this.scheduleRetry(out.retryAfterMs);
             return;
           case 'AUTH': {
@@ -439,14 +489,21 @@ export class BatchQueue<TItem> {
               return;
             }
             this.auth401++;
-            if (this.auth401 >= (this.opts.authLostAfter ?? 3) && !this.authLostSignalled) {
-              this.authLostSignalled = true;
-              this.safely(() => this.opts.onAuthLost?.());
+            if (this.auth401 >= (this.opts.authLostAfter ?? 3)) {
+              // Stop: no timer, batches stay persisted. The app refreshes the token and calls resume().
+              this.authHold = true;
+              if (this.retryTimer) clearTimeout(this.retryTimer);
+              this.retryTimer = null;
+              const reason = out.code === 'TOKEN_EXPIRED' ? 'TOKEN_EXPIRED' : 'UNAUTHENTICATED';
+              this.safely(() => this.opts.onReauthRequired?.(reason));
+              return;
             }
-            this.scheduleRetry(); // the app may refresh the token (getToken is read per request)
+            this.scheduleRetry(); // getToken is read per request: a refreshed token may already be there
             return;
           }
           case 'ENDED':
+            // After stop() the batches are kept for the next page load, which will see the answer itself.
+            if (!this.started && !this.finishing) return;
             await this.endSession(out.reason);
             return;
           case 'KEY_STALE': {
@@ -464,7 +521,6 @@ export class BatchQueue<TItem> {
               .catch(() => undefined);
             this.keyBlocked = false;
             this.keyStaleRounds = 0;
-            this.authLostSignalled = false;
             if (out.kind === 'OK') this.sent++;
             else {
               this.rejected++;
@@ -494,23 +550,60 @@ export class BatchQueue<TItem> {
     this.scheduleRetry();
   }
 
+  /** Sign every unsent batch that was not signed with the current key again (same body, same seq). */
+  private async resignOutbox(): Promise<boolean> {
+    for (let pass = 0; pass < 3; pass++) {
+      const k = this.key;
+      for (let i = 0; i < this.outbox.length && !this.ended; i++) {
+        const b = this.outbox[i];
+        if (!b || this.signedWith.get(b) === k) continue;
+        let signature: string;
+        try {
+          signature = await signHex(k, b.body);
+        } catch {
+          return false; // the rest is re-signed on the next KEY_EPOCH_STALE (the head check catches it)
+        }
+        if (this.ended || this.finished) return false;
+        const again: SignedBatch = { seq: b.seq, body: b.body, signature };
+        this.signedWith.set(again, k);
+        const at = this.outbox.indexOf(b);
+        if (at >= 0) this.outbox[at] = again;
+        if (!this.storageDegraded) {
+          await this.opts.store
+            .put(STORES.eventBatches, this.batchKey(again.seq), again)
+            .catch(() => undefined);
+        }
+      }
+      if (this.key === k) return true;
+    }
+    return true;
+  }
+
   /**
-   * KEY_EPOCH_STALE: ask for the new key and sign every unsent batch again from its stored body.
-   * Returns true when the head should be retried right away. Nothing is ever dropped here.
+   * KEY_EPOCH_STALE. If the head batch was not signed with the current key (loaded from IndexedDB,
+   * or signed before a key change) it just needs signing again with the key we already have: no
+   * provider call, because the server issues a key only once per epoch (KEY_ALREADY_ISSUED).
+   * Only when a batch signed with the CURRENT key is itself stale is a newer key requested.
+   * Nothing is ever dropped here. Returns true when the head should be retried right away.
    */
   private async handleKeyStale(): Promise<boolean> {
+    const head = this.outbox[0];
+    if (head && this.signedWith.get(head) !== this.key) {
+      const ok = await this.resignOutbox();
+      if (!ok) this.scheduleRetry();
+      return ok && !this.ended && !this.finished;
+    }
     const provider = this.opts.onKeyStale;
-    // A key that was just replaced and is stale again means the provider hands out the same key:
-    // stop after a few rounds instead of looping, and hold.
+    // A provider that hands out a stale key again would loop: stop after a few rounds and hold.
     if (!provider || this.keyStaleRounds >= 3) {
       this.holdForKey('STALE_NO_KEY');
       return false;
     }
     let fresh: CryptoKey | null;
     try {
-      fresh = await provider(this.key);
+      fresh = await this.withTimeout(provider(this.key), this.opts.keyProviderTimeoutMs ?? 10_000);
     } catch {
-      this.scheduleRetry(); // transient (network): not a verdict on the key
+      this.scheduleRetry(); // transient (network, hung provider): not a verdict on the key
       return false;
     }
     if (!fresh) {
@@ -518,28 +611,42 @@ export class BatchQueue<TItem> {
       return false;
     }
     this.keyStaleRounds++;
-    this.key = fresh; // batches cut from now on use the new key too
-    for (let i = 0; i < this.outbox.length && !this.ended; i++) {
-      const b = this.outbox[i];
-      if (!b) break;
-      let signature: string;
-      try {
-        signature = await signHex(fresh, b.body);
-      } catch {
-        this.scheduleRetry();
-        return false;
-      }
-      if (this.ended || this.finished) return false;
-      const again: SignedBatch = { seq: b.seq, body: b.body, signature };
-      this.outbox[i] = again; // same body, same seq, new signature
-      if (!this.storageDegraded) {
-        await this.opts.store
-          .put(STORES.eventBatches, this.batchKey(again.seq), again)
-          .catch(() => undefined);
-      }
-    }
+    this.setKeyInternal(fresh);
+    const ok = await this.resignOutbox();
+    if (!ok) this.scheduleRetry();
+    return ok && !this.ended && !this.finished;
+  }
+
+  private withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), ms);
+    });
+    return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  private setKeyInternal(k: CryptoKey): void {
+    this.key = k; // batches cut from now on use it too
     this.keyBlocked = false;
-    return !this.ended && !this.finished;
+  }
+
+  /**
+   * The app (or a provider) hands over a new signing key (ADR 0013 section 2 `setKey`): every
+   * unsent batch is signed again from its stored body and sending resumes.
+   */
+  async setKey(k: CryptoKey): Promise<void> {
+    if (this.ended || this.closed) return;
+    this.keyStaleRounds = 0;
+    this.setKeyInternal(k);
+    await this.resignOutbox();
+    this.retryNow();
+  }
+
+  /** After the app refreshed the candidate token: clear the 401 hold and send again. */
+  resume(): void {
+    this.auth401 = 0;
+    this.authHold = false;
+    this.retryNow();
   }
 
   /** The session is over for good (or taken over): stop sending and purge everything (FR-702). */
@@ -564,6 +671,8 @@ export class BatchQueue<TItem> {
 
   /** Called by the session when the OTHER stream (or the heartbeat) learned that the session ended. */
   end(reason: EndReason): Promise<void> {
+    // A queue that stop() already closed keeps its outbox for the next page load.
+    if (!this.started && !this.finishing) return Promise.resolve();
     return this.endSession(reason);
   }
 
@@ -581,7 +690,10 @@ export class BatchQueue<TItem> {
     }, delay);
   }
 
-  /** Retry now (for example on the browser `online` event). */
+  /**
+   * Retry now (for example on the browser `online` event). Does not override Retry-After (the send
+   * waits for it) and does not clear the 401 hold (only resume() does).
+   */
   retryNow(): void {
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
@@ -624,6 +736,7 @@ export class BatchQueue<TItem> {
       Date.now() < deadline &&
       !this.ended && // the session is over: nothing more can be sent
       !this.tokenExpiredAtFinish && // post-finish 401 TOKEN_EXPIRED: the tail is lost, no retry
+      !this.authHold && // repeated 401: waiting cannot help until the app resumes
       !this.keyBlocked // no usable key: waiting cannot help
     ) {
       // Normal backoff applies; only nudge a waiting retry at most once a second, so a 5xx or 429
