@@ -135,6 +135,15 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     permission: 'candidate_section:finish',
   },
   'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'GET /candidate/session/test': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
+  'GET /candidate/questions/:questionId': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:read',
+  },
+  'GET /candidate/session/accommodations': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:read',
+  },
   // Practice question (FR-406): fixed content, nothing stored.
   'GET /candidate/session/practice': {
     principal: 'CANDIDATE',
@@ -159,6 +168,12 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
   'POST /candidate/session/keystrokes': {
     principal: 'CANDIDATE',
     permission: 'candidate_keystrokes:write',
+  },
+  // The pre-start system check reuses the heartbeat permission: the shared contract has no
+  // candidate_system_check:submit yet (hub question, FU-BEB-152).
+  'POST /candidate/session/system-check': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:heartbeat',
   },
   'POST /candidate/session/proctor-key': {
     principal: 'CANDIDATE',

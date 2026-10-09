@@ -38,7 +38,7 @@ describe('DL-37 503 BUSY: the pure rules', () => {
     }
   });
 
-  it('credential and re-auth routes are never retried; reads and ordinary writes are', () => {
+  it('credential, re-auth and candidate routes are never retried; staff reads and ordinary writes are', () => {
     for (const [path, method] of [
       ['/v1/auth/login', 'POST'],
       ['/v1/auth/2fa/verify', 'POST'],
@@ -54,6 +54,8 @@ describe('DL-37 503 BUSY: the pure rules', () => {
       ['/v1/admin/users/abc/2fa/reset/start', 'POST'],
       ['/api/v1/auth/login', 'POST'],
       ['/v1/candidate/questions/q1/run', 'POST'],
+      ['/v1/candidate/session', 'GET'], // candidate routes: never, whatever the method (FR-502)
+      ['/api/v1/candidate/session', 'GET'],
     ] as const) {
       expect(isNoRetryRoute(path, method), `${method} ${path}`).toBe(true);
     }
@@ -64,6 +66,7 @@ describe('DL-37 503 BUSY: the pure rules', () => {
       ['/v1/questions/q1', 'PATCH'],
       ['/v1/tests', 'POST'],
       ['/v1/tests/t1/invitations', 'POST'],
+      ['/v1/candidates/c1', 'GET'], // "candidates" is a staff path, not the candidate API
     ] as const) {
       expect(isNoRetryRoute(path, method), `${method} ${path}`).toBe(false);
     }

@@ -5,6 +5,8 @@ import { GradingModule } from '../grading/grading.module';
 import { SessionModule } from '../session/session.module';
 import { AnswersController } from './answers.controller';
 import { AnswersService } from './answers.service';
+import { QuestionsController } from './questions.controller';
+import { QuestionViewService } from './question-view.service';
 import { QuestionGateService } from './question-gate.service';
 import { SubmitLimiter } from './submit-limiter';
 
@@ -12,7 +14,7 @@ import { SubmitLimiter } from './submit-limiter';
 // one CandidateScope, the token service and the per-session rate limiter.
 @Module({
   imports: [CandidateModule, SessionModule, ExecutionModule, GradingModule],
-  controllers: [AnswersController],
-  providers: [AnswersService, QuestionGateService, SubmitLimiter],
+  controllers: [AnswersController, QuestionsController],
+  providers: [AnswersService, QuestionGateService, QuestionViewService, SubmitLimiter],
 })
 export class SubmissionsModule {}

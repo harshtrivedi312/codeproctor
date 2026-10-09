@@ -27,6 +27,7 @@ const ALLOWED: ReadonlyArray<readonly [SessionStatus, SessionStatus]> = [
   ['IN_PROGRESS', 'SUBMITTED'],
   ['PAUSED', 'IN_PROGRESS'],
   ['PAUSED', 'SUBMITTED'],
+  ['PAUSED', 'PAUSED'],
   ['SUBMITTED', 'GRADED'],
   ['GRADED', 'UNDER_REVIEW'],
   ['UNDER_REVIEW', 'COMPLETED'],

@@ -104,8 +104,9 @@ describe('DL-37 a busy service is a calm state, not an error page', () => {
     await u.type(within(dialog).getByLabelText('Full name'), 'Jo Newperson');
     await u.type(within(dialog).getByLabelText('Work email'), 'jo@example.test');
     await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    // The unknown-outcome 500 (FU-BE-208): the list is read, the person is not in it.
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      /Check the list before trying again/,
+      /may have been sent[\s\S]*probably was not created/,
     );
     expect(writes()).toHaveLength(1);
     expect(

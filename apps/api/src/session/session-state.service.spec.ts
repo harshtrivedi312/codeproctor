@@ -12,7 +12,7 @@ import { createPrismaClient } from '../database/create-prisma-client';
 import { startMigratedDatabase } from '../database/testing/migrated-postgres';
 import type { MigratedDatabase } from '../database/testing/migrated-postgres';
 import type { PrismaClient } from '../generated/prisma/client.js';
-import type { SessionStatus } from '../generated/prisma/enums.js';
+import type { PauseReason, SessionStatus } from '../generated/prisma/enums.js';
 import { createInvitation, createTenant } from '../candidate/testing/fixtures';
 import type { Tenant } from '../candidate/testing/fixtures';
 import { SessionLockRetryError } from '../database/errors';
@@ -63,7 +63,10 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
     TRANSITIONS[from].map((to) => [from, to] as const),
   );
 
-  it.each(EDGES)('FR-106: %s to %s is applied', async (from, to) => {
+  // PAUSED to PAUSED is not a plain status edge: it changes the pause reasons only and has its own
+  // tests below (compare-and-set required, clock untouched, PROCTOR kept).
+  const PLAIN_EDGES = EDGES.filter(([from, to]) => !(from === 'PAUSED' && to === 'PAUSED'));
+  it.each(PLAIN_EDGES)('FR-106: %s to %s is applied', async (from, to) => {
     const id = await sessionIn(from);
     const now = new Date('2026-10-05T12:00:00.000Z');
     await inOrg(() => service.transition({ sessionId: id, from, to, now }));
@@ -174,6 +177,152 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
       const id = await pausedWith(['FULLSCREEN_EXIT', 'PROCTOR']);
       await inOrg(() => service.transition({ sessionId: id, from: 'PAUSED', to: 'IN_PROGRESS' }));
       expect((await read(id)).status).toBe('IN_PROGRESS');
+    });
+  });
+
+  describe('PAUSED to PAUSED: the pause reasons change, the clock does not (stale pause_reasons gap, ADR 0013 CS-4.4a)', () => {
+    async function paused(reasons: Array<'FULLSCREEN_EXIT' | 'SCREEN_SHARE_STOPPED' | 'PROCTOR'>) {
+      const inv = await createInvitation(owner, tenant, {
+        status: 'PAUSED',
+        session: { pauseReasons: reasons, deadlineAt: new Date('2030-01-01T10:00:00Z') },
+      });
+      await owner.session.update({
+        where: { id: inv.sessionId },
+        data: {
+          pausedMs: 5_000n,
+          ...(reasons.includes('PROCTOR')
+            ? { proctorPausedAt: new Date('2030-01-01T09:00:00Z') }
+            : {}),
+        },
+      });
+      return inv.sessionId;
+    }
+    const edge = (id: string, ifReasons: PauseReason[], next: PauseReason[], extra: object = {}) =>
+      inOrg(() =>
+        service.transition({
+          sessionId: id,
+          from: 'PAUSED',
+          to: 'PAUSED',
+          ifPauseReasons: ifReasons,
+          patch: { pauseReasons: next },
+          ...extra,
+        }),
+      );
+
+    it('FR-609, FR-106: a candidate reason is added while paused; deadline, paused_ms and proctor_paused_at are untouched', async () => {
+      const id = await paused(['FULLSCREEN_EXIT']);
+      const before = await read(id);
+      await edge(id, ['FULLSCREEN_EXIT'], ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED']);
+      const after = await read(id);
+      expect(after.status).toBe('PAUSED');
+      expect(after.pauseReasons).toEqual(['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED']);
+      expect(after.deadlineAt).toEqual(before.deadlineAt);
+      expect(after.pausedMs).toBe(before.pausedMs);
+      expect(after.proctorPausedAt).toEqual(before.proctorPausedAt);
+    });
+
+    it('FR-609: a candidate reason is lifted while another stays; PROCTOR stays in place', async () => {
+      const id = await paused(['SCREEN_SHARE_STOPPED', 'PROCTOR']);
+      await edge(id, ['SCREEN_SHARE_STOPPED', 'PROCTOR'], ['PROCTOR']);
+      expect((await read(id)).pauseReasons).toEqual(['PROCTOR']);
+    });
+
+    it('CS-4.4a, ADR 0002 P-3: the edge never adds or lifts PROCTOR (that pause owns the clock) and leaves the clock columns alone', async () => {
+      const without = await paused(['FULLSCREEN_EXIT']);
+      await expect(
+        edge(without, ['FULLSCREEN_EXIT'], ['FULLSCREEN_EXIT', 'PROCTOR']),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+      const withProctor = await paused(['FULLSCREEN_EXIT', 'PROCTOR']);
+      await expect(
+        edge(withProctor, ['FULLSCREEN_EXIT', 'PROCTOR'], ['FULLSCREEN_EXIT']),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+      const row = await read(withProctor);
+      expect(row.pauseReasons).toEqual(['FULLSCREEN_EXIT', 'PROCTOR']);
+      expect(row.proctorPausedAt).toEqual(new Date('2030-01-01T09:00:00Z'));
+      expect(row.pausedMs).toBe(5_000n);
+    });
+
+    it('FR-106: a list that changed meanwhile loses (conflict, nothing written)', async () => {
+      const id = await paused(['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED']);
+      await expect(
+        edge(id, ['FULLSCREEN_EXIT'], ['FULLSCREEN_EXIT', 'SIDE_CAMERA_LOST']),
+      ).rejects.toBeInstanceOf(SessionStateConflictError);
+      expect((await read(id)).pauseReasons).toEqual(['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED']);
+    });
+
+    it('FR-106: the edge refuses no compare-and-set, an empty list (that is PAUSED to IN_PROGRESS), duplicates, and any other patch key', async () => {
+      const id = await paused(['FULLSCREEN_EXIT']);
+      const noCas = inOrg(() =>
+        service.transition({
+          sessionId: id,
+          from: 'PAUSED',
+          to: 'PAUSED',
+          patch: { pauseReasons: ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED'] },
+        }),
+      );
+      await expect(noCas).rejects.toBeInstanceOf(IllegalTransitionError);
+      await expect(edge(id, ['FULLSCREEN_EXIT'], [])).rejects.toBeInstanceOf(
+        IllegalTransitionError,
+      );
+      await expect(
+        edge(id, ['FULLSCREEN_EXIT'], ['FULLSCREEN_EXIT', 'FULLSCREEN_EXIT']),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: id,
+            from: 'PAUSED',
+            to: 'PAUSED',
+            ifPauseReasons: ['FULLSCREEN_EXIT'],
+            patch: { pauseReasons: ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED'], pausedMs: 0n },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+      expect((await read(id)).pauseReasons).toEqual(['FULLSCREEN_EXIT']);
+    });
+
+    it.each([
+      ['deadlineAt', { deadlineAt: new Date('2031-01-01T00:00:00Z') }],
+      ['proctorPausedAt', { proctorPausedAt: null }],
+      ['pausedMs', { pausedMs: 0n }],
+      ['hmacKeyEnc', { hmacKeyEnc: 'x' }],
+      ['startedAt', { startedAt: new Date('2031-01-01T00:00:00Z') }],
+    ])('FR-106: the reasons-only edge refuses %s in the patch', async (_name, extra) => {
+      const id = await paused(['FULLSCREEN_EXIT']);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: id,
+            from: 'PAUSED',
+            to: 'PAUSED',
+            ifPauseReasons: ['FULLSCREEN_EXIT'],
+            patch: { pauseReasons: ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED'], ...extra },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+      expect((await read(id)).pauseReasons).toEqual(['FULLSCREEN_EXIT']);
+    });
+
+    it('FR-106: a multi-state from that includes PAUSED is refused for the self-edge', async () => {
+      const id = await paused(['FULLSCREEN_EXIT']);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: id,
+            from: ['IN_PROGRESS', 'PAUSED'],
+            to: 'PAUSED',
+            ifPauseReasons: ['FULLSCREEN_EXIT'],
+            patch: { pauseReasons: ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED'] },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+    });
+
+    it('FR-106: a session that is not PAUSED cannot take the edge', async () => {
+      const inv = await createInvitation(owner, tenant, { status: 'IN_PROGRESS' });
+      await expect(edge(inv.sessionId, [], ['FULLSCREEN_EXIT'])).rejects.toBeInstanceOf(
+        SessionStateConflictError,
+      );
     });
   });
 
