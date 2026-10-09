@@ -67,8 +67,8 @@ describe('fragment detection (FR-401)', () => {
   });
 });
 
-describe('email link entry /t#<token> (FR-407, TC-107, ADR 0003)', () => {
-  it('FR-407 TC-107: forwards /t#<token> to /t/start#<token> with a full document load, token only in the fragment', async () => {
+describe('email link entry /t#<token> (FR-401, ADR 0003; link format per FR-407)', () => {
+  it('FR-401: forwards /t#<token> to /t/start#<token> with a full document load, token only in the fragment', async () => {
     window.history.replaceState(null, '', `/t#${MOCK_TOKENS.open}`);
     const replaceLocation = vi.fn();
     render(<EmailLinkEntry replaceLocation={replaceLocation} />);
@@ -80,7 +80,7 @@ describe('email link entry /t#<token> (FR-407, TC-107, ADR 0003)', () => {
     expect(String(replaceLocation.mock.calls[0]?.[0])).not.toContain('?');
   });
 
-  it('FR-407: also accepts #token=<token>, still forwarding as a plain fragment', async () => {
+  it('FR-401: also accepts #token=<token>, still forwarding as a plain fragment', async () => {
     window.history.replaceState(null, '', `/t#token=${MOCK_TOKENS.open}`);
     const replaceLocation = vi.fn();
     render(<EmailLinkEntry replaceLocation={replaceLocation} />);
@@ -89,19 +89,20 @@ describe('email link entry /t#<token> (FR-407, TC-107, ADR 0003)', () => {
     );
   });
 
-  it('FR-407: a bare /t goes to /t/start with no fragment (the stepper then shows the invalid-link state)', async () => {
+  it('FR-401: a bare /t goes to /t/start with no fragment (the stepper then shows the invalid-link state)', async () => {
     window.history.replaceState(null, '', '/t');
     const replaceLocation = vi.fn();
     render(<EmailLinkEntry replaceLocation={replaceLocation} />);
     await waitFor(() => expect(replaceLocation).toHaveBeenCalledWith('/t/start'));
   });
 
-  it('FR-407: an odd or empty fragment, or a query string, is never carried over', async () => {
+  it('FR-401: an odd or empty fragment, or a query string, is never carried over', async () => {
     for (const url of ['/t#', '/t#nope', `/t?token=${MOCK_TOKENS.open}`, '/t#<script>']) {
       window.history.replaceState(null, '', url);
       const replaceLocation = vi.fn();
       const view = render(<EmailLinkEntry replaceLocation={replaceLocation} />);
       await waitFor(() => expect(replaceLocation).toHaveBeenCalledWith('/t/start'));
+      expect(replaceLocation).toHaveBeenCalledTimes(1);
       view.unmount();
     }
   });

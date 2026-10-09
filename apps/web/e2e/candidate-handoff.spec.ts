@@ -59,7 +59,7 @@ test.describe('candidate link hand-off (FU-FEB-23)', () => {
     expect(page.url()).toBe('about:blank');
   });
 
-  test('/t#<token> (the email link, FR-407) ends at /t/link with no token anywhere', async ({
+  test('/t#<token> (the email link, FR-401) ends at /t/link with no token anywhere', async ({
     page,
   }) => {
     await stubLink(page);

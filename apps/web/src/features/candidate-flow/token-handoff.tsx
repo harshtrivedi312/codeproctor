@@ -57,8 +57,12 @@ export function FragmentHandoff(): React.JSX.Element {
   return <HandoffView />;
 }
 
+/** A full document load that replaces the current history entry (hoisted so effects stay stable). */
+const replaceWithDocumentLoad = (url: string): void => window.location.replace(url);
+
 /**
- * Entry for the invitation email link `/t#<token>` (FR-407, TC-107). It forwards to
+ * Entry for the invitation email link `/t#<token>` (link format per FR-407 and
+ * apps/api/src/invitations/invitations.service.ts; the hand-off itself is FR-401, ADR 0003). It forwards to
  * `/t/start#<token>` with window.location.replace, a FULL document load that replaces this history
  * entry, for two reasons:
  * - the Permissions-Policy that allows the microphone (DL-28) applies to the document as first
@@ -70,7 +74,7 @@ export function FragmentHandoff(): React.JSX.Element {
  * fragment never reaches the server, so it is not in any log or Referer.
  */
 export function EmailLinkEntry({
-  replaceLocation = (url: string) => window.location.replace(url),
+  replaceLocation = replaceWithDocumentLoad,
 }: {
   replaceLocation?: (url: string) => void;
 }): React.JSX.Element {
