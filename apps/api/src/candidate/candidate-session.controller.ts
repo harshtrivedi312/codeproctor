@@ -29,6 +29,8 @@ import {
   SignConsentDto,
   TestStartedDto,
 } from './dto/candidate.dto';
+import { AccommodationsProjectionService } from './accommodations-projection.service';
+import type { AccommodationsProjection } from './accommodations-projection.service';
 import { SessionRateLimiter } from './session-rate-limiter';
 import { TestStartService } from './test-start.service';
 import { HEARTBEAT_LIMIT_PER_MINUTE } from './candidate-session.service';
@@ -56,6 +58,7 @@ export class CandidateSessionController {
     private readonly consent: ConsentService,
     private readonly testStart: TestStartService,
     private readonly limiter: SessionRateLimiter,
+    private readonly accommodations: AccommodationsProjectionService,
   ) {}
 
   @CandidateRoute('candidate_session:read')
@@ -66,6 +69,20 @@ export class CandidateSessionController {
   async state(@Candidate() ctx: CandidateContext): Promise<SessionStateDto> {
     await this.limiter.hit('session', ctx.sessionId, 60, 60);
     return stateDto(await this.session.view(ctx));
+  }
+
+  @Get('accommodations')
+  @CandidateRoute('candidate_session:read')
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({
+    summary: 'What the recruiter allowed this candidate (ADR 0013 CS-4.4, ADR 0015 section 3)',
+    description:
+      'The candidate-safe projection: extra time, disabled detectors, allowed assistive tools, whether the identity check is waived and faceDetectorsOff. Never the reason code, the reason note or the notes.',
+  })
+  @ApiOkResponse({ description: 'AccommodationsProjection' })
+  async getAccommodations(@Candidate() ctx: CandidateContext): Promise<AccommodationsProjection> {
+    await this.limiter.hit('accommodations', ctx.sessionId, 30, 60);
+    return this.accommodations.projection(ctx);
   }
 
   @Get('consent')

@@ -134,6 +134,10 @@ export const ROUTE_PERMISSIONS: Readonly<Record<string, RouteAccess>> = {
     principal: 'CANDIDATE',
     permission: 'candidate_section:finish',
   },
+  'GET /candidate/session/accommodations': {
+    principal: 'CANDIDATE',
+    permission: 'candidate_session:read',
+  },
   'GET /candidate/session': { principal: 'CANDIDATE', permission: 'candidate_session:read' },
   'POST /candidate/session/test/start': {
     principal: 'CANDIDATE',

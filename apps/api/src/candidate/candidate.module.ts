@@ -3,6 +3,7 @@ import { StorageModule } from '../media/storage.module';
 import { StorageService } from '../media/storage.service';
 import { MailModule } from '../mail/mail.module';
 import { SessionModule } from '../session/session.module';
+import { AccommodationsProjectionService } from './accommodations-projection.service';
 import { CandidateAuthController } from './candidate-auth.controller';
 import { CandidateAuthService } from './candidate-auth.service';
 import { CandidateMailPort } from './candidate-mail.port';
@@ -37,6 +38,7 @@ import { TestStartService } from './test-start.service';
     OtpService,
     SessionRateLimiter,
     SessionJobsService,
+    AccommodationsProjectionService,
     { provide: CandidateMailPort, useClass: MailBackedCandidateMailPort },
     // BE-09: the real S3-compatible store (StorageService extends the port).
     { provide: ObjectStoragePort, useExisting: StorageService },

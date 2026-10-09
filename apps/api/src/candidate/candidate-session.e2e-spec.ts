@@ -3284,4 +3284,44 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(text).not.toContain(secret);
     }
   });
+
+  describe('accommodations projection (ADR 0013 CS-4.4, ADR 0015; FR-305, C-19)', () => {
+    const tokenFor = (inv: InvitationFixture): string =>
+      tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
+
+    it('FR-305, C-19: the candidate sees extra time, disabled detectors, tools and the waiver fact, never the reason, code or notes', async () => {
+      const inv = await invite({
+        status: 'CONSENTED',
+        session: { authEpoch: 1 },
+        accommodations: {
+          extraTimePct: 50,
+          disabledDetectors: ['FACE'],
+          allowedAssistiveTools: ['screen reader'],
+          notes: 'private notes',
+          reasonCode: 'MEDICAL',
+          identityCheckWaiver: {
+            reasonCode: 'REFUSED_BIOMETRIC_PROCESSING',
+            reasonNote: 'private',
+          },
+        },
+      });
+      const res = await authed('get', '/accommodations', tokenFor(inv)).expect(200);
+      expect(res.body).toEqual({
+        extraTimePct: 50,
+        disabledDetectors: ['FACE'],
+        allowedAssistiveTools: ['screen reader'],
+        identityCheckWaived: true,
+        faceDetectorsOff: true,
+      });
+      expect(JSON.stringify(res.body)).not.toMatch(/private|MEDICAL|REFUSED/);
+      expect(res.headers['cache-control']).toBe('no-store');
+    });
+
+    it("FR-305: a candidate with no accommodation gets the empty projection, and another session cannot be read (the session is the token's)", async () => {
+      const a = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const res = await authed('get', '/accommodations', tokenFor(a)).expect(200);
+      expect(res.body).toMatchObject({ extraTimePct: 0, identityCheckWaived: false });
+      await request(server()).get(`${API}/accommodations`).expect(401);
+    });
+  });
 });
