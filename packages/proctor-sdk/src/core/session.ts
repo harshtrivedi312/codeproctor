@@ -4,12 +4,16 @@ import type {
   EventPayload,
   ProctorDetector,
 } from '@codeproctor/shared';
-import type { BatchQueueStats, EndReason } from './batch-queue';
+import {
+  ProviderTimeoutError,
+  type BatchQueueStats,
+  type EndReason,
+  type SendResult,
+  type SignedBatch,
+} from './batch-queue';
 import { EventQueue, type EventQueueStats, type EventTransport } from './event-queue';
-import type { SendResult, SignedBatch } from './batch-queue';
 import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
 import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
-import { ProviderTimeoutError } from './batch-queue';
 import { Heartbeat } from './heartbeat';
 import { importSessionKey } from './hmac';
 import { IdbStore, STORES } from './idb';
@@ -127,6 +131,8 @@ export class ProctorSession {
   private endedFired = false;
   private queuesEnded = false;
   private stopping = false;
+  /** handleEnded is running its purge: re-entrant calls (from queue onEnded) wait for the outer one. */
+  private ending = false;
   private eventRejected = 0;
   private keystrokeRejected = 0;
   private queue: EventQueue | null = null;
@@ -189,7 +195,11 @@ export class ProctorSession {
       ...(config.keyProviderTimeoutMs === undefined
         ? {}
         : { keyProviderTimeoutMs: config.keyProviderTimeoutMs }),
-      onKeyRestored: () => this.fire('capability', { id: 'signing-key', status: 'SUPPORTED' }),
+      onKeyRestored: () => {
+        // SUPPORTED only when neither queue is still held for a key.
+        if (this.queue?.stats().keyBlocked || this.keystrokeQueue?.stats().keyBlocked) return;
+        this.fire('capability', { id: 'signing-key', status: 'SUPPORTED' });
+      },
       onKeyUnavailable: (why: 'STALE_NO_KEY' | 'ALREADY_ISSUED') => {
         if (why === 'STALE_NO_KEY') {
           try {
@@ -495,13 +505,16 @@ export class ProctorSession {
    * SESSION_NOT_ACTIVE (after the grace) and SESSION_TAKEN_OVER from either source stop and purge.
    */
   private handleEnded(reason: EndReason, source: 'heartbeat' | 'batch'): void {
-    if (!this.config || this.stopping) return; // after stop() the kept outbox belongs to the next load
+    if (!this.config || this.stopping || this.ending) return; // after stop() the kept outbox belongs to the next load
     const purge = source === 'batch' || reason === 'TAKEN_OVER';
     if (purge && !this.queuesEnded) {
       this.queuesEnded = true;
+      this.ending = true;
       this.keystrokeRecorder?.close();
+      // Both end() calls set their loss counters synchronously; `ended` fires after both.
       void this.queue?.end(reason);
       void this.keystrokeQueue?.end(reason);
+      this.ending = false;
       const lost =
         (this.queue?.stats().lostBatches ?? 0) + (this.keystrokeQueue?.stats().lostBatches ?? 0);
       if (lost > 0) {
