@@ -460,6 +460,25 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(sendB).toHaveBeenCalledTimes(1);
   });
 
+  it('FR-104 TC-005: election path: a waiting call takes the outcome broadcast after it started, a later call does not reuse it', async () => {
+    installFakes(false); // no Web Locks: BroadcastChannel election
+    const rc = await import('@/lib/refresh-coordination');
+    rc.resetRefreshCoordinationForTests();
+    const other = new FakeChannel('cp.refresh.channel');
+    const sendA = vi.fn(() => Promise.resolve({ kind: 'error' as const }));
+    const sendB = vi.fn(() => Promise.resolve({ kind: 'busy' as const }));
+    // A competitor with a lower id announces itself, so the first call waits for its outcome.
+    const first = rc.coordinateRefresh(sendA);
+    other.postMessage({ t: 'start', id: '!competitor' }); // lands inside the election window
+    await new Promise((r) => setTimeout(r, 300)); // past the election window: it lost and waits
+    other.postMessage({ t: 'outcome', id: '!competitor', outcome: { kind: 'signed-out' } });
+    expect(await first).toEqual({ kind: 'signed-out' });
+    expect(sendA).not.toHaveBeenCalled();
+    // A later call has no waiting call to share with: it elects itself and sends its own request.
+    expect(await rc.coordinateRefresh(sendB)).toEqual({ kind: 'busy' });
+    expect(sendB).toHaveBeenCalledTimes(1);
+  });
+
   it('FR-104 TC-005: an idle tab drops the broadcast outcome: it never holds another tab token', async () => {
     refreshServer(() => HttpResponse.json(sessionFor('tok-A')));
     const a = await openTab();

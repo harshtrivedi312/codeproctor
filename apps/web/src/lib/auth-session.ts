@@ -79,8 +79,9 @@ export const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Longest a logout waits for the cross-tab refresh lock before it goes on (still checked first).
- * 15 s is safe: once the sign-out marker is set, a lock holder's refresh stops within one request
- * timeout (10 s) and releases the lock.
+ * Best effort: once the sign-out marker is set, a lock holder's refresh normally stops within one
+ * request timeout (10 s) and releases the lock, but a holder tab with blocked storage never sees
+ * the marker and can run the whole BUSY retry loop (about 50 s). See FU-FEA-SFR-1.
  */
 export const LOGOUT_LOCK_WAIT_MS = 15_000;
 
@@ -92,19 +93,28 @@ export const SESSION_EPOCH_KEY = 'cp.sessionEpoch';
  * "Sign-out pending" marker. A boolean only, never a token. It survives a reload so that a logout
  * the server did not confirm cannot be undone by the next page load's silent refresh (FR-104).
  */
-function markerSet(): boolean {
+/** The stored marker: true/false, or null when storage cannot be read at all. */
+function readMarker(): boolean | null {
   try {
     return window.localStorage.getItem(SIGN_OUT_MARKER) === '1';
   } catch {
-    return false;
+    return null;
   }
 }
+function markerSet(): boolean {
+  return readMarker() === true;
+}
+// True when this tab's last write of the marker succeeded. Storage can be readable but not
+// writable (quota): then a null read says nothing about other tabs, only that nothing was stored.
+let markerWritten = false;
 function writeMarker(on: boolean): void {
   try {
     if (on) window.localStorage.setItem(SIGN_OUT_MARKER, '1');
     else window.localStorage.removeItem(SIGN_OUT_MARKER);
+    markerWritten = on;
   } catch {
     // Storage blocked: the in-memory flag still covers this page load.
+    markerWritten = false;
   }
 }
 
@@ -121,15 +131,15 @@ export function isSignOutPending(): boolean {
 /**
  * True while a queued logout is still wanted. With working storage the shared marker decides:
  * another tab clears it when it confirms this sign-out or signs in, and the in-memory flag stays
- * true after a sign-out in this tab, so it cannot tell. Only when storage is blocked does the
- * in-memory flag decide.
+ * true after a sign-out in this tab, so it cannot tell. The marker is trusted only if this tab
+ * managed to write it; otherwise (blocked or full storage, or unreadable storage) the in-memory
+ * flag decides, so the logout is still sent. Losing the "another tab signed in" signal there is
+ * safe: that tab's epoch event bumps the generation while a logout is outstanding.
  */
 export function signOutStillWanted(): boolean {
-  try {
-    return window.localStorage.getItem(SIGN_OUT_MARKER) === '1';
-  } catch {
-    return signingOut;
-  }
+  if (signingOut && !markerWritten) return true;
+  const stored = readMarker();
+  return stored === null ? signingOut : stored;
 }
 
 /** Called once the server answered the logout call with success. */

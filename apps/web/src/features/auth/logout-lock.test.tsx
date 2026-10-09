@@ -18,6 +18,7 @@ import { useAuth } from './auth-provider';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 // A short lock wait so the bound can be tested with real timers (AbortSignal.timeout is not faked).
+// The mock does not reach settleSession: it reads the real constant inside auth-session.ts.
 vi.mock('@/lib/auth-session', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/auth-session')>()),
   LOGOUT_LOCK_WAIT_MS: 300,
@@ -202,6 +203,56 @@ describe('logout lock bound and queued sign-outs (FR-104, TC-005)', () => {
     await tick();
     expect(calls.logout).toBe(1); // the other tab's; this tab saw the marker cleared and sent none
     expect(window.localStorage.getItem('cp.signOutPending')).toBeNull();
+    expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
+  });
+});
+
+describe('sign-out marker edge cases (FR-104, TC-005)', () => {
+  it('FR-104 TC-005: storage readable but not writable: Sign out still sends exactly one logout', async () => {
+    const calls = countLogouts();
+    const u = await signedInPage();
+    const spy = vi.spyOn(window.localStorage, 'setItem').mockImplementation((key: string) => {
+      if (key === 'cp.signOutPending') throw new DOMException('full', 'QuotaExceededError');
+    });
+    try {
+      await u.click(screen.getByRole('button', { name: 'Sign out' }));
+      await waitFor(() => expect(calls.logout).toBe(1));
+      await tick();
+      expect(calls.logout).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('FR-104 TC-005: storage unreadable: a queued logout still sends once the lock is released', async () => {
+    const calls = countLogouts();
+    const u = await signedInPage();
+    const release = holdRefreshLock();
+    const spy = vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError');
+    });
+    try {
+      await u.click(screen.getByRole('button', { name: 'Sign out' }));
+      await tick();
+      expect(calls.logout).toBe(0);
+      release();
+      await waitFor(() => expect(calls.logout).toBe(1));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('FR-104 TC-005: marker cleared by another tab with no epoch event: no logout is sent and no warning shows', async () => {
+    const calls = countLogouts();
+    const u = await signedInPage();
+    const release = holdRefreshLock();
+    await u.click(screen.getByRole('button', { name: 'Sign out' }));
+    await tick();
+    window.localStorage.removeItem('cp.signOutPending'); // another tab signed in or confirmed
+    release();
+    await tick();
+    await tick();
+    expect(calls.logout).toBe(0);
     expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
   });
 });

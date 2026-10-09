@@ -2,10 +2,10 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
+import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
 import { api, type Schemas } from '@/lib/api/client';
 import { busyStore } from '@/lib/api/busy';
 import { withRefreshLock } from '@/lib/refresh-coordination';
-import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
 import {
   beginSession,
   beginSignOut,
@@ -135,24 +135,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     // current state: same generation and the sign-out still pending. A sign-in during the wait
     // bumps the generation (this tab's own sign-in, or another tab's epoch event, which does so
     // while a logout is outstanding), and its new cookie must not be revoked.
-    const call = withRefreshLock(async (): Promise<boolean> => {
-      if (startedIn !== getGeneration()) return false; // a sign-in since: not ours to revoke
-      // Another tab already confirmed this sign-out (it cleared the shared marker): nothing to send.
-      if (!signOutStillWanted()) return true;
+    const call = withRefreshLock(async (): Promise<'ok' | 'failed' | 'superseded'> => {
+      if (startedIn !== getGeneration()) return 'superseded'; // a sign-in since: not ours to revoke
+      // The shared marker was cleared by another tab: it confirmed this sign-out, or it signed in
+      // (its epoch event may not have reached this tab yet). Either way nothing is sent here, and
+      // this tab's in-memory signing-out flag is left as it is (no refresh from this tab).
+      if (!signOutStillWanted()) return 'superseded';
       try {
         const { response } = await api.POST('/v1/auth/logout', {
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        return response.ok || response.status === 401;
+        return response.ok || response.status === 401 ? 'ok' : 'failed';
       } catch {
-        return false;
+        return 'failed';
       }
-    }, LOGOUT_LOCK_WAIT_MS).catch(() => false);
+    }, LOGOUT_LOCK_WAIT_MS).catch((): 'failed' => 'failed');
     trackLogout(call);
-    const ok = await call;
+    const result = await call;
     logoutOutstanding.current -= 1;
     // A new sign-in happened meanwhile: this answer is about the old session; ignore it.
     if (startedIn !== getGeneration()) return;
+    if (result === 'superseded') {
+      unconfirmedGen.current = null;
+      setSignOutUnconfirmed(false);
+      return;
+    }
+    const ok = result === 'ok';
     if (ok) confirmSignedOut();
     // Remember which generation the failed answer belongs to, so Retry can tell it went stale.
     unconfirmedGen.current = ok ? null : startedIn;
