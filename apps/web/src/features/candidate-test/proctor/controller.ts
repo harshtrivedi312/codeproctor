@@ -521,7 +521,9 @@ export class ProctorController {
    * its upload queue and segment counter) for it. Stopping the recorder flushes a last chunk into
    * the SDK's storage. When the data is being purged or the test finished, that would leave a clip
    * on disk after the purge, so finish the pipeline with no drain and purge the store again. When
-   * the page is only being left, the chunk is kept for the next load.
+   * the page is only being left, an older SDK keeps that chunk for the next load; a newer one
+   * (SDK #366) refuses devices once it is closing and never starts the recorder. Either is fine:
+   * nothing here depends on a late recorder after stop().
    */
   private async dropLate(stream: (typeof MEDIA_STREAMS)[number]): Promise<void> {
     if (!this.pipeline) return;
@@ -530,7 +532,8 @@ export class ProctorController {
       await this.discardLate();
       return;
     }
-    // Finishing normally, or only leaving the page: stop the recorder so its last chunk is flushed.
+    // Finishing normally, or only leaving the page: stop the recorder (if the SDK started one) so
+    // its last chunk is flushed.
     await this.pipeline.stopStream(stream).catch(() => undefined);
     if (this.finishing) {
       // That chunk joins the real drain of the final evidence (the screen, webcam and audio chunks
