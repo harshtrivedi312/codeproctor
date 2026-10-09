@@ -171,6 +171,8 @@ describe('consent access (FR-105, NFR-05, C-17)', () => {
 
   it('the BE-07 candidate files are pinned to their consent call sites, in order, with their select and data keys', () => {
     expect(consentCalls('candidate/consent.service.ts')).toEqual([
+      // signedAtOf: the signing time only (the floor of an unsigned system-check finding's time).
+      { method: 'findUnique', select: ['signedAt'], data: null },
       // The candidate-scope read: the text id and signedAt only, never name, ip or user agent.
       { method: 'findUnique', select: ['consentTextId', 'signedAt'], data: null },
       // Sign: the write-once create (the DB grant later verifies sessionId and consentTextId).
