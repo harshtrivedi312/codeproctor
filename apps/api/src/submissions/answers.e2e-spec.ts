@@ -256,9 +256,9 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
     await owner.variantTestCase.create({
       data: {
         variantId: variant.id,
-        testCaseId: caseIds[1] as string,
-        input: 'vhidden-secret',
-        expectedOutput: 'vhidden-secret',
+        testCaseId: caseIds[2] as string,
+        input: 'hvariant-secret',
+        expectedOutput: 'hvariant-secret',
       },
     });
 
@@ -1017,7 +1017,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       const s = await live({ sessionDeadlineInMs: -60_000, sectionDeadlineInMs: -60_000 });
       await owner.sessionQuestion.update({
         where: { id: s.q.code },
-        data: { finalCode: 'PASS:h1,h2,h3,h4,h5', finalLanguage: 'python' },
+        data: { finalCode: 'PASS:h1,h2,h3,h4,h5,hvariant-secret', finalLanguage: 'python' },
       });
       const found = await worker.sweep();
       expect(found.sessions).toBeGreaterThanOrEqual(1);
@@ -1322,7 +1322,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       await closeSection.close(main.tenant.orgId, none.inv.sessionId, main.sectionIds[0], 'final');
       await owner.sessionQuestion.update({
         where: { id: none.q.code },
-        data: { finalCode: 'PASS:h1,h2,h3,h4,h5', finalLanguage: 'python' },
+        data: { finalCode: 'PASS:h1,h2,h3,h4,h5,hvariant-secret', finalLanguage: 'python' },
       });
       expect(await grading.grade(main.tenant.orgId, none.inv.sessionId)).toBe('graded');
       const flagged = await questionRow(none.q.code);
@@ -2228,7 +2228,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       );
       const text = JSON.stringify(res.body);
       expect(text).not.toMatch(
-        /h1|h2|h3|h4|h5|referenceSolution|REFSECRET|VALREPORT|vhidden|answerSpec|validationReport/,
+        /h1|h2|h3|h4|h5|referenceSolution|REFSECRET|VALREPORT|hvariant-secret|answerSpec|validationReport/,
       );
       // The starter code is rendered with the variant params: no placeholder is left.
       expect(res.body).toMatchObject({ starterCode: { python: 'n = 1  # STARTER' } });
