@@ -62,6 +62,8 @@ const { passed, blocking } = await runSystemCheck({
 screenShareMonitor.adopt(outcome);
 ```
 
+The APP owns the pre-start stream until `adopt()`: if the system check is blocked or fails, or the candidate leaves before the start, call `releaseScreenShare(outcome)` so the screen is not captured any longer. `adopt()` refuses a share that already ended (lock stays, the app asks again).
+
 If the app keeps its own pre-check share (as the precheck step does), it passes its own enum
 (`MONITOR`, `OTHER`, `UNVERIFIABLE`) and keeps the stream for `adopt()` the same way.
 

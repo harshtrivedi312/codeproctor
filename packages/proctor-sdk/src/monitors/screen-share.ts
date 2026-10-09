@@ -32,12 +32,25 @@ export async function requestScreenShare(
     return { ok: false, reason: 'DENIED' };
   }
   const track = stream.getVideoTracks()[0];
-  const surface = track?.getSettings()?.displaySurface ?? null;
+  if (!track) {
+    // A share without a video track is no share: never "unverified".
+    stream.getTracks().forEach((t) => t.stop());
+    return { ok: false, reason: 'DENIED' };
+  }
+  const surface = track.getSettings()?.displaySurface ?? null;
   if (surface !== null && surface !== 'monitor') {
     stream.getTracks().forEach((t) => t.stop());
     return { ok: false, reason: 'WRONG_SURFACE' };
   }
   return { ok: true, stream, surface };
+}
+
+/**
+ * The app owns a pre-start share until `ScreenShareMonitor.adopt()` takes it over. If the system
+ * check is blocked or fails, or the candidate leaves before the start, release it here.
+ */
+export function releaseScreenShare(outcome: ScreenShareOutcome): void {
+  if (outcome.ok) outcome.stream.getTracks().forEach((t) => t.stop());
 }
 
 /**
@@ -95,8 +108,12 @@ export class ScreenShareMonitor implements Detector {
   async request(): Promise<ScreenShareOutcome> {
     const ctx = this.ctx;
     if (!ctx) return { ok: false, reason: 'UNSUPPORTED' };
-    ctx.assertConsent();
     const got = await requestScreenShare(() => ctx.assertConsent(), this.media);
+    if (this.ctx !== ctx) {
+      // stop() ran while the picker was open: nothing may keep this stream or unlock the test.
+      releaseScreenShare(got);
+      return { ok: false, reason: 'UNSUPPORTED' };
+    }
     if (!got.ok) {
       if (got.reason === 'DENIED') ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
       if (got.reason === 'WRONG_SURFACE')
@@ -118,7 +135,12 @@ export class ScreenShareMonitor implements Detector {
       outcome.stream.getTracks().forEach((t) => t.stop()); // not started: nothing may keep a device
       return { ok: false, reason: 'UNSUPPORTED' };
     }
-    ctx.assertConsent();
+    try {
+      ctx.assertConsent();
+    } catch (err) {
+      releaseScreenShare(outcome); // no consent: keep no device
+      throw err;
+    }
     return this.accept(ctx, outcome.stream, outcome.surface);
   }
 
@@ -128,10 +150,23 @@ export class ScreenShareMonitor implements Detector {
     surface: string | null,
   ): ScreenShareOutcome {
     const track = stream.getVideoTracks()[0];
+    // A share that already ended (the candidate pressed "Stop sharing" between the check and the
+    // start) or has no video is not a share: keep the lock and ask again.
+    if (!track || stream.getVideoTracks().some((t) => t.readyState === 'ended')) {
+      stream.getTracks().forEach((t) => t.stop());
+      ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
+      return { ok: false, reason: 'DENIED' };
+    }
     if (surface !== null && surface !== 'monitor') {
       stream.getTracks().forEach((t) => t.stop());
       ctx.emit('SCREEN_SHARE_STOPPED', { reason: 'WRONG_SURFACE' });
       return { ok: false, reason: 'WRONG_SURFACE' };
+    }
+    if (this.stream && this.stream !== stream) {
+      // A different live share is replaced: the old one must not keep capturing.
+      const old = this.stream;
+      this.stream = null; // clear first so its ended handler stays quiet
+      old.getTracks().forEach((t) => t.stop());
     }
     if (surface === null) {
       ctx.setCapability({

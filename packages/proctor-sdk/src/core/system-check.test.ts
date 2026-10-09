@@ -3,7 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 // The route's own schema: the body must be one the built API accepts (ADR 0013 section 5.4).
 import { systemCheckBodySchema } from '../../../../apps/api/src/candidate/system-check.schema';
 import { MultiScreenMonitor } from '../monitors/multi-screen';
-import { ScreenShareMonitor, requestScreenShare, surfaceOf } from '../monitors/screen-share';
+import {
+  ScreenShareMonitor,
+  releaseScreenShare,
+  requestScreenShare,
+  surfaceOf,
+} from '../monitors/screen-share';
 import { VirtualCameraMonitor } from '../monitors/virtual-camera';
 import { TEST_KEY_B64 } from '../test/helpers';
 import type { SendResult, SignedBatch } from './batch-queue';
@@ -174,6 +179,7 @@ describe('collectSystemCheck: what is looked at and what is sent (FR-604, FR-605
       detail: 'No screen share was obtained.',
     });
     expect(none.capabilities.some((c) => c.id === 'screen-share-surface')).toBe(false);
+    expect(systemCheckBodySchema.safeParse(none).success).toBe(true); // the route accepts the DENIED flag
   });
 
   it('missing APIs are reported UNSUPPORTED / UNVERIFIABLE, never as a pass', async () => {
@@ -651,5 +657,109 @@ describe('the pre-start share flow and honest unknowns (FR-604, FR-605, TC-054, 
     expect(noWin.capabilities.find((c) => c.id === 'multi-screen')?.status).toBe('UNSUPPORTED');
     const nan = await collectSystemCheck({ env: env(), stepTimeoutMs: Number.NaN });
     expect(nan.capabilities.length).toBeGreaterThan(5);
+  });
+});
+
+describe('stream lifetime of the monitor (FR-604, TC-054, NFR-05)', () => {
+  const mk = (surface: string | undefined, readyState?: string) => {
+    const stops: number[] = [];
+    const listeners: (() => void)[] = [];
+    const track = {
+      readyState,
+      getSettings: () => (surface === undefined ? {} : { displaySurface: surface }),
+      stop: () => stops.push(1),
+      addEventListener: (_t: string, l: () => void) => listeners.push(l),
+    };
+    const value = {
+      getVideoTracks: () => [track],
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+    return { stops, listeners, value };
+  };
+  const startMonitor = (media?: unknown) => {
+    const m = new ScreenShareMonitor((media ?? { getDisplayMedia: vi.fn() }) as never);
+    const locks: boolean[] = [];
+    const events: string[] = [];
+    const caps: string[] = [];
+    let consent: () => void = () => undefined;
+    m.start({
+      emit: (t) => events.push(t),
+      root: document.body,
+      setCapability: (f) => caps.push(`${f.id}:${f.status}`),
+      setLock: (l) => locks.push(l.locked),
+      assertConsent: () => consent(),
+      measure: (_l, fn) => fn(),
+      isDisabled: () => false,
+    });
+    return { m, locks, events, caps, setConsent: (f: () => void) => (consent = f) };
+  };
+
+  it('B1: a share that ended before the start is not adopted: the lock stays and the app asks again', () => {
+    const dead = mk('monitor', 'ended');
+    const r = startMonitor();
+    const out = r.m.adopt({ ok: true, stream: dead.value, surface: 'monitor' });
+    expect(out).toEqual({ ok: false, reason: 'DENIED' });
+    expect(r.locks).toEqual([true]); // only the start lock; never unlocked
+    expect(r.m.currentStream).toBeNull();
+    expect(r.m.hasShared).toBe(false);
+    expect(r.caps).toContain('screen-share:DENIED');
+    expect(dead.stops).toHaveLength(1);
+  });
+
+  it('B2a: adopting a second stream stops the first (no live capture left behind)', () => {
+    const a = mk('monitor');
+    const b = mk('monitor');
+    const r = startMonitor();
+    r.m.adopt({ ok: true, stream: a.value, surface: 'monitor' });
+    r.m.adopt({ ok: true, stream: b.value, surface: 'monitor' });
+    expect(a.stops).toHaveLength(1);
+    expect(r.m.currentStream).toBe(b.value);
+    r.m.stop();
+    expect(b.stops).toHaveLength(1);
+  });
+
+  it('B2b: stop() while the picker is open stops the late stream and never unlocks', async () => {
+    const late = mk('monitor');
+    let resolve!: (s: MediaStream) => void;
+    const media = {
+      getDisplayMedia: () => new Promise<MediaStream>((r) => (resolve = r)),
+    };
+    const r = startMonitor(media);
+    const pending = r.m.request();
+    await Promise.resolve();
+    r.m.stop();
+    resolve(late.value);
+    expect(await pending).toEqual({ ok: false, reason: 'UNSUPPORTED' });
+    expect(late.stops).toHaveLength(1);
+    expect(r.locks).toEqual([true]);
+    expect(r.m.currentStream).toBeNull();
+  });
+
+  it('B2c: adopt without consent stops the tracks before it throws', () => {
+    const st = mk('monitor');
+    const r = startMonitor();
+    r.setConsent(() => {
+      throw new Error('consent');
+    });
+    expect(() => r.m.adopt({ ok: true, stream: st.value, surface: 'monitor' })).toThrow('consent');
+    expect(st.stops).toHaveLength(1);
+    expect(r.m.currentStream).toBeNull();
+  });
+
+  it('a share without a video track is DENIED (stopped), never UNVERIFIABLE; releaseScreenShare stops a held outcome', async () => {
+    const stops: number[] = [];
+    const empty = {
+      getVideoTracks: () => [],
+      getTracks: () => [{ stop: () => stops.push(1) }],
+    } as unknown as MediaStream;
+    const out = await requestScreenShare(() => undefined, {
+      getDisplayMedia: () => Promise.resolve(empty),
+    });
+    expect(out).toEqual({ ok: false, reason: 'DENIED' });
+    expect(stops).toHaveLength(1);
+    const held = mk('monitor');
+    releaseScreenShare({ ok: true, stream: held.value, surface: 'monitor' });
+    expect(held.stops).toHaveLength(1);
+    releaseScreenShare({ ok: false, reason: 'DENIED' }); // nothing to release
   });
 });
