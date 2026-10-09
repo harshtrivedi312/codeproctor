@@ -9,6 +9,10 @@ export const SESSION_STATUSES: readonly SessionStatus[] = Object.values(SessionS
  * Allowed next states for each state. Differences from the prose in fsd.md section 3:
  * - GRADED goes only to UNDER_REVIEW: owner decision C-28 (2026-10-05) says a person reviews every
  *   session, so nothing is cleared automatically and there is no GRADED to COMPLETED edge.
+ * - PAUSED to PAUSED is a reasons-only self-edge (fsd.md section 3 and ADR 0002 section 2 show none):
+ *   the candidate pause reasons change while a pause is on, so the server write gate reads the true
+ *   list. Guarded in SessionStateService.transition (compare-and-set on the reasons, clock and PROCTOR
+ *   untouched). Recorded as a docs follow-up (FU-BEB-161).
  * - DISCONNECTED, FOCUS_LOST and TAB_SWITCH are events, not states (ADR 0002 section 2).
  */
 export const TRANSITIONS: Readonly<Record<SessionStatus, readonly SessionStatus[]>> = {

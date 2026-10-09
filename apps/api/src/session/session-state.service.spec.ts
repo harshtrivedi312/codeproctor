@@ -227,7 +227,7 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
       expect((await read(id)).pauseReasons).toEqual(['PROCTOR']);
     });
 
-    it('CS-4.4a: a candidate-driven change can neither add nor lift PROCTOR', async () => {
+    it('CS-4.4a, ADR 0002 P-3: the edge never adds or lifts PROCTOR (that pause owns the clock) and leaves the clock columns alone', async () => {
       const without = await paused(['FULLSCREEN_EXIT']);
       await expect(
         edge(without, ['FULLSCREEN_EXIT'], ['FULLSCREEN_EXIT', 'PROCTOR']),
@@ -236,15 +236,10 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
       await expect(
         edge(withProctor, ['FULLSCREEN_EXIT', 'PROCTOR'], ['FULLSCREEN_EXIT']),
       ).rejects.toBeInstanceOf(IllegalTransitionError);
-      expect((await read(withProctor)).pauseReasons).toEqual(['FULLSCREEN_EXIT', 'PROCTOR']);
-    });
-
-    it('BE-13: the staff caller may change PROCTOR with allowProctorChange', async () => {
-      const id = await paused(['FULLSCREEN_EXIT']);
-      await edge(id, ['FULLSCREEN_EXIT'], ['FULLSCREEN_EXIT', 'PROCTOR'], {
-        allowProctorChange: true,
-      });
-      expect((await read(id)).pauseReasons).toEqual(['FULLSCREEN_EXIT', 'PROCTOR']);
+      const row = await read(withProctor);
+      expect(row.pauseReasons).toEqual(['FULLSCREEN_EXIT', 'PROCTOR']);
+      expect(row.proctorPausedAt).toEqual(new Date('2030-01-01T09:00:00Z'));
+      expect(row.pausedMs).toBe(5_000n);
     });
 
     it('FR-106: a list that changed meanwhile loses (conflict, nothing written)', async () => {
@@ -284,6 +279,43 @@ describe('SessionStateService (FR-106, ADR 0002, C-28)', () => {
         ),
       ).rejects.toBeInstanceOf(IllegalTransitionError);
       expect((await read(id)).pauseReasons).toEqual(['FULLSCREEN_EXIT']);
+    });
+
+    it.each([
+      ['deadlineAt', { deadlineAt: new Date('2031-01-01T00:00:00Z') }],
+      ['proctorPausedAt', { proctorPausedAt: null }],
+      ['pausedMs', { pausedMs: 0n }],
+      ['hmacKeyEnc', { hmacKeyEnc: 'x' }],
+      ['startedAt', { startedAt: new Date('2031-01-01T00:00:00Z') }],
+    ])('FR-106: the reasons-only edge refuses %s in the patch', async (_name, extra) => {
+      const id = await paused(['FULLSCREEN_EXIT']);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: id,
+            from: 'PAUSED',
+            to: 'PAUSED',
+            ifPauseReasons: ['FULLSCREEN_EXIT'],
+            patch: { pauseReasons: ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED'], ...extra },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
+      expect((await read(id)).pauseReasons).toEqual(['FULLSCREEN_EXIT']);
+    });
+
+    it('FR-106: a multi-state from that includes PAUSED is refused for the self-edge', async () => {
+      const id = await paused(['FULLSCREEN_EXIT']);
+      await expect(
+        inOrg(() =>
+          service.transition({
+            sessionId: id,
+            from: ['IN_PROGRESS', 'PAUSED'],
+            to: 'PAUSED',
+            ifPauseReasons: ['FULLSCREEN_EXIT'],
+            patch: { pauseReasons: ['FULLSCREEN_EXIT', 'SCREEN_SHARE_STOPPED'] },
+          }),
+        ),
+      ).rejects.toBeInstanceOf(IllegalTransitionError);
     });
 
     it('FR-106: a session that is not PAUSED cannot take the edge', async () => {
