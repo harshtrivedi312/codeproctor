@@ -75,6 +75,10 @@ const FAILURE_HINT: Record<
     title: 'We could not reach the server',
     hint: 'Check your connection and try again.',
   },
+  outcomeUnknown: {
+    title: 'We could not confirm the result',
+    hint: 'Nothing was retried for you. Check the current state before trying again.',
+  },
   unknown: {
     title: 'Something went wrong',
     hint: 'Try again in a moment. If it keeps happening, contact your administrator.',
@@ -126,6 +130,16 @@ export function ActionDialog({
     }
     if (action === 'disable') {
       const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
+      if (!out.ok && out.failure === 'outcomeUnknown') {
+        // The fixed 500 (contract section 8): a landed commit revokes this session, a lost one
+        // leaves the cookie valid. Sign out for real (logout call) to the unconfirmed notice.
+        if (stamp.userId !== getSessionUserId()) {
+          onClose();
+          return 'ok';
+        }
+        await signOutRevoked('unconfirmed');
+        return 'ok';
+      }
       if (!out.ok) return fail(out.failure);
       // Another tab signed in as someone else (or this tab already signed out) while the call
       // was in flight: that session is not ours to end. Just close.
@@ -182,7 +196,11 @@ export function ActionDialog({
       return 'failed';
     }
     if (out.failure === 'code') return 'wrongCode';
-    if (out.failure === 'network' || out.failure === 'unknown') {
+    if (
+      out.failure === 'network' ||
+      out.failure === 'unknown' ||
+      out.failure === 'outcomeUnknown'
+    ) {
       // The outcome is unknown: 2FA may be on and every session revoked, or nothing happened and
       // the cookie is still valid. Sign out for real (logout call, pending marker if it fails).
       setPassword('');

@@ -1,6 +1,7 @@
 'use client';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { USER_ROLES } from '@codeproctor/shared';
+import { useQueryClient } from '@tanstack/react-query';
 import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
@@ -19,6 +20,9 @@ import { ConfirmDialog } from './confirm-dialog';
 import { formatDate } from './format';
 import {
   ApiFailure,
+  INVITE_UNKNOWN_TEXT,
+  checkInviteOutcome,
+  isServerFailure,
   useInviteUser,
   useStaffUsers,
   useUpdateUser,
@@ -277,7 +281,11 @@ function InviteDialog({
   onOpenChange: (open: boolean) => void;
 }): React.JSX.Element {
   const invite = useInviteUser();
+  const qc = useQueryClient();
   const [serverError, setServerError] = React.useState<string | null>(null);
+  const [unknownOutcome, setUnknownOutcome] = React.useState<string | null>(null);
+  // A late answer from the list read must not land in a dialog that was closed or reopened.
+  const checkId = React.useRef(0);
   const {
     register,
     handleSubmit,
@@ -290,13 +298,23 @@ function InviteDialog({
 
   function onSubmit(values: InviteStaffValues): void {
     setServerError(null);
+    setUnknownOutcome(null);
     invite.mutate(values, {
       onSuccess: (user) => {
         toast.success(`Invitation sent to ${user.email}. The link lets them set a password.`);
         reset();
         onOpenChange(false);
       },
-      onError: (e) =>
+      onError: (e) => {
+        if (isServerFailure(e)) {
+          // Outcome unknown: read the list, never send again for the user.
+          setServerError(null);
+          const mine = (checkId.current += 1);
+          void checkInviteOutcome(qc, values.email).then((found) => {
+            if (checkId.current === mine) setUnknownOutcome(INVITE_UNKNOWN_TEXT[found]);
+          });
+          return;
+        }
         setServerError(
           e instanceof ApiFailure && e.status === 409
             ? 'Someone with this email already has an account. Use a different email, or change their role in the table.'
@@ -304,7 +322,8 @@ function InviteDialog({
                 e,
                 'We could not send the invitation. Check your connection and try again.',
               ),
-        ),
+        );
+      },
     });
   }
 
@@ -315,6 +334,8 @@ function InviteDialog({
         if (!next) {
           reset();
           setServerError(null);
+          setUnknownOutcome(null);
+          checkId.current += 1;
         }
         onOpenChange(next);
       }}
@@ -330,6 +351,11 @@ function InviteDialog({
           noValidate
           className="mt-4 space-y-4"
         >
+          {unknownOutcome ? (
+            <Alert tone="warning" role="alert" title="Invitation may have been sent">
+              {unknownOutcome}
+            </Alert>
+          ) : null}
           {serverError ? (
             <Alert tone="error" role="alert" title="Invitation not sent">
               {serverError}

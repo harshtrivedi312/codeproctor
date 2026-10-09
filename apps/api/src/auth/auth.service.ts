@@ -28,6 +28,7 @@ import type { RefreshToken, User } from '../generated/prisma/client';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import { MailPort } from '../mail/mail.port';
+import type { MailOutcome, TwoFactorNoticeTemplate } from '../mail/mail.port';
 import type { AuthSessionDto, LoginResultDto, TotpEnrollmentDto } from './dto/auth.dto';
 import {
   newOpaqueToken,
@@ -500,7 +501,6 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         await this.clearFailures(user, tx);
         phase.finished = true;
       });
-      return { recoveryCodes: codes };
     } catch (e) {
       // FU-BE-208: ONE classification. A clean rollback releases the mark (the 503 invites a
       // retry with the same code). After the callback returned, anything that is not a rollback
@@ -524,6 +524,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       }
       throw e;
     }
+    // D-76: the transaction resolved, so the commit is certain. Outside the try on purpose.
+    await this.notifyTwoFactorChange(user, user.id, 'two-factor-enabled', ctx);
+    return { recoveryCodes: codes };
   }
 
   /**
@@ -748,9 +751,71 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // have committed. The mark stays, no refund (the reservation was given back before the
       // transaction only because both factors had already verified).
       if (phase.started && phase.finished && !clean) {
+        // D-76: a silent turn-off would hide a takeover, so settle the outcome with a locking
+        // re-read (api-contract section 8) and mail only if the change definitely landed.
+        if (await this.disableDefinitelyCommitted(user.id)) {
+          await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
+        }
         throw new OutcomeUnknownError('auth.2fa.disable');
       }
       throw e;
+    }
+    // D-76: the transaction resolved, so the commit landed.
+    await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
+  }
+
+  /**
+   * FOR UPDATE re-read after an unknown commit outcome: the read waits for a commit still in
+   * flight. True only when the row shows 2FA off; any error or doubt is false (no mail).
+   */
+  private async disableDefinitelyCommitted(userId: string): Promise<boolean> {
+    try {
+      const rows = await this.raw('locking re-read of the 2FA flag after an unknown commit', () =>
+        this.prisma.client.$queryRaw<{ totp_enabled: boolean }[]>(Prisma.sql`
+          SELECT totp_enabled FROM users WHERE id = ${userId}::uuid FOR UPDATE`),
+      );
+      return rows.length === 1 && rows[0]?.totp_enabled === false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * D-76: queues the account-holder mail after the change committed, then records the outcome in
+   * a separate audit row (no address). Never throws and never changes the response: the action
+   * does not depend on delivery. 'queued' means the queue accepted the job, not that it arrived.
+   */
+  private async notifyTwoFactorChange(
+    holder: Pick<User, 'id' | 'orgId' | 'email'>,
+    actorId: string,
+    template: TwoFactorNoticeTemplate,
+    ctx: RequestContext,
+  ): Promise<void> {
+    let outcome: MailOutcome;
+    try {
+      outcome = await this.mail.sendTwoFactorNotice(holder.email, template, new Date());
+      if (outcome === 'failed') this.logger.error(`2FA notice not queued (refused, ${template})`);
+    } catch (e) {
+      outcome = 'failed';
+      this.logger.error(`2FA notice not queued (${safeErrorName(e)}, ${template})`);
+    }
+    try {
+      await this.prisma.client.auditLog.create({
+        data: {
+          orgId: holder.orgId,
+          actorId,
+          action: 'AUTH_2FA_NOTICE',
+          entityType: 'user',
+          entityId: holder.id,
+          ip: ctx.ip ?? null,
+          metadata: { template, outcome },
+        },
+      });
+    } catch (e) {
+      // Name and audit action only; raises the same alertable line as the audit carve-out.
+      this.logger.error(
+        `Audit write after commit failed (${safeErrorName(e)}) for AUTH_2FA_NOTICE`,
+      );
     }
   }
 
@@ -812,7 +877,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       throw new BadRequestException('Use your own security settings to change your 2FA.');
     }
     const verified = await this.requireCurrentPassword(actor.id, adminPassword, ctx);
+    // D-76: the target as read inside the transaction; the mail goes to this address only.
+    let notify: Pick<User, 'id' | 'orgId' | 'email'> | null = null;
     await this.prisma.client.$transaction(async (tx) => {
+      notify = null; // a re-run of the callback must not keep a stale value
       // The admin's password hash, role and active flag are re-checked here with a plain read (the
       // admin row is deliberately not locked: locking it would allow an A<->B deadlock between
       // two admins resetting each other). It runs before the lock, so a changed admin gets
@@ -866,7 +934,14 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
           },
         },
       });
+      // Nothing changes for an account without 2FA, and a deactivated account gets nothing.
+      if (target.totpEnabled && target.isActive) {
+        notify = { id: target.id, orgId: target.orgId, email: target.email };
+      }
     });
+    // Only after the transaction resolved (a commit-time failure threw above: no mail).
+    const recipient = notify as Pick<User, 'id' | 'orgId' | 'email'> | null;
+    if (recipient) await this.notifyTwoFactorChange(recipient, actor.id, 'two-factor-reset', ctx);
   }
 
   // ---- FR-104: refresh and logout -----------------------------------------------------------
