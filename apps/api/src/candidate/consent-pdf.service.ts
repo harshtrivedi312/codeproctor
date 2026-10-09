@@ -16,6 +16,15 @@ import { isDemoTextRefused } from './demo-consent';
 import { ObjectStoragePort } from './object-storage.port';
 import { newUlid } from './ulid';
 
+/**
+ * The only consent columns this job may write (FU-DB-266, C-30, D-55): the stored PDF key and time,
+ * and the copy-emailed time. Never signedAt, signedName, ageConfirmedAt or the consent text id: a
+ * write of those could forge or clear the candidate's signed consent. The literal `data` objects of
+ * the two updateMany calls below are pinned by retention/consent-access.spec.ts and checked against
+ * this list by consent-pdf.service.spec.ts; SERVICE scope has no column limits of its own.
+ */
+export const CONSENT_PDF_JOB_WRITE_COLUMNS = ['pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'] as const;
+
 @Injectable()
 export class ConsentPdfService {
   private readonly logger = new Logger(ConsentPdfService.name);

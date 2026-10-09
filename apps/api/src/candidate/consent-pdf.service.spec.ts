@@ -1,4 +1,4 @@
-import { ConsentPdfService } from './consent-pdf.service';
+import { CONSENT_PDF_JOB_WRITE_COLUMNS, ConsentPdfService } from './consent-pdf.service';
 import { renderConsentPdf } from './consent-pdf.renderer';
 
 jest.mock('./consent-pdf.renderer', () => ({
@@ -115,5 +115,75 @@ describe('ConsentPdfService demo text in shared environments (FR-401, C-07, TC-0
     await expect(service.generate(ORG, SESSION)).resolves.toBe(true);
     expect(putObject).toHaveBeenCalledTimes(1);
     expect(sendConsentCopy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ConsentPdfService writes only the PDF columns (FU-DB-266, C-30, D-55, FR-401)', () => {
+  function run(overrides: { pdfKey: string | null; copyEmailedAt: Date | null }) {
+    const updateMany = jest.fn(() => Promise.resolve({ count: 1 }));
+    const client = {
+      consent: {
+        findUnique: jest.fn(() =>
+          Promise.resolve({
+            id: 'c1',
+            consentTextId: 't1',
+            signedName: 'Ada Lovelace',
+            signedAt: new Date('2026-10-05T12:00:00.000Z'),
+            ageConfirmedAt: new Date('2026-10-05T12:00:00.000Z'),
+            ...overrides,
+          }),
+        ),
+        updateMany,
+      },
+      consentText: {
+        findUnique: jest.fn(() =>
+          Promise.resolve({
+            version: '1.0',
+            bodyMd: 'x',
+            legalApprovedAt: new Date(),
+            legalApprovedBy: 'Counsel',
+          }),
+        ),
+      },
+      organization: { findUnique: jest.fn(() => Promise.resolve({ name: 'Acme' })) },
+      session: { findUnique: jest.fn(() => Promise.resolve({ invitationId: 'i1' })) },
+      invitation: { findUnique: jest.fn(() => Promise.resolve({ candidateId: 'cand1' })) },
+      candidate: { findUnique: jest.fn(() => Promise.resolve({ email: 'a@example.com' })) },
+    };
+    const service = new ConsentPdfService(
+      { client } as never,
+      { runInOrg: (_org: string, fn: () => Promise<unknown>) => fn() } as never,
+      { putObject: jest.fn(), deleteObject: jest.fn() },
+      { sendConsentCopy: jest.fn() } as never,
+      { get: (k: string) => ({ APP_ENV: 'development', NODE_ENV: 'development' })[k] } as never,
+    );
+    return { service, updateMany };
+  }
+
+  it('FU-DB-266: every consents write of a full run (PDF stored, copy emailed) is only the allowed columns, and never signedAt, signedName or ageConfirmedAt', async () => {
+    const { service, updateMany } = run({ pdfKey: null, copyEmailedAt: null });
+    await expect(service.generate(ORG, SESSION)).resolves.toBe(true);
+    const calls = updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>;
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    const allowed: readonly string[] = CONSENT_PDF_JOB_WRITE_COLUMNS;
+    for (const [args] of calls) {
+      for (const column of Object.keys(args.data)) expect(allowed).toContain(column);
+      for (const forbidden of ['signedAt', 'signedName', 'ageConfirmedAt', 'consentTextId', 'ip']) {
+        expect(Object.keys(args.data)).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it('FU-DB-266: a run with the PDF already stored writes only the copy-emailed time', async () => {
+    const { service, updateMany } = run({ pdfKey: 'k', copyEmailedAt: null });
+    await service.generate(ORG, SESSION);
+    const calls = updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>;
+    expect(calls.map(([a]) => Object.keys(a.data))).toEqual([['copyEmailedAt']]);
+  });
+
+  it('FU-DB-266: the allowed list is exactly the three PDF columns', () => {
+    expect([...CONSENT_PDF_JOB_WRITE_COLUMNS].sort()).toEqual(
+      ['copyEmailedAt', 'pdfGeneratedAt', 'pdfKey'].sort(),
+    );
   });
 });
