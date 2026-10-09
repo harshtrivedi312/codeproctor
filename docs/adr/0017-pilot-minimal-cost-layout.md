@@ -254,7 +254,7 @@ The total is close to $12. The hours are the lever: the monthly budget guard (4.
 - **ARC-05.** Decided here: Postgres on the instance (no RDS), S3 settings (5.1, 5.2), backups (5.3), the deploy mechanism, DNS and the IP approach. Still open: Cloudflare Pages CSP (R-08), the cookie domain (Q-44), the vault choice (the secrets store of section 6).
 - **ADR 0001 OI-5.** "Decided (D-11, C-43..C-48, ADR 0017): the pilot runs on one scheduled instance with Postgres on it plus a dedicated Judge0 instance; S3 settings as ADR 0017 section 5; backups to S3; no AWS staging. Still open: the instance type and OS image of the Judge0 host (spike), the production layout." ST-6 is decided by 5.2.
 - **ADR 0016.** Section 1 and row 3 of section 2: the pilot's Judge0 host is the small dedicated instance of ADR 0017 section 9. Row 4 (staging): "no AWS staging; Judge0 runs in the local stack". Owner question 1 is answered by C-45 (option B).
-- **PA-07 / DEP-03.** Scope becomes "the pilot instances, buckets, key, schedule group and DNS as in ADR 0017"; DEP-01 becomes local and free-tier staging (C-43).
+- **PA-07 / DEP-03.** Scope becomes "the pilot instances, buckets, key, schedule group and DNS as in ADR 0017"; DEP-01 becomes local-only staging (C-43, C-65).
 - **processors.md** (Delivery Lead): EventBridge Scheduler, KMS, SNS and the probe as AWS sub-services of the same processor. Cloudflare hosts only Pages (no DNS for the assess zone and no token on any server, C-52) and holds no candidate data. Route 53 is another AWS sub-service.
 
 ## 13. FSD changes (in the FSD PR)
