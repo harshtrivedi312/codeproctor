@@ -135,8 +135,12 @@ export interface RecorderHealth {
   capExceeded: boolean;
   /** Chunks whose identity collided with a confirmed chunk (counters were behind). */
   seqConflicts: number;
-  /** Of those, chunks that were given a fresh seq and kept. */
+  /** Of those, chunks moved into a fresh segment with fresh contiguous seqs. */
   rekeyedChunks: number;
+  /** Chunks lost because their data could not be moved after a collision (counted, never silent). */
+  staleIdentityLosses: number;
+  /** Streams on hold after a collision, waiting for refreshed counters. */
+  heldStreams: RecordingStream[];
 }
 
 export type DeviceLossReason = 'TRACK_ENDED' | 'RECORDER_ERROR';

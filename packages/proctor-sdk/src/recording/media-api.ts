@@ -46,7 +46,8 @@ async function errorFor(res: Response): Promise<MediaApiError> {
   if (code === 'PRESIGN_QUOTA_EXCEEDED') return mk('QUOTA');
   if (code === 'CHUNK_NOT_PRESIGNED' || code === 'UPLOAD_MISMATCH') return mk('REPRESIGN');
   if (code === 'UPLOAD_NOT_FOUND') return mk('REUPLOAD');
-  if (code === 'SEQ_CONFLICT') return mk('FATAL');
+  // The seq exists under another segment: our counters are behind, the stream needs a resync.
+  if (code === 'SEQ_CONFLICT') return mk('SEQ_COLLISION');
   if (res.status === 401 || res.status === 408 || res.status === 429 || res.status >= 500) {
     return mk('RETRY'); // a token refresh is the app's job; storage trouble clears by itself
   }

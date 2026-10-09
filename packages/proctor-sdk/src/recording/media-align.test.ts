@@ -106,7 +106,7 @@ describe('createFetchMediaApi (FR-701, ADR 0013 5.5)', () => {
     [404, 'CHUNK_NOT_PRESIGNED', 'REPRESIGN'],
     [422, 'UPLOAD_MISMATCH', 'REPRESIGN'],
     [409, 'UPLOAD_NOT_FOUND', 'REUPLOAD'],
-    [409, 'SEQ_CONFLICT', 'FATAL'],
+    [409, 'SEQ_CONFLICT', 'SEQ_COLLISION'],
     [429, 'RATE_LIMITED', 'RETRY'],
     [503, 'STORAGE_UNAVAILABLE', 'RETRY'],
     [500, undefined, 'RETRY'],
@@ -426,14 +426,24 @@ describe('answers of the object store and of confirm (FR-701, FR-702, TC-063)', 
     expect(r.q.health().droppedChunks).toBe(0);
   });
 
-  it('FR-702: alreadyUploaded skips the PUT and the confirm and clears the chunk', async () => {
-    const r = qrig({ presign: () => ({ alreadyUploaded: true, url: '' }) });
+  it('FR-702: alreadyUploaded for a chunk this queue presigned (the confirm answer was lost) skips the PUT and the confirm and clears the chunk', async () => {
+    let n = 0;
+    const r = qrig({
+      presign: () => (++n === 1 ? okPresign() : { alreadyUploaded: true, url: '' }),
+      put: (_u, call) => (call === 1 ? 503 : 201), // first try fails after the URL was issued
+    });
     await r.q.start();
     await r.q.add(chunkRef(0), buf(10));
     await run(200);
-    expect(r.log.put).toHaveLength(0);
+    expect(r.log.put).toHaveLength(1);
+    // the cached URL is reused for the retry, so make the URL expire: the next presign says alreadyUploaded
+    (r.q as unknown as { presigns: Map<string, { expiresAtMs: number }> }).presigns.forEach(
+      (v) => (v.expiresAtMs = 0),
+    );
+    await run(2500);
+    expect(r.log.put).toHaveLength(1); // no second PUT
     expect(r.log.confirm).toHaveLength(0);
-    expect(r.q.health().chunksPending).toBe(0);
+    expect(r.q.health()).toMatchObject({ chunksPending: 0, droppedChunks: 0, seqConflicts: 0 });
   });
 
   it('FR-702: confirm 422 UPLOAD_MISMATCH presigns again (it counts) and uploads again', async () => {
@@ -706,61 +716,157 @@ describe('pipeline signals (FR-702)', () => {
 
 // ---------- review round 1 (PR #366) ----------
 
-describe('alreadyUploaded is believed only for chunks this queue presigned or restored (FR-702, TC-070)', () => {
-  it('TC-070 FR-702: alreadyUploaded for a chunk this page never got a URL for is a collision: the chunk is kept, given a fresh seq and uploaded, never deleted', async () => {
-    const conflicts: string[] = [];
-    let call = 0;
+describe('identity collision: hold, resync, move the group (FR-702, TC-070, ADR 0013 5.5)', () => {
+  /** A queue whose server has confirmed ANOTHER chunk under WEBCAM seqs 0..2 of segment 0. */
+  function collidingRig(prepareOk: () => boolean, over: Partial<UploadQueueOptions> = {}) {
+    const confirmed = new Set([0, 1, 2]); // seqs the server already has (other chunks)
+    const flags: string[] = [];
+    const moved: { segment: number; firstSeq: number; count: number }[] = [];
+    let done = 0;
     const r = qrig(
       {
         presign: (c) => {
-          call++;
-          // the server has a DIFFERENT confirmed chunk under seq 5; the re-keyed seq is free
-          return c.seq === 5
-            ? { alreadyUploaded: true, url: '' }
-            : okPresign(`https://store.invalid/${c.seq}`);
+          // under segment 0 these seqs collide; anything else is a fresh identity
+          if (c.segment === 0 && confirmed.has(c.seq)) {
+            return { alreadyUploaded: true, url: '' };
+          }
+          return okPresign(`https://store.invalid/${c.stream}/${c.segment}/${c.seq}`);
         },
       },
       {
-        rekey: (ref, attempt) => Promise.resolve(ref.seq + 1000 * attempt),
-        onSeqConflict: (i) => conflicts.push(`${i.stream}:${i.segment}`),
+        onSeqConflict: (i) => flags.push(`${i.stream}:${i.segment}`),
+        collision: {
+          prepare: () => Promise.resolve(prepareOk()),
+          allocate: (_stream, count) => {
+            const v = { segment: 1, firstSeq: 3, count };
+            moved.push(v);
+            return Promise.resolve(v);
+          },
+          done: () => {
+            done++;
+          },
+        },
+        ...over,
       },
     );
+    return { r, flags, moved, done: () => done };
+  }
+
+  async function addGroup(r: ReturnType<typeof qrig>) {
     await r.q.start();
-    await r.q.add(chunkRef(5, 10, 'WEBCAM', 2), buf(10));
-    await run(2000);
-    expect(call).toBe(2);
-    expect(conflicts).toEqual(['WEBCAM:2']);
-    expect(r.log.put).toHaveLength(1); // the data was uploaded under the new identity
-    expect(r.log.confirm).toEqual([1005]);
-    expect(r.q.health()).toMatchObject({
+    await r.q.add(chunkRef(0, 10, 'WEBCAM', 0, { first: true }), buf(10)); // header chunk
+    await r.q.add(chunkRef(1, 10, 'WEBCAM', 0), buf(10));
+    await r.q.add(chunkRef(2, 10, 'WEBCAM', 0), buf(10));
+  }
+
+  it('TC-070 FR-702: a collision holds the stream, flags once, and after the resync the whole group moves into a fresh segment with contiguous seqs and the header chunk lowest; no seq is skipped', async () => {
+    const c = collidingRig(() => true);
+    await addGroup(c.r);
+    await run(4000);
+    expect(c.flags).toEqual(['WEBCAM:0']); // once per episode, not once per chunk
+    expect(c.moved).toEqual([{ segment: 1, firstSeq: 3, count: 3 }]);
+    expect(c.done()).toBe(1); // the live recorder is restarted into another new segment
+    // every upload used the new identity: segment 1, seqs 3,4,5 in order, no gap
+    const used = c.r.log.confirm.slice().sort((a, b) => a - b);
+    expect(used).toEqual([3, 4, 5]);
+    expect(
+      c.r.log.presign
+        .filter((x) => x.segment === 1)
+        .map((x) => x.seq)
+        .sort(),
+    ).toEqual([3, 4, 5]);
+    const header = c.r.log.presign.find((x) => x.first === true && x.segment === 1);
+    expect(header).toMatchObject({ segment: 1, seq: 3 }); // lowest seq of the new segment
+    expect(c.r.q.health()).toMatchObject({
       chunksPending: 0,
       droppedChunks: 0,
       seqConflicts: 1,
-      rekeyedChunks: 1,
+      rekeyedChunks: 3,
+      staleIdentityLosses: 0,
+      heldStreams: [],
     });
   });
 
-  it('TC-070 FR-702: without a way to re-key, an ordinary colliding chunk is dropped and COUNTED; a first chunk is kept and flagged', async () => {
-    const blocked: string[] = [];
+  it('TC-070 FR-702: no presign for the held stream while the counters are unknown, and nothing is dropped or guessed', async () => {
+    const c = collidingRig(() => false);
+    await addGroup(c.r);
+    await run(3000);
+    const presigns = c.r.log.presign.length;
+    await run(60_000);
+    expect(c.r.log.presign.length).toBe(presigns); // quiet: no blind retries, no jumps
+    expect(c.moved).toEqual([]);
+    expect(c.r.q.health()).toMatchObject({
+      chunksPending: 3,
+      droppedChunks: 0,
+      heldStreams: ['WEBCAM'],
+      seqConflicts: 1,
+    });
+    expect(c.flags).toHaveLength(1);
+  });
+
+  it('TC-070 FR-702: when the app later refreshes the counters (resyncHeld) the held group moves and uploads', async () => {
+    let ok = false;
+    const c = collidingRig(() => ok);
+    await addGroup(c.r);
+    await run(2000);
+    expect(c.r.q.health().chunksPending).toBe(3);
+    ok = true;
+    c.r.q.resyncHeld();
+    await run(4000);
+    expect(c.r.q.health()).toMatchObject({ chunksPending: 0, droppedChunks: 0, heldStreams: [] });
+    expect(c.r.log.confirm.slice().sort((a, b) => a - b)).toEqual([3, 4, 5]);
+  });
+
+  it('TC-070 FR-702: a 409 SEQ_CONFLICT (the seq exists under another segment) goes through the same hold and move, ordinary chunks are not dropped and a first chunk is not retried every 5 minutes', async () => {
+    const flags: string[] = [];
+    const r = qrig(
+      {
+        presign: (c) => {
+          if (c.segment === 0)
+            throw new MediaApiError('SEQ_COLLISION', 'conflict', { code: 'SEQ_CONFLICT' });
+          return okPresign(`https://store.invalid/${c.segment}/${c.seq}`);
+        },
+      },
+      {
+        onSeqConflict: (i) => flags.push(`${i.stream}:${i.segment}`),
+        collision: {
+          prepare: () => Promise.resolve(true),
+          allocate: (_s, count) => Promise.resolve({ segment: 4, firstSeq: 40 + 0 * count }),
+          done: () => undefined,
+        },
+      },
+    );
+    await r.q.start();
+    await r.q.add(chunkRef(7, 10, 'AUDIO', 0, { first: true }), buf(10));
+    await r.q.add(chunkRef(8, 10, 'AUDIO', 0), buf(10));
+    await run(4000);
+    expect(flags).toEqual(['AUDIO:0']);
+    expect(r.log.confirm.slice().sort((a, b) => a - b)).toEqual([40, 41]);
+    expect(r.q.health()).toMatchObject({ chunksPending: 0, droppedChunks: 0, blockedChunks: 0 });
+    await run(10 * 60_000);
+    expect(flags).toHaveLength(1); // no repeated flags
+  });
+
+  it('FR-702: without a collision hook the chunks stay, the stream stays held and the flag is raised once (no jump, no drop)', async () => {
+    const flags: string[] = [];
     const r = qrig(
       { presign: () => ({ alreadyUploaded: true, url: '' }) },
-      { onChunkBlocked: (i) => blocked.push(`${i.stream}:${i.code ?? ''}`) },
+      { onSeqConflict: (i) => flags.push(i.stream) },
     );
     await r.q.start();
     await r.q.add(chunkRef(1, 10, 'WEBCAM', 0), buf(10));
     await r.q.add(chunkRef(0, 10, 'WEBCAM', 0, { first: true }), buf(10));
-    await run(1000);
-    expect(r.log.put).toHaveLength(0);
+    await run(30 * 60_000);
     expect(r.q.health()).toMatchObject({
-      chunksPending: 1,
-      droppedChunks: 1,
-      seqConflicts: 2,
-      blockedChunks: 1,
+      chunksPending: 2,
+      droppedChunks: 0,
+      heldStreams: ['WEBCAM'],
+      seqConflicts: 1,
     });
-    expect(blocked).toEqual(['WEBCAM:SEQ_CONFLICT']);
+    expect(flags).toEqual(['WEBCAM']);
   });
 
-  it('FR-702: alreadyUploaded IS believed for a chunk restored from IndexedDB (our earlier page load got the URL) and for one this queue presigned', async () => {
+  it('FR-702: alreadyUploaded IS believed for a chunk restored from IndexedDB and for one this queue presigned', async () => {
     const store = newStore();
     const first = qrig({ presign: () => okPresign(), put: () => 0 }, { store }); // offline: chunk stays in IDB
     await first.q.start();
@@ -775,7 +881,6 @@ describe('alreadyUploaded is believed only for chunks this queue presigned or re
       droppedChunks: 0,
       seqConflicts: 0,
     });
-    // presigned by this queue, PUT landed, the confirm answer got lost: alreadyUploaded next try
     let n2 = 0;
     const third = qrig({
       presign: () => (++n2 === 1 ? okPresign() : { alreadyUploaded: true, url: '' }),
@@ -789,25 +894,62 @@ describe('alreadyUploaded is believed only for chunks this queue presigned or re
     expect(third.q.health()).toMatchObject({ chunksPending: 0, seqConflicts: 0 });
   });
 
-  it('FR-702 B1: after a reload in storage-degraded mode the counters fall behind; the pipeline re-keys the colliding chunk past the confirmed ones', async () => {
-    const store = newStore();
-    for (const m of ['put', 'get', 'keys'] as const)
-      vi.spyOn(store, m).mockRejectedValue(new Error('idb'));
-    const confirmedSeqs = new Set([0, 1, 2]);
-    const sent: number[] = [];
-    const flags: string[] = [];
+  it('FR-702: the overflow allowance of a protected first chunk moves with it when the group is re-keyed', async () => {
+    const MIB = 1024 * 1024;
+    const c = collidingRig(() => true, { maxBufferBytes: 8 * MIB, concurrency: 0 });
+    await c.r.q.start();
+    await c.r.q.add(chunkRef(0, 8 * MIB, 'WEBCAM', 0, { first: true }), new ArrayBuffer(8));
+    await c.r.q.add(chunkRef(1, 8 * MIB, 'WEBCAM', 1, { first: true }), new ArrayBuffer(8)); // overflow 8 MiB
+    // collide the first chunk by hand through a presign that says alreadyUploaded
+    const q = c.r.q as unknown as { onCollision: (r: ChunkRef) => void };
+    q.onCollision(chunkRef(0, 8 * MIB, 'WEBCAM', 0, { first: true }));
+    await run(1000);
+    const lost: string[] = [];
+    (c.r.q as unknown as { o: UploadQueueOptions }).o.onSegmentLost = (i) => lost.push(i.stream);
+    // 8 MiB overflow still counted for the stream: another 8 MiB first chunk fits (16 MiB), 1 byte more does not
+    await c.r.q.add(chunkRef(9, 8 * MIB, 'WEBCAM', 2, { first: true }), new ArrayBuffer(8));
+    await c.r.q.add(chunkRef(10, 1, 'WEBCAM', 3, { first: true }), new ArrayBuffer(8));
+    expect(lost).toEqual(['WEBCAM']);
+  });
+
+  it('FR-702: nothing is moved or written after finish() purged the queue', async () => {
+    const c = collidingRig(() => true);
+    await addGroup(c.r);
+    await c.r.q.purge();
+    const keys = await (c.r.q as unknown as { o: { store: IdbStore } }).o.store.keys(
+      'chunks',
+      's:',
+    );
+    await c.r.q.add(chunkRef(9, 10, 'WEBCAM', 0), buf(10)); // refused after the purge
+    await run(2000);
+    expect(keys).toEqual([]);
+    expect(
+      await (c.r.q as unknown as { o: { store: IdbStore } }).o.store.keys('chunks', 's:'),
+    ).toEqual([]);
+    expect(c.r.q.health().chunksPending).toBe(0);
+  });
+});
+
+describe('collision at pipeline level: recorder restart and counters (FR-701, FR-702)', () => {
+  function pRig(
+    store: IdbStore,
+    server: { confirmedSeqs: Set<number>; segmentOneUp: boolean },
+    over: Partial<ConstructorParameters<typeof RecordingPipeline>[0]> = {},
+  ) {
+    const confirmedOk: ChunkRef[] = [];
     const recs: FakeRecorder[] = [];
+    const flags: string[] = [];
     const p = new RecordingPipeline({
       sessionId: 's',
       api: {
         presign: (c) =>
           Promise.resolve(
-            confirmedSeqs.has(c.seq)
+            c.segment === 0 && server.confirmedSeqs.has(c.seq)
               ? { alreadyUploaded: true, url: '' }
-              : okPresign(`https://store.invalid/${c.seq}`),
+              : okPresign(`https://store.invalid/${c.segment}/${c.seq}`),
           ),
         confirm: (c) => {
-          sent.push(c.seq);
+          confirmedOk.push(c);
           return Promise.resolve();
         },
       },
@@ -824,15 +966,57 @@ describe('alreadyUploaded is believed only for chunks this queue presigned or re
       isTypeSupported: () => true,
       put: () => Promise.resolve(201),
       onCapability: (f) => flags.push(f.id),
+      ...over,
     });
-    await p.recordWebcam(); // counters start at 0: behind the three confirmed chunks
-    recs[0]?.emit(10);
+    return { p, confirmedOk, recs, flags };
+  }
+
+  it('FR-702 TC-070: after a reload with counters behind (IndexedDB failed), the collision stops the live recorder, resyncs from the server counters, moves the group into a fresh segment and restarts the recorder after it: no skipped seqs', async () => {
+    const store = newStore();
+    for (const m of ['put', 'get', 'keys'] as const)
+      vi.spyOn(store, m).mockRejectedValue(new Error('idb'));
+    const server = { confirmedSeqs: new Set([0, 1, 2]), segmentOneUp: true };
+    const resync = vi.fn(() => Promise.resolve({ WEBCAM: { nextSeq: 3, nextSegment: 1 } }));
+    const r = pRig(store, server, { resyncCounters: resync });
+    await r.p.recordWebcam(); // counters start at 0: behind the server's 3 confirmed chunks
+    r.recs[0]?.emit(10);
+    r.recs[0]?.emit(10);
+    await run(6000);
+    expect(resync).toHaveBeenCalledTimes(1);
+    expect(r.flags).toContain('recording-seq-conflict');
+    // live recorder was replaced: a second recorder exists and records into a newer segment
+    expect(r.recs.length).toBeGreaterThanOrEqual(2);
+    r.recs[r.recs.length - 1]?.emit(10);
     await run(3000);
-    expect(p.health()).toMatchObject({ droppedChunks: 0, seqConflicts: 1, rekeyedChunks: 1 });
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toBeGreaterThan(2);
-    expect(flags).toContain('recording-seq-conflict');
-    await p.stop();
+    const ok = r.confirmedOk.slice().sort((a, b) => a.seq - b.seq);
+    expect(ok.map((c) => c.seq)).toEqual([3, 4, 5]); // contiguous from the server's nextSeq
+    expect(ok[0]).toMatchObject({ segment: 1, first: true }); // header lowest of the moved group
+    expect(ok[2]?.segment).toBeGreaterThan(1); // the live recording continues in its own new segment
+    expect(r.p.health()).toMatchObject({ droppedChunks: 0, seqConflicts: 1, rekeyedChunks: 2 });
+    await r.p.stop();
+  });
+
+  it('FR-702: without a resync hook the stream stays held with chunks kept and the flag raised; seedCounters (the app refreshed them) resolves it', async () => {
+    const store = newStore();
+    const server = { confirmedSeqs: new Set([0, 1]), segmentOneUp: true };
+    const r = pRig(store, server);
+    await r.p.recordWebcam();
+    r.recs[0]?.emit(10);
+    r.recs[0]?.emit(10);
+    await run(6000);
+    expect(r.flags).toContain('recording-seq-conflict');
+    expect(r.confirmedOk).toHaveLength(0);
+    expect(r.p.health()).toMatchObject({
+      chunksPending: 2,
+      droppedChunks: 0,
+      heldStreams: ['WEBCAM'],
+    });
+    r.p.seedCounters({ WEBCAM: { nextSeq: 2, nextSegment: 1 } });
+    await run(6000);
+    expect(r.p.health().heldStreams).toEqual([]);
+    expect(r.confirmedOk.map((c) => c.seq).sort()).toEqual([2, 3]);
+    expect(r.confirmedOk.every((c) => c.segment >= 1)).toBe(true);
+    await r.p.stop();
   });
 });
 
@@ -895,6 +1079,7 @@ describe('after SESSION_NOT_ACTIVE nothing new is captured or stored (privacy, F
       getTracks: () => [{ stop: stopTrack, addEventListener: vi.fn() }],
     } as unknown as MediaStream;
     let ended = false;
+    const getUserMedia = vi.fn(() => Promise.resolve(media));
     const p = new RecordingPipeline({
       sessionId: 's',
       api: {
@@ -906,7 +1091,7 @@ describe('after SESSION_NOT_ACTIVE nothing new is captured or stored (privacy, F
       },
       assertConsent: () => undefined,
       store,
-      mediaDevices: { getUserMedia: () => Promise.resolve(media) },
+      mediaDevices: { getUserMedia },
       recorderFactory: () => {
         const r = new FakeRecorder();
         recs.push(r);
@@ -923,7 +1108,12 @@ describe('after SESSION_NOT_ACTIVE nothing new is captured or stored (privacy, F
     expect(stopTrack).toHaveBeenCalled();
     const keysBefore = (await store.keys('chunks', 's:')).length;
     recs[0]?.emit(10); // a late emission after the end
-    await p.recordWebcam().catch(() => undefined);
+    const recorders = recs.length;
+    expect(await p.recordWebcam()).toBeNull(); // the device-loss restart path is closed too
+    expect(await p.recordAudio()).toBeNull();
+    expect(await p.recordScreen(media)).toBe(false);
+    expect(getUserMedia).toHaveBeenCalledTimes(1); // never asked for a device again
+    expect(recs.length).toBe(recorders); // and no recorder started
     await run(500);
     expect((await store.keys('chunks', 's:')).length).toBeLessThanOrEqual(keysBefore + 0);
     const q = (p as unknown as { queue: UploadQueue }).queue;
@@ -1058,5 +1248,97 @@ describe('small behaviours of review round 1 (FR-702, TC-063)', () => {
     const firstChunk = order.indexOf('chunk');
     expect(firstChunk).toBeGreaterThan(-1);
     expect(order.slice(0, firstChunk).some((o) => o === 'counter:1')).toBe(true); // seq 0 taken, counter 1 saved
+  });
+});
+
+describe('no device is opened or recorder started after the session ended (BL-2, privacy)', () => {
+  function endedRig() {
+    const stop = vi.fn();
+    const media = {
+      getTracks: () => [{ stop, addEventListener: vi.fn() }],
+    } as unknown as MediaStream;
+    let releaseMedia!: () => void;
+    const gate = new Promise<void>((r) => (releaseMedia = r));
+    let gumCalls = 0;
+    const recs: FakeRecorder[] = [];
+    const p = new RecordingPipeline({
+      sessionId: 's',
+      api: {
+        presign: () => {
+          throw new MediaApiError('ENDED', 'over', { code: 'SESSION_NOT_ACTIVE' });
+        },
+        confirm: () => Promise.resolve(),
+      },
+      assertConsent: () => undefined,
+      store: newStore(),
+      mediaDevices: {
+        getUserMedia: async () => {
+          gumCalls++;
+          if (gumCalls > 1) await gate; // a later prompt that is answered after the end
+          return media;
+        },
+      },
+      recorderFactory: () => {
+        const r = new FakeRecorder();
+        recs.push(r);
+        return r;
+      },
+      isTypeSupported: () => true,
+      put: () => Promise.resolve(201),
+    });
+    return { p, stop, recs, releaseMedia, gum: () => gumCalls };
+  }
+
+  it('FR-702: a permission prompt answered after the end releases the device and starts no recorder', async () => {
+    const r = endedRig();
+    await r.p.recordAudio(); // first call: fine
+    r.recs[0]?.emit(10);
+    // the next prompt opens while the session is still live...
+    const pending = r.p.recordWebcam();
+    await vi.advanceTimersByTimeAsync(50);
+    // ...and SESSION_NOT_ACTIVE arrives (the audio chunk's presign) before it is answered
+    await run(2000);
+    r.releaseMedia();
+    expect(await pending).toBeNull();
+    expect(r.recs).toHaveLength(1); // the webcam recorder never started
+    expect(r.stop).toHaveBeenCalled(); // and the device that arrived late was released
+    await r.p.stop();
+  });
+
+  it('FR-702: every record* method returns before asking for consent or a device once the session ended', async () => {
+    const consent = vi.fn();
+    const r = new RecordingPipeline({
+      sessionId: 's',
+      api: {
+        presign: () => {
+          throw new MediaApiError('ENDED', 'over', { code: 'SESSION_NOT_ACTIVE' });
+        },
+        confirm: () => Promise.resolve(),
+      },
+      assertConsent: consent,
+      store: newStore(),
+      mediaDevices: {
+        getUserMedia: vi.fn(() =>
+          Promise.resolve({ getTracks: () => [] } as unknown as MediaStream),
+        ),
+      },
+      recorderFactory: () => new FakeRecorder(),
+      isTypeSupported: () => true,
+      put: () => Promise.resolve(201),
+    });
+    await r.recordWebcam();
+    (r as unknown as { queue: UploadQueue }).queue
+      .add(chunkRef(0, 5, 'WEBCAM'), buf(5))
+      .catch(() => undefined);
+    await run(2000);
+    expect(r.health().ended).toBe(true);
+    const asked = consent.mock.calls.length;
+    expect(await r.recordWebcam()).toBeNull();
+    expect(await r.recordAudio()).toBeNull();
+    expect(await r.recordScreen({ getVideoTracks: () => [] } as unknown as MediaStream)).toBe(
+      false,
+    );
+    expect(consent.mock.calls.length).toBe(asked);
+    await r.stop();
   });
 });
