@@ -10,11 +10,15 @@ import {
   FLAG_RESEND_MS,
   FlagReporter,
   MAX_HEARTBEAT_FLAGS,
+  cutDetail,
+  sanitizeRecorder,
   type HeartbeatBody,
 } from './health';
 import { IdbStore } from './idb';
 import { ProctorSession, type ProctorSessionConfig } from './session';
 import { createFetchTransport, parseHeartbeatAnswer, type HeartbeatResult } from './transport';
+import { Heartbeat } from './heartbeat';
+import { STORES } from './idb';
 import type { CapabilityFlag } from './types';
 
 /**
@@ -303,8 +307,23 @@ describe('capability id conformity (ADR 0013 sections 2, 5.8)', () => {
     const ids = new Set<string>();
     for (const f of files(join(__dirname, '..'))) {
       const src = readFileSync(f, 'utf8');
-      for (const m of src.matchAll(/\bid:\s*'([^']+)'/g)) ids.add(m[1] as string);
-      for (const m of src.matchAll(/readonly id\s*=\s*'([^']+)'/g)) ids.add(m[1] as string);
+      // 'x', "x" and `x` literals; a template with a hole is expanded for the known vision tasks.
+      for (const m of src.matchAll(/\bid:\s*(['"`])([^'"`]+)\1/g)) {
+        const id = m[2] as string;
+        if (id.includes('${')) {
+          if (id === 'vision-${task}' || id === 'vision-${t}') {
+            for (const t of ['face', 'gaze', 'objects']) ids.add(`vision-${t}`);
+          } else if (id === 'record-${stream.toLowerCase()}') {
+            for (const t of ['screen', 'webcam', 'audio']) ids.add(`record-${t}`);
+          } else {
+            throw new Error(`unexpanded template id: ${id}`);
+          }
+        } else {
+          ids.add(id);
+        }
+      }
+      for (const m of src.matchAll(/readonly id\s*=\s*(['"`])([^'"`]+)\1/g))
+        ids.add(m[2] as string);
     }
     expect(ids.size).toBeGreaterThan(20);
     for (const id of ids) expect(id, id).toMatch(FLAG_ID_RE);
@@ -336,5 +355,230 @@ describe('capability id conformity (ADR 0013 sections 2, 5.8)', () => {
     expect(seen.map((x) => x.split(':')[0])).toEqual(['UNVERIFIABLE', 'UNSUPPORTED', 'SUPPORTED']);
     for (const x of seen) expect(x.length).toBeLessThan(160);
     await s.stop();
+  });
+});
+
+describe('probe, timeouts, rejected bodies (FR-609, TC-063)', () => {
+  it('TC-063: after ended (heartbeat 409) and after stop() the probe answers false and sends nothing', async () => {
+    let ended = false;
+    const r = rig({ heartbeatIntervalMs: 20 }, () =>
+      ended ? { ended: 'SESSION_NOT_ACTIVE' } : true,
+    );
+    const s = new ProctorSession();
+    const ev: string[] = [];
+    s.on('ended', (e) => ev.push(e.reason));
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(r.bodies.length).toBeGreaterThan(1));
+    ended = true;
+    await vi.waitFor(() => expect(ev).toEqual(['SESSION_NOT_ACTIVE']), { timeout: 3000 });
+    const n = r.bodies.length;
+    expect(await s.probe()).toBe(false);
+    await new Promise((x) => setTimeout(x, 60));
+    expect(r.bodies.length).toBe(n); // the probe sent no beat with a refused token
+
+    const r2 = rig({ heartbeatIntervalMs: 60_000 });
+    const s2 = new ProctorSession();
+    await s2.start(r2.cfg);
+    await vi.waitFor(() => expect(r2.bodies.length).toBe(1));
+    await s2.stop();
+    expect(await s2.probe()).toBe(false);
+    expect(r2.bodies.length).toBe(1);
+  });
+
+  it('a probe during the 401 hold does not bypass it', async () => {
+    const r = rig(
+      { authLostAfter: 1, onReauthRequired: () => undefined, heartbeatIntervalMs: 60_000 },
+      () => ({
+        auth: 'TOKEN_EXPIRED',
+      }),
+    );
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(r.bodies.length).toBe(1));
+    expect(await s.probe()).toBe(false);
+    expect(r.bodies.length).toBe(1);
+    await s.stop();
+  });
+
+  it('a transport that never settles does not block later beats (heartbeat-level timeout)', async () => {
+    let calls = 0;
+    const hb = new Heartbeat(
+      () => (++calls === 1 ? new Promise<HeartbeatResult>(() => undefined) : Promise.resolve(true)),
+      100,
+    );
+    hb.start();
+    await vi.waitFor(() => expect(hb.online).toBe(true), { timeout: 3000 });
+    expect(calls).toBeGreaterThan(1);
+    hb.stop();
+  });
+
+  it('429 is reachable (online), nothing is acknowledged and the flags stay pending', async () => {
+    const h = new Heartbeat(() => Promise.resolve({ busy: true }), 60_000);
+    const changes: boolean[] = [];
+    const h2 = new Heartbeat(
+      () => Promise.reject(new Error('x')),
+      60_000,
+      (o) => changes.push(o),
+    );
+    h2.start();
+    await vi.waitFor(() => expect(changes).toEqual([false]));
+    h2.stop();
+    expect(await h.beatNow()).toBe(true);
+    h.stop();
+  });
+
+  it('400/413 on the body: one more beat without it, last_heartbeat stays fresh, flagged once, flags marked sent', async () => {
+    const bodies: (string | undefined)[] = [];
+    const t = createFetchTransport({
+      baseUrl: 'https://api.test',
+      getToken: () => 'tok',
+      fetchFn: ((_u: string, init: RequestInit) => {
+        bodies.push(typeof init.body === 'string' ? init.body : undefined);
+        return Promise.resolve(
+          typeof init.body === 'string'
+            ? new Response('{"code":"BODY_TOO_LARGE"}', { status: 413 })
+            : new Response('{"status":"IN_PROGRESS"}', { status: 200 }),
+        );
+      }) as unknown as typeof fetch,
+    });
+    const r = await t.heartbeat({
+      queue: { pendingEventBatches: 0, pendingKeystrokeBatches: 0, rejectedBatches: 0 },
+    });
+    expect(r).toMatchObject({ ok: true, bodyRejected: true, state: { status: 'IN_PROGRESS' } });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toBeUndefined();
+
+    // session level
+    const flags: string[] = [];
+    const rr = rig({ heartbeatIntervalMs: 20 }, () => ({ ok: true, bodyRejected: true }));
+    const s = new ProctorSession();
+    s.on('capability', (f) => flags.push(f.id));
+    await s.start(rr.cfg);
+    s.reportCapability(flag('record-audio', 'UNSUPPORTED'));
+    await vi.waitFor(() => expect(rr.bodies.length).toBeGreaterThan(4), { timeout: 3000 });
+    expect(flags.filter((f) => f === 'heartbeat-body-rejected')).toHaveLength(1);
+    await s.stop();
+  });
+
+  it('resyncCapabilities arms a full resend', () => {
+    expect(parseHeartbeatAnswer('{"status":"PAUSED","resyncCapabilities":true}')).toMatchObject({
+      resync: true,
+    });
+    const r = new FlagReporter();
+    r.record(flag('a-flag'));
+    r.take(1).commit();
+    expect(r.take(2).flags).toEqual([]);
+    r.forceFull();
+    expect(r.take(3).flags.map((f) => f.id)).toEqual(['a-flag']);
+  });
+});
+
+describe('what the body may carry (counts only)', () => {
+  it('sanitizeRecorder keeps known numeric fields and drops everything else', () => {
+    const dirty = {
+      streams: [
+        {
+          stream: 'WEBCAM',
+          segment: 1,
+          lastSeq: 2,
+          bufferedChunks: 3,
+          bufferedBytes: 4,
+          droppedChunks: 5,
+          droppedBytes: 6,
+          url: 'https://store.invalid/secret',
+          key: 'abc',
+        },
+        {
+          stream: 'https://evil',
+          segment: 0,
+          lastSeq: 0,
+          bufferedChunks: 0,
+          bufferedBytes: 0,
+          droppedChunks: 0,
+          droppedBytes: 0,
+        },
+        {
+          stream: 'AUDIO',
+          segment: -1,
+          lastSeq: 0,
+          bufferedChunks: 0,
+          bufferedBytes: 0,
+          droppedChunks: 0,
+          droppedBytes: 0,
+        },
+        {
+          stream: 'SCREEN',
+          segment: 1.5,
+          lastSeq: 0,
+          bufferedChunks: 0,
+          bufferedBytes: 0,
+          droppedChunks: 0,
+          droppedBytes: 0,
+        },
+      ],
+      seqConflicts: 2,
+      heldStreams: 'two',
+      note: 'editor text here',
+    };
+    expect(sanitizeRecorder(dirty)).toEqual({
+      streams: [
+        {
+          stream: 'WEBCAM',
+          segment: 1,
+          lastSeq: 2,
+          bufferedChunks: 3,
+          bufferedBytes: 4,
+          droppedChunks: 5,
+          droppedBytes: 6,
+        },
+      ],
+      seqConflicts: 2,
+    });
+    expect(sanitizeRecorder('nope')).toBeUndefined();
+  });
+
+  it('flags: worst first (DENIED counts as worst), invalid ids do not use the 32 slots, details cut on code points', () => {
+    const r = new FlagReporter();
+    for (let i = 0; i < 32; i++) r.record(flag(`BAD_${String(i)}`));
+    r.record(flag('fine-ok', 'SUPPORTED'));
+    r.record(flag('denied-one', 'DENIED'));
+    r.record(flag('unver-one', 'UNVERIFIABLE'));
+    r.record(flag('emoji', 'UNVERIFIABLE', '😀'.repeat(200)));
+    const sent = r.take(1).flags;
+    expect(sent.map((f) => f.id)).toEqual(['denied-one', 'unver-one', 'emoji', 'fine-ok']);
+    expect(Array.from(sent[2]?.detail ?? '').length).toBe(128);
+    expect(cutDetail('a😀b', 2)).toBe('a😀');
+  });
+
+  it('reportCapability ignores ids the SDK owns (no forged idb or signing-key)', async () => {
+    const r = rig();
+    const s = new ProctorSession();
+    const seen: string[] = [];
+    await s.start(r.cfg);
+    s.on('capability', (f) => seen.push(`${f.id}:${f.status}`));
+    s.reportCapability({ id: 'idb', status: 'SUPPORTED' });
+    s.reportCapability({ id: 'signing-key', status: 'SUPPORTED' });
+    s.reportCapability({ id: 'record-webcam', status: 'DENIED' });
+    expect(seen).toEqual(['record-webcam:DENIED']);
+    await s.stop();
+  });
+
+  it('a renewed token is nowhere: not in flags, bodies, IndexedDB or localStorage', async () => {
+    const r = rig({ heartbeatIntervalMs: 20 }, () => ({
+      ok: true,
+      renewal: { sessionToken: TOKEN, sessionTokenExpiresAt: '2026-01-01T00:15:00Z' },
+    }));
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(r.bodies.length).toBeGreaterThan(2));
+    await s.stop();
+    const store = r.cfg.store as IdbStore;
+    const all: unknown[] = [];
+    for (const name of [STORES.meta, STORES.eventBatches, STORES.chunks]) {
+      all.push(await store.entries(name, ''));
+    }
+    expect(JSON.stringify(all)).not.toContain(TOKEN);
+    expect(JSON.stringify(Object.entries(localStorage))).not.toContain(TOKEN);
+    expect(JSON.stringify(r.bodies)).not.toContain(TOKEN);
   });
 });

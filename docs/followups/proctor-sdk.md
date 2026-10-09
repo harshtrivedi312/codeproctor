@@ -432,4 +432,7 @@ Open
 - Some pipeline flag details are longer than 128 characters; they are cut when sent (the UI sees the full text). Shorten them if the reviewers' view needs the full text.
 - The server accepts `recorder` and `queue` as loose objects today (no shared zod schema yet); mirror the hub's schema when it lands.
 - `pendingEventBatches` counts cut batches plus one for not-yet-cut items; a precise item count is not sent.
+- Review of #390: `probe()` and `beatNow()` send nothing after stop, end, purge or during the 401 hold and answer false (the session drops its heartbeat reference); a heartbeat that never settles times out at min(0.8 x interval, 8 s); a 400 or 413 on the body is retried once without it (`heartbeat-body-rejected`, raised once, flags marked sent); 429 is reachable; `resyncCapabilities` arms a full resend; the recorder block copies only known numeric fields; `setKey` ignores a run that was stopped and restarted; the `key` part of `idb` recovers; SDK-owned flag ids cannot be forged through `reportCapability`. A 2xx beat during the 401 hold cannot happen (the heartbeat is stopped): `resume()` or `setKey()` is required.
+- For the hub: the vision detectors emit `vision-face`, `vision-gaze` and `vision-objects` while ADR 0013 section 5.8 names `face`, `gaze` and `object`; decide which side changes (the ids match the regex either way).
+- Probe beats count against the heartbeat route limit (12 per minute): the probe answers from a fresh acknowledged beat when it can.
 

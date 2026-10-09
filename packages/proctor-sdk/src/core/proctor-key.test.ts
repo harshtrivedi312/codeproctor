@@ -619,6 +619,28 @@ describe('the key is never written after a purge, never extractable (ADR 0013 se
     expect(await rowOf(helperStore)).toBeUndefined();
   });
 
+  it('S2: the key part of the idb flag recovers when a later store succeeds', async () => {
+    const inner = new IdbKeyStore(newStore());
+    let fail = true;
+    const keyStore: KeyStore = {
+      get: (sid) => inner.get(sid),
+      put: (sid, v) => (fail ? Promise.reject(new Error('quota')) : inner.put(sid, v)),
+      delete: (sid) => inner.delete(sid),
+    };
+    const key = await importSessionKey(KEY2_B64);
+    const seen: string[] = [];
+    const s = new ProctorSession();
+    s.on('capability', (f) => {
+      if (f.id === 'idb') seen.push(f.status);
+    });
+    await s.start(sessionRig({ keyStore, signingKey: { key, epoch: 1 } }).cfg);
+    expect(seen).toEqual(['UNSUPPORTED']);
+    fail = false;
+    await s.setKey(key, 2);
+    expect(seen).toEqual(['UNSUPPORTED', 'SUPPORTED']);
+    await s.stop();
+  });
+
   it('S-c (TC-063, FR-702): a store put still pending across purge, stop() and a new start() is removed when it lands', async () => {
     const real = newStore();
     const inner = new IdbKeyStore(real);
@@ -644,12 +666,18 @@ describe('the key is never written after a purge, never extractable (ADR 0013 se
     r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' } as never));
     await new Promise((x) => setTimeout(x, 100)); // TAKEN_OVER -> purgeKey() while the put hangs
     await s.stop();
-    const again = sessionRig({ store: real, keyStore, signingKey: { key } }); // a NEW start()
+    const KEY3_B64 = btoa(String.fromCharCode(...Array.from({ length: 32 }, (_, i) => 50 + i)));
+    const key3 = await importSessionKey(KEY3_B64);
+    const again = sessionRig({ store: real, keyStore, signingKey: { key: key3 } }); // a NEW start()
     await s.start(again.cfg);
     gate.resolve(); // the old put lands now
     await pending.catch(() => undefined);
     await new Promise((x) => setTimeout(x, 30));
     expect(await rowOf(real)).toBeUndefined();
+    // S4: the hung setKey of the OLD run must not re-key the NEW session.
+    again.fire();
+    await vi.waitFor(() => expect(again.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    expect(again.sent[0]?.signature).toBe(hmacHex(KEY3_B64, again.sent[0]?.body ?? ''));
     await s.stop();
   });
 

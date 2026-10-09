@@ -31,18 +31,30 @@ export interface FetchTransportOptions {
 export type HeartbeatResult =
   | boolean
   | { ended: EndReason }
-  | { ok: true; state?: HeartbeatState; renewal?: TokenRenewal }
-  | { auth: string };
+  | {
+      ok: true;
+      state?: HeartbeatState;
+      renewal?: TokenRenewal;
+      /** The server refused the body (400 or 413); the beat was acknowledged without it. */
+      bodyRejected?: true;
+      /** The server wants the full capability set again (`resyncCapabilities`). */
+      resync?: true;
+    }
+  | { auth: string }
+  /** 429: the server answered (online) but nothing was acknowledged. */
+  | { busy: true };
 
 /** Reads the 200 body of a beat; anything unexpected is ignored (the beat still counts as ok). */
 export function parseHeartbeatAnswer(text: string): {
   state?: HeartbeatState;
   renewal?: TokenRenewal;
+  resync?: true;
 } {
   try {
     const j = JSON.parse(text) as Record<string, unknown> | null;
     if (typeof j !== 'object' || j === null) return {};
-    const out: { state?: HeartbeatState; renewal?: TokenRenewal } = {};
+    const out: { state?: HeartbeatState; renewal?: TokenRenewal; resync?: true } = {};
+    if (j['resyncCapabilities'] === true) out.resync = true;
     const status = j['status'];
     if (status === 'IN_PROGRESS' || status === 'PAUSED') {
       const state: HeartbeatState = { status };
@@ -227,24 +239,38 @@ export function createFetchTransport(o: FetchTransportOptions): EventTransport &
     sendBatch: (batch: SignedBatch) => post(eventsPath, batch),
     sendKeystrokeBatch: (batch: SignedBatch) => post(keystrokesPath, batch),
     async heartbeat(body?: HeartbeatBody): Promise<HeartbeatResult> {
-      try {
+      const beat = async (withBody: boolean): Promise<HeartbeatResult> => {
         const a = await request(
           heartbeatPath,
-          body === undefined
+          body === undefined || !withBody
             ? { method: 'POST', headers: headers() }
             : { method: 'POST', headers: headers(), body: JSON.stringify(body) },
           heartbeatTimeout,
         );
         if (a.ok) {
           const parsed = parseHeartbeatAnswer(a.text);
-          return parsed.state || parsed.renewal ? { ok: true, ...parsed } : true;
+          return Object.keys(parsed).length > 0 ? { ok: true, ...parsed } : true;
         }
         const r = classifyAnswer(a);
         if (typeof r === 'object') {
           if (r.kind === 'ENDED') return { ended: r.reason };
           if (r.kind === 'AUTH') return { auth: r.code ?? '' };
         }
+        if (a.status === 429) return { busy: true };
+        if (r === 'REJECTED' || (typeof r === 'object' && r.kind === 'REJECTED')) {
+          // 400 or 413: this body will never be accepted. Beat once more WITHOUT it, so
+          // last_heartbeat stays fresh and the session is not reported offline.
+          if (withBody && body !== undefined) {
+            const again = await beat(false);
+            if (again === true) return { ok: true, bodyRejected: true };
+            if (typeof again === 'object' && 'ok' in again) return { ...again, bodyRejected: true };
+            return again;
+          }
+        }
         return false;
+      };
+      try {
+        return await beat(true);
       } catch {
         return false;
       }

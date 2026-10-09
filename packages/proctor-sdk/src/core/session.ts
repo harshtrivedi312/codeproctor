@@ -15,7 +15,10 @@ import { EventQueue, type EventQueueStats, type EventTransport } from './event-q
 import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
 import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
 import {
+  FLAG_DETAIL_MAX,
   FlagReporter,
+  cutDetail,
+  sanitizeRecorder,
   type HeartbeatBody,
   type HealthSnapshot,
   type HeartbeatState,
@@ -37,6 +40,22 @@ import {
   type EmitOptions,
   type LockState,
 } from './types';
+
+/** Flags only the SDK raises: an app reporting one of these is ignored (no forging, no clashes). */
+const SDK_OWNED_FLAGS = new Set([
+  'idb',
+  'signing-key',
+  'event-seq',
+  'event-rejected',
+  'keystroke-seq-reset',
+  'keystroke-rejected',
+  'keystroke-unrepresentable',
+  'keystrokes',
+  'batches-lost',
+  'finish-lost',
+  'finish-pending',
+  'heartbeat-body-rejected',
+]);
 
 /**
  * Supplies a new signing key after the server answered 409 KEY_EPOCH_STALE (ADR 0013); without
@@ -201,6 +220,9 @@ export class ProctorSession {
   /** What each IndexedDB user reports; the single `idb` flag is their worst status (ADR 0013 section 2). */
   private readonly idbParts = new Map<string, CapabilityFlag>();
   private idbShown: string | null = null;
+  /** Bumped by start() and at the end of shutdown(): an async call from an earlier run must not touch this one. */
+  private startGen = 0;
+  private bodyRejectedFlagged = false;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
   private config: ProctorSessionConfig | null = null;
@@ -247,6 +269,7 @@ export class ProctorSession {
     if (!config.consent?.recordedAt) throw new ConsentRequiredError();
     if (this.config) throw new Error('ProctorSession already started.');
     this.config = config;
+    this.startGen++;
     const metrics = (this.metrics = new MetricsCollector());
     this.flags = new FlagReporter();
     const key =
@@ -437,7 +460,17 @@ export class ProctorSession {
       (reason) => this.handleEnded(reason, 'heartbeat'),
       {
         ...(config.authLostAfter === undefined ? {} : { authLostAfter: config.authLostAfter }),
+        onResync: () => this.flags?.forceFull(),
         onOk: (r) => {
+          if (r.bodyRejected && !this.bodyRejectedFlagged) {
+            // The server refused the health body (400 or 413): counts only, raised once.
+            this.bodyRejectedFlagged = true;
+            this.fire('capability', {
+              id: 'heartbeat-body-rejected',
+              status: 'UNVERIFIABLE',
+              detail: 'The server refused the heartbeat health body; beats go out without it.',
+            });
+          }
           if (r.renewal) config.onToken?.(r.renewal);
           if (r.state) config.onHeartbeat?.(r.state);
         },
@@ -610,6 +643,7 @@ export class ProctorSession {
       // The session was purged while the put ran (also across a stop() and a new start()): take
       // the row out again.
       if (this.keyPurged || gen !== this.purgeGen) await ks.delete(sid).catch(() => undefined);
+      else this.setIdb('key', null); // stored: a failure reported earlier is over
     } catch {
       this.fireIdbUnsupported();
     }
@@ -648,7 +682,7 @@ export class ProctorSession {
     this.fire('capability', {
       id: 'idb',
       status,
-      ...(detail ? { detail: detail.slice(0, 128) } : {}),
+      ...(detail ? { detail: cutDetail(detail, FLAG_DETAIL_MAX) } : {}),
     });
   }
 
@@ -658,6 +692,7 @@ export class ProctorSession {
    * `recording-storage` flag is folded into the single `idb` flag.
    */
   reportCapability(flag: CapabilityFlag): void {
+    if (SDK_OWNED_FLAGS.has(flag.id)) return; // the SDK raises these itself; an app must not forge them
     if (flag.id === 'recording-storage') {
       this.setIdb(
         'recording',
@@ -691,7 +726,8 @@ export class ProctorSession {
     const take = this.flags?.take();
     if (take && take.flags.length > 0) body.capabilities = take.flags;
     try {
-      const rec = this.config?.getHealth?.()?.recorder;
+      // Only the known numeric fields are copied: counts only, whatever the app returns.
+      const rec = sanitizeRecorder(this.config?.getHealth?.()?.recorder);
       if (rec) body.recorder = rec;
     } catch {
       // a faulty provider must not stop the beat
@@ -747,17 +783,21 @@ export class ProctorSession {
     counters?: ProctorCounters | null,
   ): Promise<void> {
     if (!this.config || this.keyPurged) return; // a purged session never takes a key again
+    const run = this.startGen; // a setKey that hangs across stop() and start() must not re-key the new run
+    const stale = (): boolean => run !== this.startGen || !this.config || this.keyPurged;
     const key = typeof hmacKey === 'string' ? await importSessionKey(hmacKey) : hmacKey;
     if (!isSigningKey(key)) {
       throw new Error('The signing key must be a non-extractable HMAC-SHA-256 key (ADR 0013).');
     }
-    if (this.keyPurged) return;
+    if (stale()) return;
     this.currentKey = key;
     this.keyGen++;
     this.reauthSignalled = false; // a fresh key comes with a fresh token (OTP resume)
     this.heartbeat?.resume();
     if (epoch !== undefined) await this.persistKey(key, epoch);
+    if (stale()) return;
     await this.seedCounters(counters); // before anything is cut with the new key
+    if (stale()) return;
     await Promise.all([this.queue?.setKey(key), this.keystrokeQueue?.setKey(key)]);
   }
 
@@ -826,6 +866,7 @@ export class ProctorSession {
     if (!this.endedFired) {
       this.endedFired = true;
       this.heartbeat?.stop();
+      this.heartbeat = null; // the probe must not beat with a refused token
       const lostBatches =
         (this.queue?.stats().lostBatches ?? 0) + (this.keystrokeQueue?.stats().lostBatches ?? 0);
       this.fire('ended', { reason, lostBatches });
@@ -842,6 +883,7 @@ export class ProctorSession {
     globalThis.removeEventListener?.('pagehide', this.onPageHide);
     globalThis.removeEventListener?.('online', this.onOnline);
     this.heartbeat?.stop();
+    this.heartbeat = null; // probe() after stop or finish sends nothing
     for (const d of this.started.reverse()) {
       try {
         await d.stop();
@@ -896,6 +938,8 @@ export class ProctorSession {
       }
     }
     this.metrics?.stop();
+    this.startGen++;
+    this.bodyRejectedFlagged = false;
     this.flags = null;
     this.idbParts.clear();
     this.idbShown = null;

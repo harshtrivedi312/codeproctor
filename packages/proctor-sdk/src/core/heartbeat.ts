@@ -2,6 +2,8 @@ import type { EndReason } from './batch-queue';
 import type { HeartbeatResult } from './transport';
 
 export interface HeartbeatHooks {
+  /** The server asked for the full capability set again. */
+  onResync?: () => void;
   /** An acknowledged beat that carried the server state and/or a renewed token. */
   onOk?: (r: Extract<HeartbeatResult, { ok: true }>) => void;
   /** After `authLostAfter` consecutive 401 answers (default 3) the beat stops; `resume()` continues. */
@@ -39,13 +41,18 @@ export class Heartbeat {
     this.timer = setInterval(() => void this.beat(), this.intervalMs);
   }
 
-  /** True while the last beat was acknowledged and none failed since. */
+  /** True while the last beat was acknowledged and none failed since (and the heartbeat is live). */
   get online(): boolean {
-    return this.failures === 0 && this.lastOkAt !== null;
+    return !this.stopped && this.endedBy === null && this.failures === 0 && this.lastOkAt !== null;
   }
 
-  /** One beat right now (shared with a beat already in flight); true when the server answered. */
+  /**
+   * One beat right now (shared with a beat already in flight); true when the server answered. After
+   * stop(), the end of the session or a 401 hold it sends nothing and answers false: a probe must
+   * never beat with a token the server refused or after the session was purged.
+   */
   async beatNow(): Promise<boolean> {
+    if (this.stopped || this.endedBy !== null || this.authHold) return false;
     await this.beat();
     return this.online;
   }
@@ -70,7 +77,7 @@ export class Heartbeat {
   private async beatOnce(): Promise<void> {
     let ok: boolean;
     try {
-      const r = await this.send();
+      const r = await this.withTimeout(this.send());
       if (this.stopped) return; // a late answer after stop(): nothing to report
       if (typeof r === 'object') {
         if ('ended' in r) {
@@ -80,6 +87,15 @@ export class Heartbeat {
             this.stop();
             this.safely(() => this.onEnded?.(r.ended));
           }
+          return;
+        }
+        if ('busy' in r) {
+          // 429: the server answered, so we are online; nothing was acknowledged.
+          this.auth401 = 0;
+          this.lastOkAt = Date.now();
+          const wasOffline = this.failures > 0;
+          this.failures = 0;
+          if (wasOffline) this.safely(() => this.onChange?.(true));
           return;
         }
         if ('auth' in r) {
@@ -94,6 +110,7 @@ export class Heartbeat {
           return;
         }
         this.auth401 = 0;
+        if (r.resync) this.safely(() => this.hooks.onResync?.());
         this.safely(() => this.hooks.onOk?.(r));
         ok = true;
       } else {
@@ -112,6 +129,17 @@ export class Heartbeat {
     }
     const isOnline = this.failures === 0;
     if (wasOnline !== isOnline) this.safely(() => this.onChange?.(isOnline));
+  }
+
+  /** A transport that never settles must not block every later beat: no answer in time is a failure. */
+  private withTimeout(p: Promise<HeartbeatResult>): Promise<HeartbeatResult> {
+    const ms = Math.min(this.intervalMs * 0.8, 8000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<HeartbeatResult>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    });
+    p.catch(() => undefined);
+    return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
   }
 
   private safely(fn: () => void): void {

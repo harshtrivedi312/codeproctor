@@ -59,10 +59,71 @@ export interface TokenRenewal {
   sessionTokenExpiresAt: string;
 }
 
+/** At most `max` code points (never splits a surrogate pair). */
+export function cutDetail(s: string, max: number = FLAG_DETAIL_MAX): string {
+  const cp = Array.from(s);
+  return cp.length <= max ? s : cp.slice(0, max).join('');
+}
+
 function conforming(f: CapabilityFlag): CapabilityFlag | null {
   if (!FLAG_ID_RE.test(f.id)) return null; // never send an id the route would refuse
   if (f.detail === undefined) return { id: f.id, status: f.status };
-  return { id: f.id, status: f.status, detail: f.detail.slice(0, FLAG_DETAIL_MAX) };
+  return { id: f.id, status: f.status, detail: cutDetail(f.detail) };
+}
+
+/** Worst first: UNSUPPORTED and DENIED, then UNVERIFIABLE, then SUPPORTED. */
+const rank = (s: CapabilityFlag['status']): number =>
+  s === 'UNSUPPORTED' || s === 'DENIED' ? 0 : s === 'UNVERIFIABLE' ? 1 : 2;
+
+const STREAMS = new Set(['SCREEN', 'WEBCAM', 'AUDIO', 'ROOM_SCAN']);
+const count = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
+
+/**
+ * Copies only the known numeric fields of the app's recorder health ("counts only"): the stream
+ * name is limited to the known streams, everything else is dropped.
+ */
+export function sanitizeRecorder(r: unknown): HeartbeatRecorderHealth | undefined {
+  if (typeof r !== 'object' || r === null) return undefined;
+  const src = r as Record<string, unknown>;
+  const streams: HeartbeatStreamHealth[] = [];
+  if (Array.isArray(src['streams'])) {
+    for (const raw of src['streams'].slice(0, 8) as unknown[]) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const s = raw as Record<string, unknown>;
+      const stream = s['stream'];
+      const nums = [
+        count(s['segment']),
+        count(s['lastSeq']),
+        count(s['bufferedChunks']),
+        count(s['bufferedBytes']),
+        count(s['droppedChunks']),
+        count(s['droppedBytes']),
+      ];
+      if (typeof stream !== 'string' || !STREAMS.has(stream) || nums.some((n) => n === undefined)) {
+        continue;
+      }
+      const [segment, lastSeq, bufferedChunks, bufferedBytes, droppedChunks, droppedBytes] =
+        nums as number[];
+      streams.push({
+        stream,
+        segment: segment as number,
+        lastSeq: lastSeq as number,
+        bufferedChunks: bufferedChunks as number,
+        bufferedBytes: bufferedBytes as number,
+        droppedChunks: droppedChunks as number,
+        droppedBytes: droppedBytes as number,
+      });
+    }
+  }
+  const out: HeartbeatRecorderHealth = { streams };
+  const sc = count(src['seqConflicts']);
+  const si = count(src['staleIdentityLosses']);
+  const hs = count(src['heldStreams']);
+  if (sc !== undefined) out.seqConflicts = sc;
+  if (si !== undefined) out.staleIdentityLosses = si;
+  if (hs !== undefined) out.heldStreams = hs;
+  return out;
 }
 
 /**
@@ -86,6 +147,11 @@ export class FlagReporter {
     return [...this.flags.values()];
   }
 
+  /** The server asked for the full set again (ADR 0013 `resyncCapabilities`). */
+  forceFull(): void {
+    this.lastFullAt = -Infinity;
+  }
+
   /**
    * The flags for the next beat (at most 32; not-SUPPORTED first) and a `commit()` to call when
    * the beat was acknowledged.
@@ -96,14 +162,20 @@ export class FlagReporter {
       if (this.fullPending.size === 0) this.lastFullAt = nowMs;
     }
     const ids = new Set([...this.dirty, ...this.fullPending]);
-    const candidates = [...ids]
-      .map((id) => this.flags.get(id))
-      .filter((f): f is CapabilityFlag => f !== undefined)
-      .sort((a, b) => Number(a.status === 'SUPPORTED') - Number(b.status === 'SUPPORTED'));
+    // Invalid ids are filtered BEFORE the cap so they cannot crowd out valid flags.
     const sent: CapabilityFlag[] = [];
     const sentRaw: CapabilityFlag[] = [];
+    const candidates = [...ids]
+      .map((id) => this.flags.get(id))
+      .filter((f): f is CapabilityFlag => {
+        if (f === undefined) return false;
+        if (FLAG_ID_RE.test(f.id)) return true;
+        sentRaw.push(f); // cleared on commit, never sent
+        return false;
+      })
+      .sort((a, b) => rank(a.status) - rank(b.status));
     for (const f of candidates) {
-      if (sentRaw.length >= MAX_HEARTBEAT_FLAGS) break;
+      if (sent.length >= MAX_HEARTBEAT_FLAGS) break;
       const c = conforming(f);
       if (c) sent.push(c);
       sentRaw.push(f);
