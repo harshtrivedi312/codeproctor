@@ -2,6 +2,7 @@ import type { ClientProctorEvent, ProctorDetector } from '@codeproctor/shared';
 import {
   IdbStore,
   ProctorSession,
+  type KeystrokeRecorder,
   RecordingPipeline,
   STORES,
   createDefaultMonitors,
@@ -248,6 +249,15 @@ export class ProctorController {
   private set(patch: Partial<ProctorUiState>): void {
     this.state = { ...this.state, ...patch };
     for (const l of this.listeners) l(this.state);
+  }
+
+  /**
+   * The SDK's keystroke recorder for the answer editor (FR-608, TC-062): null until the proctor
+   * session has started, and null when the transport cannot send keystroke batches. It is closed by
+   * the session on stop() and finish(), so nothing is recorded after the test ends (FR-702).
+   */
+  keystrokes(): KeystrokeRecorder | null {
+    return this.session.keystrokes;
   }
 
   /** Clears the "blocked action" notice once the UI has shown it. */

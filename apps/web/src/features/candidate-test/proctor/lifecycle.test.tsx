@@ -89,6 +89,13 @@ async function prefill(store: MemoryStore): Promise<void> {
     { data: new ArrayBuffer(8) },
   );
   await store.put(STORES.meta, `${SID}:segment:SCREEN`, 0);
+  // A signed keystroke batch (FR-608) lives in the same store under the `ks:` infix: the editor text
+  // in it must go with the rest of the candidate's data.
+  await store.put(STORES.eventBatches, `${SID}:ks:${padSeq(3)}`, {
+    seq: 3,
+    body: '{"seq":3,"events":[]}',
+    signature: 'b'.repeat(64),
+  });
   localStorage.setItem(
     `codeproctor:eventseq:${SID}`,
     JSON.stringify({ seq: 8, seenAt: Date.now() }),
@@ -108,6 +115,60 @@ const paste = (): void => {
 const flush = (): void => {
   window.dispatchEvent(new Event('pagehide'));
 };
+
+describe('keystroke recording through the proctor session (FR-608, TC-062, FR-802)', () => {
+  it('TC-062 FR-608: the recorder exists once the session started, and a recorded change reaches /keystrokes as a signed batch', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const store = new MemoryStore();
+    const c = controllerFor(store);
+    expect(c.keystrokes()).toBeNull(); // before the session started
+    await c.init();
+    const recorder = c.keystrokes();
+    expect(recorder).not.toBeNull();
+    expect(recorder?.reset(SID, 'python', 'x = 1\n')).toBe(true);
+    recorder?.recordChange({ offset: 5, deleteLength: 0, text: '2' });
+    flush(); // pagehide asks the SDK to send what it has now
+    // The mock verifies the HMAC of the exact bytes: a batch it stored was signed correctly.
+    await waitFor(() => expect(testState(session).keystrokeBatches.length).toBeGreaterThan(0));
+    const sent = testState(session).keystrokeBatches.flatMap((b) => b.events.map((e) => e.kind));
+    expect(sent).toEqual(['RESET', 'EDIT']);
+    await c.stop();
+  });
+
+  it('FR-702 FR-608: after the session is stopped the recorder records nothing', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const store = new MemoryStore();
+    const c = controllerFor(store);
+    await c.init();
+    const recorder = c.keystrokes();
+    await c.stop();
+    recorder?.reset(SID, 'python', 'late\n');
+    recorder?.recordChange({ offset: 0, deleteLength: 0, text: 'late' });
+    flush();
+    await wait(150);
+    expect(testState(session).keystrokeBatches).toHaveLength(0);
+  });
+
+  it('NFR-05: the editor text never appears in the console while recording and sending', async () => {
+    setupDevices();
+    await startedSession();
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation(() => undefined),
+    );
+    const c = controllerFor(new MemoryStore());
+    await c.init();
+    c.keystrokes()?.reset(SID, 'python', 'distinctive-secret-answer\n');
+    c.keystrokes()?.recordChange({ offset: 0, deleteLength: 0, text: 'more-secret-text' });
+    flush();
+    await wait(200);
+    const logged = spies.flatMap((s) => s.mock.calls).map((args) => JSON.stringify(args));
+    expect(logged.some((l) => l.includes('secret'))).toBe(false);
+    await c.stop();
+    for (const s of spies) s.mockRestore();
+  });
+});
 
 describe('purge and keep on the way out (ADR 0013 section 2, Purge; TC-063)', () => {
   it('ADR 0013 5.3: 409 SESSION_NOT_ACTIVE purges batches, chunks, counters and the backup, and releases the devices', async () => {
@@ -183,7 +244,8 @@ describe('purge and keep on the way out (ADR 0013 section 2, Purge; TC-063)', ()
     await c.init();
     expect(c.getState().endedBecause).toBe('reauth');
     await wait(100);
-    expect(store.count(STORES.eventBatches)).toBe(1);
+    // The kept outbox: the signed event batch and the keystroke batch (both in this store).
+    expect(store.count(STORES.eventBatches)).toBe(2);
     await c.stop();
   });
 

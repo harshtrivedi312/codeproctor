@@ -60,6 +60,7 @@ async function problemCode(response: Response): Promise<string | null> {
 
 export function createProctorTransport(hooks: TransportHooks): EventTransport & {
   heartbeat(): Promise<boolean>;
+  sendKeystrokeBatch(batch: SignedBatch): Promise<SendResult>;
 } {
   let unauthorized = 0;
   const handle401 = (code: string | null): void => {
@@ -68,53 +69,61 @@ export function createProctorTransport(hooks: TransportHooks): EventTransport & 
     else if (unauthorized >= 3) hooks.onReauthRequired('TOKEN_EXPIRED');
   };
 
-  return {
-    async sendBatch(batch: SignedBatch): Promise<SendResult> {
-      if (hooks.isPurged?.()) return 'REJECTED';
-      const token = getSessionToken();
-      if (token === null) return 'RETRY';
-      let response: Response;
-      try {
-        await mockingReady;
-        response = await fetch(`${apiBaseUrl}/v1/candidate/session/events`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            'X-Signature': batch.signature,
-          },
-          body: batch.body,
-          credentials: 'omit',
-          cache: 'no-store',
-          referrerPolicy: 'no-referrer',
-          keepalive: batch.body.length < 60_000,
-        });
-      } catch {
-        return 'RETRY';
-      }
-      if (response.ok) {
-        unauthorized = 0;
-        return 'OK';
-      }
-      const code = await problemCode(response);
-      if (response.status === 401) {
-        handle401(code);
-        return code === 'SESSION_TAKEN_OVER' ? 'REJECTED' : 'RETRY';
-      }
-      if (response.status === 409 && code === 'SESSION_NOT_ACTIVE') {
-        hooks.onNotActive();
-        return 'REJECTED';
-      }
-      // KEY_EPOCH_STALE: the batch was signed under an older key. The SDK cannot re-sign (no setKey
-      // hook) and a new code can never fix it, so it must NOT ask for another code (that would
-      // loop, raising the epoch each time). Drop it: the SDK counts it as rejected and the server's
-      // sequence-gap detection shows the hole (ADR 0013 5.8).
-      if (response.status === 409 && code === 'KEY_EPOCH_STALE') return 'REJECTED';
-      if (response.status === 408 || response.status === 429 || response.status >= 500)
-        return 'RETRY';
-      // 400, 403, SEQ_CONFLICT, 413, 415: dropped by the SDK and counted, never silently.
+  /**
+   * POST of one signed batch: events (/session/events) and keystrokes (/session/keystrokes) share
+   * the same scheme (exact signed body, X-Signature, idempotent per seq; ADR 0013 5.2, BE-10).
+   */
+  async function postSigned(path: string, batch: SignedBatch): Promise<SendResult> {
+    if (hooks.isPurged?.()) return 'REJECTED';
+    const token = getSessionToken();
+    if (token === null) return 'RETRY';
+    let response: Response;
+    try {
+      await mockingReady;
+      response = await fetch(`${apiBaseUrl}/v1/candidate/session${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          'X-Signature': batch.signature,
+        },
+        body: batch.body,
+        credentials: 'omit',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer',
+        keepalive: batch.body.length < 60_000,
+      });
+    } catch {
+      return 'RETRY';
+    }
+    if (response.ok) {
+      unauthorized = 0;
+      return 'OK';
+    }
+    const code = await problemCode(response);
+    if (response.status === 401) {
+      handle401(code);
+      return code === 'SESSION_TAKEN_OVER' ? 'REJECTED' : 'RETRY';
+    }
+    if (response.status === 409 && code === 'SESSION_NOT_ACTIVE') {
+      hooks.onNotActive();
       return 'REJECTED';
-    },
+    }
+    // KEY_EPOCH_STALE: the batch was signed under an older key. The SDK cannot re-sign (no setKey
+    // hook) and a new code can never fix it, so it must NOT ask for another code (that would
+    // loop, raising the epoch each time). Drop it: the SDK counts it as rejected and the server's
+    // sequence-gap detection shows the hole (ADR 0013 5.8).
+    if (response.status === 409 && code === 'KEY_EPOCH_STALE') return 'REJECTED';
+    if (response.status === 408 || response.status === 429 || response.status >= 500)
+      return 'RETRY';
+    // 400, 403, SEQ_CONFLICT, 413, 415: dropped by the SDK and counted, never silently.
+    return 'REJECTED';
+  }
+
+  return {
+    sendBatch: (batch: SignedBatch): Promise<SendResult> => postSigned('/events', batch),
+    sendKeystrokeBatch: (batch: SignedBatch): Promise<SendResult> =>
+      postSigned('/keystrokes', batch),
 
     async heartbeat(): Promise<boolean> {
       // Purging: the session is over for this browser, so no more beats (and none reach the server).
