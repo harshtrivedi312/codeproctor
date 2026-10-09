@@ -777,6 +777,7 @@ function TestScreenInner({
               >
                 <CodeEditor
                   questionId={question.id}
+                  getKeystrokes={proctor?.keystrokes}
                   language={language}
                   value={value}
                   readOnly={readOnly}

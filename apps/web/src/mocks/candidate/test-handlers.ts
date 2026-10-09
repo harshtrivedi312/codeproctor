@@ -31,6 +31,8 @@ export interface TestRunState {
   keyIssued: boolean;
   /** Signed event batches accepted, in order. */
   batches: { seq: number; signature: string; events: { type: string }[] }[];
+  /** Signed keystroke batches accepted (POST /session/keystrokes; the editor text stays in memory). */
+  keystrokeBatches: { seq: number; signature: string; events: { kind: string }[] }[];
   heartbeats: number;
   /** How long the close job takes to open the next section (0 = at once). */
   closeDelayMs: number;
@@ -56,6 +58,7 @@ export function testState(session: object): TestRunState {
       runCalls: 0,
       keyIssued: false,
       batches: [],
+      keystrokeBatches: [],
       heartbeats: 0,
       closeDelayMs: 0,
       pendingClose: null,
@@ -204,7 +207,11 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
           alg: 'HMAC-SHA256',
           key: MOCK_HMAC_KEY_B64,
           keyEpoch: 1,
-          counters: { eventSeqStart: 0, keystrokeSeqStart: 0 },
+          counters: {
+            eventSeqStart: 0,
+            // Where the keystroke stream continues: after every batch the server already holds.
+            keystrokeSeqStart: r.s.keystrokeBatches.reduce((m, b) => Math.max(m, b.seq + 1), 0),
+          },
         },
         { headers: { 'Cache-Control': 'no-store' } },
       );
@@ -225,6 +232,28 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
         return HttpResponse.json({ seq: body.seq, duplicate: true });
       }
       s.batches.push({ seq: body.seq, signature, events: body.events });
+      return HttpResponse.json({ seq: body.seq, duplicate: false });
+    }),
+
+    // POST /candidate/session/keystrokes (BE-10; FR-608): same scheme as events, own sequence.
+    http.post(`${cand}/session/keystrokes`, async ({ request }) => {
+      const session = bearer(request);
+      if (!session) return problem(401, 'UNAUTHENTICATED');
+      const s = testState(session);
+      if (!ingestOpen(s)) return problem(409, 'SESSION_NOT_ACTIVE');
+      const signature = request.headers.get('X-Signature') ?? '';
+      if (!/^[0-9a-f]{64}$/.test(signature)) return problem(400, 'VALIDATION_FAILED');
+      const raw = await request.text();
+      if ((await hmacHex(raw)) !== signature) return problem(403, 'SIGNATURE_INVALID');
+      const body = JSON.parse(raw) as { seq: number; events: { kind: string }[] };
+      const seen = s.keystrokeBatches.find((b) => b.seq === body.seq);
+      // The same seq with the same signature is a retry; with another signature it is a conflict
+      // (ADR 0013 5.2): a client that restarts its sequence at 0 learns it here.
+      if (seen && seen.signature === signature) {
+        return HttpResponse.json({ seq: body.seq, duplicate: true });
+      }
+      if (seen) return problem(409, 'SEQ_CONFLICT');
+      s.keystrokeBatches.push({ seq: body.seq, signature, events: body.events });
       return HttpResponse.json({ seq: body.seq, duplicate: false });
     }),
 
