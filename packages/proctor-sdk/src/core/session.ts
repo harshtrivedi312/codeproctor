@@ -16,6 +16,7 @@ import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
 import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
 import {
   FLAG_DETAIL_MAX,
+  FLAG_RESEND_MS,
   FlagReporter,
   cutDetail,
   sanitizeRecorder,
@@ -223,6 +224,11 @@ export class ProctorSession {
   /** Bumped by start() and at the end of shutdown(): an async call from an earlier run must not touch this one. */
   private startGen = 0;
   private bodyRejectedFlagged = false;
+  /** Until this time beats carry no body (the server refused one). */
+  private bodylessUntil = 0;
+  private lastTokenExpiry = 0;
+  /** Bumped when the app re-authenticated (resume, setKey): a renewal sent before that is stale. */
+  private tokenGen = 0;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
   private config: ProctorSessionConfig | null = null;
@@ -445,14 +451,38 @@ export class ProctorSession {
     };
 
     // Heartbeat and page listeners first: a slow or hanging detector must not delay them (FR-609).
-    this.heartbeat = new Heartbeat(
+    let me: Heartbeat | null = null; // this run's Heartbeat, for the late-answer check below
+    const runId = this.startGen;
+    this.heartbeat = me = new Heartbeat(
       async () => {
         // A live session keeps its retention mark fresh (and so its stored key) through a long
         // outage: another tab's stale sweep must never remove it.
         void this.touch?.touch();
-        const { body, commit } = this.beatBody();
+        // After the server refused a body, beats go out without it until the next 5-minute window.
+        const bodyless = Date.now() < this.bodylessUntil;
+        const { body, commit } = bodyless
+          ? { body: undefined, commit: () => undefined }
+          : this.beatBody();
+        const tokenGen = this.tokenGen;
         const r = await config.transport.heartbeat(body);
+        // An answer that arrives after stop(), the end of the session or a restart belongs to a run
+        // that is over: nothing is committed or delivered (a late token could overwrite a fresh one).
+        if (
+          runId !== this.startGen ||
+          this.heartbeat !== me ||
+          this.stopping ||
+          this.endedFired ||
+          !this.config
+        ) {
+          return r;
+        }
         if (r === true || (typeof r === 'object' && 'ok' in r)) commit(); // acknowledged
+        // Delivered from here, not from the Heartbeat hooks: the transport may need two requests
+        // (body refused, then a body-less retry) and answer after the Heartbeat stopped waiting. A
+        // late renewed token of a LIVE run must still reach the app.
+        if (typeof r === 'object' && 'ok' in r) {
+          this.deliverBeat(r, config, body !== undefined && Object.keys(body).length > 0, tokenGen);
+        }
         return r;
       },
       config.heartbeatIntervalMs ?? 10_000,
@@ -460,20 +490,6 @@ export class ProctorSession {
       (reason) => this.handleEnded(reason, 'heartbeat'),
       {
         ...(config.authLostAfter === undefined ? {} : { authLostAfter: config.authLostAfter }),
-        onResync: () => this.flags?.forceFull(),
-        onOk: (r) => {
-          if (r.bodyRejected && !this.bodyRejectedFlagged) {
-            // The server refused the health body (400 or 413): counts only, raised once.
-            this.bodyRejectedFlagged = true;
-            this.fire('capability', {
-              id: 'heartbeat-body-rejected',
-              status: 'UNVERIFIABLE',
-              detail: 'The server refused the heartbeat health body; beats go out without it.',
-            });
-          }
-          if (r.renewal) config.onToken?.(r.renewal);
-          if (r.state) config.onHeartbeat?.(r.state);
-        },
         onAuthLost: (code) => {
           if (this.reauthSignalled) return; // once per episode, not once per route
           this.reauthSignalled = true;
@@ -638,14 +654,15 @@ export class ProctorSession {
     const ks = this.keyStore;
     if (!sid || !ks || this.keyPurged) return;
     const gen = this.purgeGen;
+    const run = this.startGen; // a stop() and start() of this session makes this call stale
     try {
       await ks.put(sid, { key, epoch });
       // The session was purged while the put ran (also across a stop() and a new start()): take
       // the row out again.
       if (this.keyPurged || gen !== this.purgeGen) await ks.delete(sid).catch(() => undefined);
-      else this.setIdb('key', null); // stored: a failure reported earlier is over
+      else if (run === this.startGen) this.setIdb('key', null); // stored: a failure reported earlier is over
     } catch {
-      this.fireIdbUnsupported();
+      if (run === this.startGen) this.fireIdbUnsupported();
     }
   }
 
@@ -718,6 +735,48 @@ export class ProctorSession {
       hb.lastOkAt !== null &&
       Date.now() - hb.lastOkAt < (this.config?.heartbeatIntervalMs ?? 10_000) * 1.5;
     return fresh ? true : hb.beatNow();
+  }
+
+  /** What an acknowledged beat brings: renewed token, server state, body refusal, resync request. */
+  private deliverBeat(
+    r: Extract<HeartbeatResult, { ok: true }>,
+    config: ProctorSessionConfig,
+    carriedBody: boolean,
+    tokenGen: number,
+  ): void {
+    if (r.bodyRejected) {
+      this.bodylessUntil = Date.now() + FLAG_RESEND_MS;
+      if (!this.bodyRejectedFlagged) {
+        // The server refused the health body (400 or 413): counts only, raised once.
+        this.bodyRejectedFlagged = true;
+        this.fire('capability', {
+          id: 'heartbeat-body-rejected',
+          status: 'UNVERIFIABLE',
+          detail: 'The server refused the heartbeat health body; beats go without it for a while.',
+        });
+      }
+    } else if (carriedBody && this.bodyRejectedFlagged) {
+      // A beat that carried a body was acknowledged: the earlier refusal is over.
+      this.bodyRejectedFlagged = false;
+      this.fire('capability', { id: 'heartbeat-body-rejected', status: 'SUPPORTED' });
+    }
+    if (r.resync) this.flags?.forceFull();
+    try {
+      // A renewal that expires no later than the last one delivered is stale: never replace a
+      // newer token with an older one.
+      if (r.renewal) {
+        const exp = Date.parse(r.renewal.sessionTokenExpiresAt);
+        // Fail closed: a renewal signed before the app re-authenticated, one that cannot be
+        // ordered (unparseable expiry) and one that is not newer than the last are all dropped.
+        if (tokenGen === this.tokenGen && !Number.isNaN(exp) && exp > this.lastTokenExpiry) {
+          this.lastTokenExpiry = exp;
+          config.onToken?.(r.renewal);
+        }
+      }
+      if (r.state) config.onHeartbeat?.(r.state);
+    } catch {
+      // a faulty app callback must not stop the beat
+    }
   }
 
   /** The body of the next beat: changed flags (or all, every 5 minutes), recorder and queue health. */
@@ -793,6 +852,7 @@ export class ProctorSession {
     this.currentKey = key;
     this.keyGen++;
     this.reauthSignalled = false; // a fresh key comes with a fresh token (OTP resume)
+    this.tokenGen++;
     this.heartbeat?.resume();
     if (epoch !== undefined) await this.persistKey(key, epoch);
     if (stale()) return;
@@ -817,6 +877,7 @@ export class ProctorSession {
   /** The app refreshed the candidate token after `onReauthRequired`: send again. */
   resume(): void {
     this.reauthSignalled = false;
+    this.tokenGen++; // the app has a fresh token now: renewals sent before are stale
     this.heartbeat?.resume();
     this.queue?.resume();
     this.keystrokeQueue?.resume();
@@ -884,6 +945,8 @@ export class ProctorSession {
     globalThis.removeEventListener?.('online', this.onOnline);
     this.heartbeat?.stop();
     this.heartbeat = null; // probe() after stop or finish sends nothing
+    this.bodylessUntil = 0;
+    this.lastTokenExpiry = 0;
     for (const d of this.started.reverse()) {
       try {
         await d.stop();

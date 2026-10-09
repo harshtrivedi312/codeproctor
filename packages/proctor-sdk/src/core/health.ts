@@ -150,6 +150,8 @@ export class FlagReporter {
   /** The server asked for the full set again (ADR 0013 `resyncCapabilities`). */
   forceFull(): void {
     this.lastFullAt = -Infinity;
+    // Also in the middle of a round: everything is owed again.
+    for (const id of this.flags.keys()) this.fullPending.add(id);
   }
 
   /**
