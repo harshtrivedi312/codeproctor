@@ -689,10 +689,13 @@ export class UploadQueue {
    */
   async releaseHeld(): Promise<RecordingStream[]> {
     const released: RecordingStream[] = [];
+    if (this.purged) return released; // finish() already dropped and counted everything
     for (const stream of [...this.held.keys()]) {
       let chunks = 0;
       let bytes = 0;
       for (const [key, ref] of [...this.pending.entries()]) {
+        // A purge that ran while we awaited has already counted these chunks: never twice.
+        if (this.purged || !this.pending.has(key)) continue;
         if (ref.stream !== stream || this.inFlight.has(key)) continue;
         this.pending.delete(key);
         this.presigns.delete(key);

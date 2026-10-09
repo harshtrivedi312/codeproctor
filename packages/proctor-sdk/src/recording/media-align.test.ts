@@ -157,11 +157,15 @@ class FakeRecorder implements MediaRecorderLike {
   ondataavailable: MediaRecorderLike['ondataavailable'] = null;
   onstop: MediaRecorderLike['onstop'] = null;
   onerror: MediaRecorderLike['onerror'] = null;
+  /** A real MediaRecorder.stop() emits one last dataavailable; set this to simulate it. */
+  finalChunk = 0;
   start() {
     this.state = 'recording';
   }
   stop() {
+    if (this.state === 'inactive') return;
     this.state = 'inactive';
+    if (this.finalChunk > 0) this.emit(this.finalChunk);
     this.onstop?.();
   }
   emit(size: number) {
@@ -997,9 +1001,10 @@ describe('hold at pipeline level: the recorder keeps recording, devices are rele
     await r.p.stop();
   });
 
-  it('FR-702: seedCounters ends the hold: held chunks are dropped and counted, the recorder restarts into a fresh segment, seqs continue from the seeded counters', async () => {
+  it('FR-702: seedCounters ends the hold: the recorder stops FIRST (its final chunk is dropped with the held ones), then the counters are seeded, then it restarts into a fresh segment with contiguous seqs from the seeded nextSeq', async () => {
     const r = pRig(newStore());
     await r.p.recordWebcam();
+    if (r.recs[0]) r.recs[0].finalChunk = 7; // a real recorder flushes one last chunk when stopped
     r.recs[0]?.emit(10);
     r.recs[0]?.emit(10);
     await run(3000);
@@ -1007,10 +1012,11 @@ describe('hold at pipeline level: the recorder keeps recording, devices are rele
     r.p.seedCounters({ WEBCAM: { nextSeq: 3, nextSegment: 1 } }); // from the new epoch's key answer
     await run(3000);
     expect(r.flags).toContain('recording-stale-identity');
+    // two held chunks plus the final one the stopped recorder flushed with its OLD number
     expect(r.p.health()).toMatchObject({
       heldStreams: [],
-      staleIdentityLosses: 2,
-      droppedChunks: 2,
+      staleIdentityLosses: 3,
+      droppedChunks: 3,
       chunksPending: 0,
     });
     expect(r.recs).toHaveLength(2); // restarted on the same device
@@ -1019,11 +1025,64 @@ describe('hold at pipeline level: the recorder keeps recording, devices are rele
     r.recs[1]?.emit(10);
     await run(3000);
     const ok = r.confirmedOk.slice().sort((a, b) => a.seq - b.seq);
-    expect(ok.map((c) => c.seq)).toEqual([3, 4]); // contiguous from the seeded nextSeq, nothing guessed
+    expect(ok.map((c) => c.seq)).toEqual([3, 4]); // the seeded nextSeq is not taken by the final chunk
     expect(ok.every((c) => c.segment === 1)).toBe(true);
     expect(ok[0]?.first).toBe(true);
     expect(r.gum()).toBe(1); // the device was not asked for again
     await r.p.stop();
+  });
+
+  it('FR-702: seeding counters when no stream is held drops nothing, even with chunks pending, and starts no recorder', async () => {
+    const r = pRig(newStore(), {
+      api: {
+        presign: () => Promise.reject(new MediaApiError('NETWORK', 'offline')),
+        confirm: () => Promise.resolve(),
+      },
+    });
+    await r.p.recordAudio();
+    r.recs[0]?.emit(10);
+    r.recs[0]?.emit(10);
+    await run(1500);
+    const before = r.p.health();
+    expect(before.chunksPending).toBe(2);
+    r.p.seedCounters({ AUDIO: { nextSeq: 50, nextSegment: 4 } });
+    await run(1500);
+    expect(r.p.health()).toMatchObject({
+      chunksPending: 2,
+      droppedChunks: 0,
+      staleIdentityLosses: 0,
+    });
+    expect(r.recs).toHaveLength(1);
+    await r.p.stop();
+  });
+
+  it('FR-702: seedCounters after stop() or after the session ended starts no recorder and releases nothing', async () => {
+    const r = pRig(newStore());
+    await r.p.recordWebcam();
+    r.recs[0]?.emit(10);
+    await run(3000);
+    expect(r.p.health().heldStreams).toEqual(['WEBCAM']);
+    await r.p.stop();
+    r.p.seedCounters({ WEBCAM: { nextSeq: 9, nextSegment: 2 } });
+    await run(1500);
+    expect(r.recs).toHaveLength(1);
+    expect(await r.p.recordWebcam()).toBeNull();
+  });
+
+  it('FR-702: seedCounters racing with finish() does not count a chunk twice (stale loss and purge)', async () => {
+    const r = pRig(newStore());
+    await r.p.recordWebcam();
+    r.recs[0]?.emit(10);
+    r.recs[0]?.emit(10);
+    await run(3000);
+    expect(r.p.health().heldStreams).toEqual(['WEBCAM']);
+    r.p.seedCounters({ WEBCAM: { nextSeq: 3, nextSegment: 1 } });
+    const done = r.p.finish({ drainTimeoutMs: 200 });
+    await run(5000);
+    const h = await done;
+    expect(h.droppedChunks).toBe(2); // each of the two chunks counted exactly once
+    expect(h.chunksPending).toBe(0);
+    expect(r.recs).toHaveLength(1); // nothing restarted after finish() began
   });
 
   it('FR-702: stop() releases the camera of a held stream (recorders and owned devices)', async () => {

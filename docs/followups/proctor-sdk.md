@@ -251,17 +251,23 @@ Nits
 - `withSession` returns 413 before 401; check auth first.
 
 ## Identity re-check constants (owner decision C-08; PR fe/sdk-identity-constants)
+
 Done: `IDENTITY_FRAME_WIDTH_PX = 640` and `IDENTITY_RECHECK_INTERVAL_MS = 120_000` are named constants and the defaults (`snapshotMaxWidth`, `identityIntervalMs`); tests assert width, size scaling and one re-check per 120 s. Gaps: the capture only scales down, so a webcam narrower than 640 px gives a narrower frame (the recorder asks for 640x360, so this is the normal width); a real-browser capture was not measured here; the ADR 0013 limit is 1 re-check per 60 s and the `/dev/proctor` demo uses 61 s so it shows one soon. The FACE/identity coupling (C-25) is unchanged and waits for ADRs 0013 and 0015.
+
 - There is no TC for the identity re-check (QA to add one for the 640 px / 120 s behaviour). `snapshotMaxWidth` also sizes HIGH-event evidence snapshots; if the config ever becomes per-org, add a separate `identityFrameWidthPx`.
+
 ## Should-fix round (PR fe/sdk-should-fix)
+
 Done (with tests): S2 `EventQueue.finish()` no longer calls `retryNow()` every 50 ms (at most once a second, so about one request per second in a 5xx outage), waits for an in-flight send at the deadline before counting `lostBatches`, never re-arms a retry after it returned, and `ProctorSession.finish()` raises `finish-pending` (stay online) and `finish-lost` capability signals; S3 EventQueue survives IndexedDB failures (open failure and write failure fall back to memory, the flush chain is never rejected, capability `event-storage`); S4 an `error` event after ready is one strike (three terminate), and after a frame timeout back-pressure stays until the worker answers late, declared dead if it never does within another timeout; S5 `attachStream` only retries when the monitor was down for a missing stream, not after model failures; S6 UploadQueue probes IndexedDB again every 30 s while degraded and leaves memory-only mode (`recording-storage` goes back to SUPPORTED; a write failure is UNVERIFIABLE, an open failure UNSUPPORTED); SF3 `attachStream` bounds `video.play()`; SF4 `VoiceMonitor.attachStream` calls are serialised and the speech rules (held-back speech) survive a swap; SF5 a hanging `stop()` after a start timeout is bounded to 5 s; N2 `reportStartTimeout` does not re-emit for reported tasks; N3 device-loss `stopStream` failure no longer hides the signal; N6 a stopped `VoiceMonitor` can be started again; `memoryBytes()` is a running counter; unreachable SPEECH_DETECTED case removed.
 
 Still open (not in this PR): proctor-key route, per-epoch key, models.lock.json and SHA pinning, C-25 accommodation split (held for ADR 0013 and 0015); `makeRoom` can exceed the 200 MB cap by in-flight chunks; reject non-https presigned URLs; object confidence carries the threshold on a window miss; evidence snapshot types configurable; a HIGH event waiting for its evidence upload is dropped if the session stops meanwhile; identity re-check coupling note; N4, N5, N7; `VoiceMonitor` `handle.start()` is not under the init timeout; `sweep.ts` assumes session ids contain no `:`; keystroke queue purge (no keystroke queue exists yet); the demo does not call `attachStream`/`onDeviceLost`.
 
 ## PR #70 review round (fe/sdk-should-fix)
+
 Fixed here: B1 (the event sequence counter is written on every cut even while degraded, backed up in localStorage, recovery probe like the upload queue; an unreadable counter with no backup seeds the sequence above any plausible earlier value, seconds since 2026-01-01, and raises an `event-seq` capability, so the sequence gets holes; two reuse paths remain, see S-D below), B2 (one live VAD: start and attach run through one queue, generation and token guards, stale callbacks ignored), S5 (`down` state: FAILED on every failure path, reset in `stop()`), S7 (FATAL drops the memory counter), S8 (SF5 test waits for the detector's start with real ticks and uses configurable 50 ms bounds), S9 (`vi.useRealTimers()` after each test). Not fixable before #64 merges: S6 (keep `reported`/`failures` clears at the top of `run()` and in `stop()` and reset `down` there once #64 is in main; merge order #64 then #70).
 
 Filed (not fixed)
+
 - S1 `EventQueue.finish()` initial flush is unbounded because the fetch transport has no timeout: bound with `Promise.race` against the deadline while keeping the in-flight-sign guarantee, and test the settle loop.
 - S2 the "normal backoff" comment in `finish()` is inaccurate: `retryNow()` resets `attempt` to 0 and 429 `Retry-After` is ignored.
 - S3 the in-memory event outbox has no size cap: add a cap, a `droppedBatches` counter in `stats()` and a flag.
@@ -270,13 +276,16 @@ Filed (not fixed)
 - Nits: JSDoc on `degrade()` belongs on `start()`; `upload-queue.ts` "Called once" wording; the recovery flag says SUPPORTED while memory-only chunks remain; `inference-client` `onDead` doc; `enqueue`/`flush` after `finish()` still persist; a bounded voice `destroy()` and mid-segment speech lost on a stream swap; `session.ts` a `stop()` that hangs more than 5 s leaves a late-starting detector alive.
 
 ## PR #70 review round 2 (fe/sdk-should-fix)
+
 Fixed: S-A (stale callbacks asserted to report nothing, the live set exactly one event, stop() flushes nothing extra), S-B (an abandoned voice `begin()` returns quietly from the failure handler and a throwing `destroy()` is contained; test: rejecting createVad then stop and restart emits no DETECTOR_UNAVAILABLE), S-C (seed floor 10 000 000 plus seconds since 2026-01-01, clamped below 2^31, so a device clock before 2026 is still high), S-E (backup is `{ seq, seenAt }`, other sessions' entries older than `staleAfterMs` are swept on start), S-F (the finish test waits for `sendBatch` instead of sleeping), N1 (only safe integers in [0, 2^31) are accepted as a stored counter or backup), N2 (comment says every reused seq is rejected, ADR 0013: dropped and counted rejected).
 
 Should-fix (tied to ADR 0013 counters)
+
 - S-D "never reused" overstated: two reuse paths stay unflagged until ADR 0013 counters exist. (1) Every counter write failed in the previous page load while IndexedDB reads work on reload: the sequence restarts at 0. (2) Resuming on a new device always restarts at 0 (FR-106, D-21): fixed by `proctor-key` `counters.eventSeqStart`, `max(local, server)`. Raised from nit to should-fix.
 - S-E exception to confirm with the hub: the sequence backup uses `localStorage` (`codeproctor:eventseq:<sessionId>`, a pseudonymous id and an integer, no candidate data).
 
 Nits (filed)
+
 - N3 `signHex` failure is swallowed in `cutAll` with no `droppedBatches` count.
 - N4 `VoiceMonitor`: a hung `destroy()` or `handle.start()` now also blocks a later `start()` (it shares the queue); `start()` with no stream does not destroy an existing handle or bump the token.
 - N5 the `over = {}` parameter in `should-fix.test.ts` should be `Partial<EventQueueOptions>`.
@@ -310,7 +319,9 @@ Filed
 - `keystrokes.test.ts` imports the API's `signature.ts` directly (`apps/api/src/proctor-events/signature`): a deliberate coupling to test the real verification path; replace with a shared fixture if the API file moves.
 - A 409 `KEY_EPOCH_STALE` still maps to REJECTED (the batch is dropped) in both transports; ADR 0013 says re-sign and retry. Deferred until ADR 0013 is accepted; the same applies to `SESSION_NOT_ACTIVE`.
 ## Media alignment with ADR 0013 5.5 (PR fe/sdk-media-align; FR-701, FR-702, TC-063, TC-070)
+
 Done
+
 - Seq is unique per (session, stream) across segments (hub answer, matches the built `proctor-key` counters): per-stream `MediaCounters` persisted in IndexedDB under `<sid>:media:<STREAM>` before a chunk is stored, lifted from chunks still waiting and from `pipeline.seedCounters()` (server `counters.media`, `max(local, server)`). A recorder restart or reload no longer reuses seq 0, which used to give 409 `SEQ_CONFLICT` and a dropped segment. The app's old seeding of `<sid>:segment:<STREAM>` (last segment used) is still read.
 - Presign sends the bare `video/webm` or `audio/webm` (never the recorder's codecs string), `startedAt` and `durationMs` per chunk (measured from the recorder); the PUT sends exactly the headers the presign returned; `alreadyUploaded` skips PUT and confirm; 412 on the conditional PUT goes to confirm.
 - Quota-aware: presign lazily, one chunk right before its PUT, the URL cached and reused for retries until 5 s before it expires; nothing is presigned while the connection is down (probe via `probe`, or one chunk as the probe; the browser `online` event ends the quiet period); 429 PRESIGN_QUOTA_EXCEEDED holds that stream for Retry-After and keeps the chunk.
@@ -319,26 +330,45 @@ Done
 - `/dev/proctor` mock: PRESIGN_QUOTA_EXCEEDED after 140 presigns per stream (repeats count, a confirmed chunk is free), `If-None-Match: *` with 412 on a second PUT, segments up to 9999, the demo uses the real `createFetchMediaApi` (no seq bridge).
 
 For Frontend (apps/web `candidate-test/proctor/media-api.ts`, not touched here)
+
 - The SDK types stay compatible with your bridge (`ChunkRef` new fields are optional, `PresignedPut.headers` and `expiresAtMs` optional, `alreadyUploaded` is a flag on `PresignedPut`; `MediaApiError` kinds are a superset). You can drop the `segment * 100000 + seq` bridge and the `ALREADY_UPLOADED_URL` marker and use `createFetchMediaApi` with the real `seq`; seed the pipeline with `pipeline.seedCounters(counters.media)` instead of writing `<sid>:segment:<STREAM>`.
 - Keep FU-FEB-36's guard in mind: the SDK queue now implements it itself. `alreadyUploaded` is believed only for chunks the queue got a URL for or restored from IndexedDB in `start()` (and only when their stream is not held); for any other chunk, and for a 409 `SEQ_CONFLICT`, it is an identity collision (flag `recording-seq-conflict`, health `seqConflicts` and per stream). The stream is HELD: no presign, no drop, no guessed seq. The hold is persisted (`<sid>:held:<STREAM>`, a segment number, no media) before it is flagged, so a reload re-holds instead of trusting the restored chunks. The live recorder keeps recording into the held segment (bounded by the 200 MB cap; overflow is dropped and counted). The hold ends only when you call `pipeline.seedCounters(counters.media)` with counters from the server (a new-epoch `proctor-key` answer after an OTP resume): the held chunks are dropped and COUNTED (`staleIdentityLosses`, flag `recording-stale-identity`) and the recorder restarts into a fresh segment whose seqs continue from the seeded `nextSeq`. If you keep your own `presigned` set, it is now redundant but harmless.
 
 Open
+
 - `probe` is not wired to the session heartbeat yet (heartbeat PR); until then one chunk is let through as the probe.
 - Transport hardening still has to purge or drain on `recording-ended` (the queue only stops and keeps the chunks).
 - The cap (`presignCap`) is cumulative per stream and session on the server; a very long session or many restarts can exhaust it. The SDK only waits (Retry-After), it cannot get more.
 - A new device restarts local counters at 0 until `seedCounters` is called with the `proctor-key` answer.
 
 ### Review round 1 for PR #366 (media alignment)
+
 Fixed: B1 (alreadyUploaded trusted only for URL-given or restored chunks, else collision with a fresh seq or a counted drop; first chunk kept), B2 (first-chunk overflow above the cap bounded to 16 MiB per stream, then the segment is lost, counted and flagged `recording-segment-lost`), B3 (after SESSION_NOT_ACTIVE the pipeline stops all recorders and the queue refuses and counts new chunks, nothing is written to IndexedDB), S1 (timeout covers the response body), S2 (probe timeout 15 s), S3 (PUT status 0 is offline), S4 (`recording-quota` flag, the online event no longer clears a quota hold), S5 tests, S6 (finish docstring), S7 (unknown streams in `seedCounters` ignored, counters persisted on seed).
 
 Filed
+
 - S8 legacy 6-part chunk keys from an earlier SDK version load with `first: false` (their segment's first chunk loses the protection).
 - Nits: `schedule()` ignores an earlier target than the one already set; an IndexedDB read error in `upload()` removes the chunk from `pending` without a counted drop; the queue is single-use (document); a presign expiry should be `min(expiresAt, receivedAt + 60 s)` against client clock skew; read a `retryAfterSeconds` body field when the header is absent; a test comment says `0,1,2,3` for five chunks; `vi.unstubAllGlobals()` in afterEach of `media-align.test.ts`; a hard-coded stream list remains in the dev mock (`STREAMS`); the mock clamps segments at 9999 like the server.
 
 ### Review rounds 2 and 3 for PR #366 (collision handling, shrunk)
+
 Done: BL-2 (every `record*` returns before asking for consent or a device once the session ended or `stop()`/`finish()` began; a prompt answered later releases the device; `begin()` re-checks after its awaits), BL-3 to BL-6 by construction (a collision never stops a recorder or touches a device; `releaseAll()` releases the union of recorders and owned devices on end, `stop()` and `finish()`; a `closing` flag is set first in `stop()`/`finish()`; nothing is written to IndexedDB after `purge()`, including the hold marker; the hold is persisted, restored chunks of a held stream are never trusted). The automatic group move, the live-recorder restart on collision and the `resyncCounters` hook were removed (BL-7, BL-8 gone with them).
 Later improvement, once the hub's counters-only read is accepted by the owner (`GET .../proctor-counters`, or `nextSeq`/`nextSegment` on the 409 SEQ_CONFLICT body): move a held group into a fresh segment with contiguous seqs from the server's `nextSeq` and the header chunk lowest, instead of dropping it when the app calls `seedCounters`. Conditions from the hub: never reuse a seq that exists server-side, re-keyed presigns count against the quota, every re-key and stale-identity loss is counted and flagged. Do not build before it is accepted.
 Open
+
 - Heartbeat wiring of the per-stream counts (`seqConflictsByStream`, `staleIdentityLossesByStream`, `heldStreams`) comes with the heartbeat PR (S-4).
 - Chunks confirmed under stale numbers before the collision are not recoverable; they are not counted because the SDK cannot know them.
 - A held stream keeps buffering new chunks until the cap; with a long hold the oldest ordinary chunks are dropped and counted, first chunks are protected up to the 16 MiB overflow.
+
+### Review round 4 for PR #366 (filed)
+
+Fixed: S1 (`releaseHeld` skips chunks a purge already counted; `ended`/`closing` re-checked right before it), S3 (a recorder map entry is deleted only if it is still the one that was stopped; `stopStream` also forgets the source; a restart needs a live track and no other recorder), S5 (the held recorders stop FIRST, then the counters are seeded, then the held chunks are dropped, then the recorder restarts: a real recorder's final chunk takes its old number and is dropped with the held ones), S6 tests (seeding with no hold drops nothing, no recorder after stop/finish/ended, seed racing with finish counts once).
+Filed, not fixed
+
+- S2 an upload that was in flight on a held stream when `releaseHeld` ran can re-hold the stream afterwards (needs a per-stream "released stale" set).
+- S4 `seedCounters` before `pipeline.start()` has completed never releases a hold restored from IndexedDB: call `seedCounters` after `await pipeline.start()` (tell Frontend).
+- S7 a hold drops ALL pending chunks of the stream, including older segments that may be fine; a later group move (after the counters-only read) should drop only what it must.
+- N1 `finish()` waits the full `drainTimeoutMs` when only held chunks remain.
+- N2 a restored hold counts `seqConflicts` again on every reload; the heartbeat PR must not add the counts across loads.
+- N3 theoretical hold-marker write after a purge (the check is before the awaited put).
+- apps/web conflict: `candidate-test/proctor/lifecycle.test.tsx:386` expects a recorder to start and store a late chunk after `stop()`. The pipeline now starts nothing once `stop()` or `finish()` began (stop = page leave, no UI and no owner for a late recorder); Frontend must flip that assertion (no WEBCAM chunk key, keep the device-released and no-presign assertions).

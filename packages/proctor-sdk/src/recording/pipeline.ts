@@ -180,37 +180,53 @@ export class RecordingPipeline {
    * of local and server so a new device never reuses a seq or segment.
    */
   seedCounters(counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>): void {
+    const held = this.queue.health().heldStreams;
+    if (held.length === 0 || this.ended || this.closing) {
+      this.applySeed(counters); // nothing to release: just lift the counters
+      return;
+    }
+    void this.seedAndRelease(counters, held).catch(() => this.applySeed(counters));
+  }
+
+  private applySeed(counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>): void {
     for (const [stream, v] of Object.entries(counters)) {
       // Streams this recorder does not know (a future ROOM_SCAN) are ignored, not an error.
       if (!v || !(RECORDING_STREAMS as readonly string[]).includes(stream)) continue;
       this.counters.seed(stream as RecordingStream, v);
       void this.counters.persist(stream as RecordingStream); // best effort, also on later loads
     }
-    void this.releaseHeldStreams().catch(() => undefined);
   }
 
   /**
-   * End the holds after a collision (the app refreshed the counters from the server): stop the
-   * live recorder of each held stream (its last chunk joins the held chunks), drop the held
-   * chunks as counted stale-identity losses, and restart the recorder into a fresh segment whose
-   * seqs continue from the seeded counters. Nothing is guessed and no seq is reused.
+   * End the holds after a collision (the app refreshed the counters from the server). Order
+   * matters: the held streams' recorders are stopped FIRST (a real MediaRecorder emits a final
+   * chunk when stopped; it must take its number from the old counters and be dropped with the
+   * held ones), then the counters are seeded, then the held chunks are dropped as counted
+   * stale-identity losses, and only then do the recorders restart into a fresh segment whose seqs
+   * continue from the seeded `nextSeq`. Nothing is guessed and no seq is reused.
    */
-  private async releaseHeldStreams(): Promise<void> {
-    const held = this.queue.health().heldStreams;
-    if (held.length === 0 || this.ended || this.closing) return;
+  private async seedAndRelease(
+    counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>,
+    held: RecordingStream[],
+  ): Promise<void> {
     const restart: RecordingStream[] = [];
     for (const stream of held) {
-      if (this.recorders.has(stream)) {
-        restart.push(stream);
-        await this.recorders.get(stream)?.stop(); // the device stays open
-        this.recorders.delete(stream);
-      }
+      const rec = this.recorders.get(stream);
+      if (!rec) continue;
+      restart.push(stream);
+      await rec.stop(); // the device stays open
+      if (this.recorders.get(stream) === rec) this.recorders.delete(stream);
     }
+    this.applySeed(counters);
+    // finish()/stop()/the end of the session may have begun while we waited: release nothing then.
+    if (this.ended || this.closing) return;
     await this.queue.releaseHeld();
     if (this.ended || this.closing) return;
     for (const stream of restart) {
       const src = this.sources.get(stream);
-      if (src) await this.begin(stream, src);
+      const live = src?.getTracks().some((t) => t.readyState !== 'ended') ?? false;
+      // Restart only if nothing else registered a recorder meanwhile and the device is alive.
+      if (src && live && !this.recorders.has(stream)) await this.begin(stream, src);
     }
   }
 
@@ -349,6 +365,7 @@ export class RecordingPipeline {
   async stopStream(stream: RecordingStream): Promise<void> {
     await this.recorders.get(stream)?.stop();
     this.recorders.delete(stream);
+    this.sources.delete(stream);
     this.owned
       .get(stream)
       ?.getTracks()
