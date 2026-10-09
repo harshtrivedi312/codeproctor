@@ -40,12 +40,15 @@ test('PA-01 CI: every Postgres and Redis image the tests start is one the script
     }
   }
   // The backup drill and the provisioning tests start the same images with docker run.
-  const scripts = execFileSync('git', ['ls-files', 'infra/scripts'], { cwd: root, encoding: 'utf8' })
+  const scripts = execFileSync('git', ['ls-files', 'infra/scripts'], {
+    cwd: root,
+    encoding: 'utf8',
+  })
     .split('\n')
     .filter((f) => f.endsWith('.mjs') && !f.endsWith('ci-pull-test-images.test.mjs'));
   for (const file of scripts) {
     const text = readFileSync(`${root}${file}`, 'utf8');
-    for (const m of text.matchAll(/'((?:postgres|redis):[0-9][^']*)'/g)) used.add(m[1]);
+    for (const m of text.matchAll(/'((?:postgres|redis):[0-9][0-9.]*)'/g)) used.add(m[1]);
   }
   // A container started with a variable image would slip past this check: refuse GenericContainer.
   for (const file of trackedFiles()) {
@@ -57,7 +60,10 @@ test('PA-01 CI: every Postgres and Redis image the tests start is one the script
   }
   assert.ok(used.size > 0, 'the test suite starts at least one container');
   for (const image of used) {
-    assert.ok(pinned.has(image), `${image} is started by a test but not pinned in ci-pull-test-images.sh`);
+    assert.ok(
+      pinned.has(image),
+      `${image} is started by a test but not pinned in ci-pull-test-images.sh`,
+    );
   }
 });
 
