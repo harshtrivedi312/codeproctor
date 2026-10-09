@@ -141,6 +141,34 @@ describe('port checks (local demo)', () => {
     ]);
   });
 
+  it('parses a published port range (MinIO: 9000-9001) into every port in it', () => {
+    const text =
+      'codeproctor-demo-minio-1\t/work/infra/docker-compose.yml\t127.0.0.1:9000-9001->9000-9001/tcp\n' +
+      'mailpit\t\t127.0.0.1:1025->1025/tcp, 127.0.0.1:8025->8025/tcp\n' +
+      'odd\t\t127.0.0.1:9005-9003->9005-9003/tcp\n';
+    const [minio, mailpit, odd] = parseDockerPs(text);
+    assert.deepEqual(minio.ports, [9000, 9001]);
+    assert.deepEqual(mailpit.ports, [1025, 8025]);
+    assert.deepEqual(odd.ports, [9005], 'a backwards range is not expanded');
+    const ourCompose = '/work/infra/docker-compose.yml';
+    const own = { ...minio, project: 'codeproctor-demo' };
+    for (const port of [9000, 9001]) {
+      const spec = DEMO_PORTS.find((p) => p.port === port);
+      assert.equal(
+        judgePort({
+          spec,
+          free: false,
+          containers: [own],
+          ourCompose,
+          ourAppUp: false,
+          project: 'codeproctor-demo',
+        }).ok,
+        true,
+        String(port),
+      );
+    }
+  });
+
   it('DL-57: a stopped container of another checkout in the shared project is a clash even when its ports are free', () => {
     const containers = [
       {
