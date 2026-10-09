@@ -17,6 +17,9 @@ import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/rec
 import { Heartbeat } from './heartbeat';
 import { importSessionKey } from './hmac';
 import { IdbStore, STORES } from './idb';
+import { IdbKeyStore, type KeyStore } from './key-store';
+import type { ProctorCounters } from './proctor-key';
+import { SessionTouch } from './sweep';
 import { MetricsCollector, type Metrics } from './metrics';
 import {
   ConsentRequiredError,
@@ -33,17 +36,34 @@ import {
  * kept, never dropped. Returns the key as base64, or null when none can be had.
  */
 export interface KeyProvider {
-  getKey(): Promise<string | null>;
+  /**
+   * The new key as base64, as a CryptoKey, or as a `ProctorKeyProvider` result (key, epoch,
+   * counters); null when none can be had.
+   */
+  getKey(): Promise<
+    | string
+    | CryptoKey
+    | { key: CryptoKey; epoch?: number; counters?: ProctorCounters | null }
+    | null
+  >;
 }
 
 export interface ProctorSessionConfig {
   sessionId: string;
   /**
-   * Per-session HMAC key issued by the API at IN_PROGRESS, base64. Held in memory only.
+   * Per-session HMAC key (base64) when the app has the raw value. Prefer `signingKey` (the
+   * non-extractable result of `ProctorKeyProvider`). One of the two is required.
+   * Held in memory only.
    * TODO(ARC-03): ADR 0010 leaves open how events sent before this key exists (system-check
    * events such as MULTI_MONITOR) are signed. Not invented here: the SDK cannot start without a key.
    */
-  hmacKeyBase64: string;
+  hmacKeyBase64?: string;
+  /**
+   * Key, epoch and counters from `ProctorKeyProvider` (ADR 0013 section 2). The counters seed the
+   * event and keystroke sequences at max(local, server) BEFORE anything is cut; seed the media
+   * pipeline with `counters.media` via `pipeline.seedCounters()`.
+   */
+  signingKey?: { key: CryptoKey; epoch?: number; counters?: ProctorCounters | null };
   /** Scope of clipboard, drop and context-menu blocking. */
   root: HTMLElement;
   /** Nothing touches camera, microphone or screen until this is set (D-17). */
@@ -125,6 +145,8 @@ export class ProctorSession {
   private currentKey: CryptoKey | null = null;
   /** Bumped by setKey(): a provider answer that started earlier must not overwrite it. */
   private keyGen = 0;
+  private keyStore: KeyStore | null = null;
+  private touch: SessionTouch | null = null;
   private reauthSignalled = false;
   private takenOverSignalled = false;
   private keyRefresh: Promise<CryptoKey | null> | null = null;
@@ -186,8 +208,12 @@ export class ProctorSession {
     if (this.config) throw new Error('ProctorSession already started.');
     this.config = config;
     const metrics = (this.metrics = new MetricsCollector());
-    const key = await importSessionKey(config.hmacKeyBase64);
+    const key =
+      config.signingKey?.key ??
+      (config.hmacKeyBase64 ? await importSessionKey(config.hmacKeyBase64) : null);
+    if (!key) throw new Error('ProctorSession needs a signing key (signingKey or hmacKeyBase64).');
     this.currentKey = key;
+    const counters = config.signingKey?.counters ?? null;
     // Hooks both queues share: key rotation, end of session, lost authentication.
     const shared = () => ({
       ...(config.keyProvider ? { onKeyStale: (stale: CryptoKey) => this.refreshKey(stale) } : {}),
@@ -229,12 +255,18 @@ export class ProctorSession {
       },
     });
     const store = (this.store = config.store ?? new IdbStore()); // shared by the event and keystroke queues
+    this.keyStore = new IdbKeyStore(store);
+    this.touch = new SessionTouch(store, config.sessionId);
+    if (config.signingKey?.epoch !== undefined) {
+      await this.persistKey(key, config.signingKey.epoch);
+    }
     const queue = (this.queue = new EventQueue({
       sessionId: config.sessionId,
       key,
       transport: config.transport,
       store,
       ...shared(),
+      ...(counters?.eventSeqStart === undefined ? {} : { initialSeq: counters.eventSeqStart }),
       onRejected: () => {
         this.eventRejected++;
         this.fire('capability', {
@@ -273,6 +305,9 @@ export class ProctorSession {
         transport: { sendBatch: send },
         store,
         ...shared(),
+        ...(counters?.keystrokeSeqStart === undefined
+          ? {}
+          : { initialSeq: counters.keystrokeSeqStart }),
         ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
         onSeqUntrusted: () =>
           this.fire('capability', {
@@ -342,7 +377,12 @@ export class ProctorSession {
 
     // Heartbeat and page listeners first: a slow or hanging detector must not delay them (FR-609).
     this.heartbeat = new Heartbeat(
-      () => config.transport.heartbeat(),
+      () => {
+        // A live session keeps its retention mark fresh (and so its stored key) through a long
+        // outage: another tab's stale sweep must never remove it.
+        void this.touch?.touch();
+        return config.transport.heartbeat();
+      },
       config.heartbeatIntervalMs ?? 10_000,
       (online) => this.fire('connection', { online }),
       (reason) => this.handleEnded(reason, 'heartbeat'),
@@ -455,18 +495,20 @@ export class ProctorSession {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         // `.then` so a synchronous throw of getKey() becomes a rejection after the promise is stored.
-        const b64 = await Promise.race([
+        const got = await Promise.race([
           Promise.resolve().then(() => provider.getKey()),
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new ProviderTimeoutError()), ms);
           }),
         ]);
         if (gen !== this.keyGen) return this.currentKey; // setKey() won the race
-        if (!b64) return null;
-        const key = await importSessionKey(b64);
+        if (!got) return null;
+        const adopted = await this.adoptKey(got);
         if (gen !== this.keyGen) return this.currentKey;
-        this.currentKey = key;
-        return key;
+        this.currentKey = adopted.key;
+        if (adopted.epoch !== undefined) await this.persistKey(adopted.key, adopted.epoch);
+        await this.seedCounters(adopted.counters);
+        return adopted.key;
       } finally {
         clearTimeout(timer);
         if (this.keyRefresh === run) this.keyRefresh = null; // never clear a newer session's refresh
@@ -476,18 +518,71 @@ export class ProctorSession {
     return this.keyRefresh;
   }
 
+  /** String (base64), CryptoKey, or a `ProctorKeyProvider` result, as a non-extractable key. */
+  private async adoptKey(
+    got: string | CryptoKey | { key: CryptoKey; epoch?: number; counters?: ProctorCounters | null },
+  ): Promise<{ key: CryptoKey; epoch?: number; counters?: ProctorCounters | null }> {
+    if (typeof got === 'string') return { key: await importSessionKey(got) };
+    // A bare CryptoKey has `algorithm`; a provider result is a plain object with `key`.
+    if ('key' in got && !('algorithm' in got)) return got;
+    return { key: got as CryptoKey };
+  }
+
+  /** Stores the key with its epoch (ADR 0013 section 2); a failure only costs the reload. */
+  private async persistKey(key: CryptoKey, epoch: number): Promise<void> {
+    const sid = this.config?.sessionId;
+    if (!sid || !this.keyStore) return;
+    try {
+      await this.keyStore.put(sid, { key, epoch });
+    } catch {
+      this.fire('capability', {
+        id: 'key-storage',
+        status: 'UNVERIFIABLE',
+        detail: 'The signing key could not be stored: a page reload will need a new sign-in.',
+      });
+    }
+  }
+
+  /** Server counters from `proctor-key`: each sequence continues at max(local, server). */
+  private async seedCounters(c: ProctorCounters | null | undefined): Promise<void> {
+    if (!c) return;
+    await Promise.all([
+      c.eventSeqStart === undefined ? undefined : this.queue?.seedSeq(c.eventSeqStart),
+      c.keystrokeSeqStart === undefined
+        ? undefined
+        : this.keystrokeQueue?.seedSeq(c.keystrokeSeqStart),
+    ]);
+  }
+
   /**
-   * ADR 0013 section 2 `setKey`: the app hands over a new signing key (base64). Both queues sign
-   * their unsent batches again from the stored bodies and resume. (Epoch storage and counter
-   * seeding come with the proctor-key change.)
+   * ADR 0013 section 2 `setKey`: the app hands over a new signing key (base64 or the CryptoKey of
+   * `ProctorKeyProvider`) with its epoch and the server counters. The key is stored non-extractable
+   * with the epoch, both queues sign their unsent batches again from the stored bodies (same
+   * bodies, same seqs), the 401 hold is lifted and sending resumes. Counters raise the event and
+   * keystroke sequences to max(local, server); seed the media pipeline with `counters.media`.
    */
-  async setKey(hmacKeyBase64: string): Promise<void> {
+  async setKey(
+    hmacKey: string | CryptoKey,
+    epoch?: number,
+    counters?: ProctorCounters | null,
+  ): Promise<void> {
     if (!this.config) return;
-    const key = await importSessionKey(hmacKeyBase64);
+    const key = typeof hmacKey === 'string' ? await importSessionKey(hmacKey) : hmacKey;
     this.currentKey = key;
     this.keyGen++;
     this.reauthSignalled = false; // a fresh key comes with a fresh token (OTP resume)
+    if (epoch !== undefined) await this.persistKey(key, epoch);
+    await this.seedCounters(counters); // before anything is cut with the new key
     await Promise.all([this.queue?.setKey(key), this.keystrokeQueue?.setKey(key)]);
+  }
+
+  /** Epoch of the key stored for this session, or null (ADR 0013 `loadStoredKey`). Never returns the key. */
+  static async loadStoredKey(
+    sessionId: string,
+    store: IdbStore = new IdbStore(),
+  ): Promise<{ epoch: number } | null> {
+    const stored = await new IdbKeyStore(store).get(sessionId);
+    return stored ? { epoch: stored.epoch } : null;
   }
 
   /** The app refreshed the candidate token after `onReauthRequired`: send again. */
@@ -515,6 +610,8 @@ export class ProctorSession {
       void this.queue?.end(reason);
       void this.keystrokeQueue?.end(reason);
       this.ending = false;
+      // The session is over (or taken over): the key must not outlive the data.
+      void this.keyStore?.delete(this.config.sessionId);
       const lost =
         (this.queue?.stats().lostBatches ?? 0) + (this.keystrokeQueue?.stats().lostBatches ?? 0);
       if (lost > 0) {
@@ -589,6 +686,7 @@ export class ProctorSession {
       // Editor code text left by an earlier page load must go too, even if this load created no
       // keystroke queue (for example the transport cannot send keystroke batches).
       if (sessionId && this.store) {
+        await this.keyStore?.delete(sessionId); // the key goes with the data it signed
         try {
           await this.store.deletePrefix(STORES.eventBatches, `${sessionId}:ks:`);
         } catch {
@@ -618,6 +716,8 @@ export class ProctorSession {
     this.keystrokeQueue = null;
     this.keystrokeRecorder = null;
     this.store = null;
+    this.keyStore = null;
+    this.touch = null;
     this.config = null;
     return { lostBatches };
   }

@@ -129,6 +129,12 @@ export interface BatchQueueOptions {
   onStorageRecovered?: () => void;
   /** Called when the sequence counter could not be read and the queue seeded it high (holes, no collisions). */
   onSeqUntrusted?: () => void;
+  /**
+   * Where the server says this stream continues (`proctor-key` counters, ADR 0013 section 2). The
+   * queue starts at max(local, this). With it the time-seeded high fallback is not needed; the
+   * localStorage backup stays a pure fallback.
+   */
+  initialSeq?: number;
   /** While degraded, try IndexedDB again at most this often (default 30 s). */
   storageProbeMs?: number;
 }
@@ -351,7 +357,13 @@ export class BatchQueue<TItem> {
     const backup = this.readBackup();
     this.sweepBackups();
     this.nextSeq = Math.max(maxSaved, stored ?? 0, backup);
-    if (readFailed && backup === 0 && stored === null) {
+    const server = this.opts.initialSeq;
+    if (server !== undefined && validSeq(server) && server > this.nextSeq) {
+      this.nextSeq = server;
+      await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
+      this.writeBackup();
+    }
+    if (readFailed && backup === 0 && stored === null && server === undefined) {
       // The counter is unknowable: seed above anything plausible and say so.
       this.nextSeq = Math.max(this.nextSeq, this.seqSeed());
       this.opts.onSeqUntrusted?.();
@@ -368,6 +380,17 @@ export class BatchQueue<TItem> {
     }
     this.started = true;
     if (this.outbox.length > 0) void this.drain();
+  }
+
+  /**
+   * Continue at max(local, server) when the counters arrive after start (setKey). Never lowers the
+   * counter, never reuses a seq; a jump leaves a hole, not a collision.
+   */
+  async seedSeq(serverStart: number): Promise<void> {
+    if (!validSeq(serverStart) || serverStart <= this.nextSeq || this.closed) return;
+    this.nextSeq = serverStart;
+    await this.opts.store.put(STORES.meta, this.metaKey(), this.nextSeq).catch(() => undefined);
+    this.writeBackup();
   }
 
   enqueue(item: unknown): boolean {
