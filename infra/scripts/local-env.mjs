@@ -40,6 +40,7 @@ export function buildLocalEnv(example, supports = { smtpDev: false, execStub: fa
     COOKIE_SECRET: b64(48),
     JWT_CANDIDATE_SECRET: b64(48),
     OTP_PEPPER: b64(48),
+    QUESTION_OPTION_ID_SECRET: b64(48),
     ENCRYPTION_KEY: b64(32),
     SESSION_KEY_ENC_KEY_k1: b64(32),
     MINIO_ROOT_PASSWORD: minioPassword,
