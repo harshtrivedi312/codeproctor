@@ -4,7 +4,7 @@ import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
-import { setSessionToken } from '@/features/candidate-flow/session-store';
+import { getSessionToken, setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
@@ -112,10 +112,25 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(order.indexOf('PUT /v1/candidate/answers/:id/draft')).toBeLessThan(
       order.indexOf('POST /v1/candidate/answers/:id/run'),
     );
-    expect(seen.find((r) => r.method === 'PUT')?.body).toMatchObject({
-      kind: 'code',
-      language: 'python',
-    });
+    // The API's DraftDto: { code, language } and nothing else (a `kind` field is a 400).
+    const draftBody = seen.find((r) => r.method === 'PUT')?.body as Record<string, unknown>;
+    expect(Object.keys(draftBody).sort()).toEqual(['code', 'language']);
+    expect(draftBody).toMatchObject({ language: 'python' });
+  });
+
+  it('FR-504: the mock refuses the old draft body shape, like the whitelisted API route (a `kind` field is a 400)', async () => {
+    await startedSession();
+    const token = getSessionToken();
+    const put = (body: object) =>
+      fetch(`${cand}/answers/q1/draft`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+    expect((await put({ kind: 'code', language: 'python', code: 'x' })).status).toBe(400);
+    expect((await put({ code: 'x' })).status).toBe(400); // a code draft needs its language
+    expect((await put({ code: 'x', language: 'python' })).status).toBe(200);
+    expect((await put({ answer: { optionIds: ['a'] } })).status).toBe(200);
   });
 
   it('FR-502 DL-58: the real run response with LOCAL_STUB verdicts shows the stub notice, not a pass or a fail', async () => {
@@ -240,7 +255,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     );
     await screen.findByText(/finished and cannot be reopened/i);
     const draft = seen.find((r) => r.method === 'PUT' && r.url.endsWith('/answers/q2/draft'));
-    expect(draft?.body).toEqual({ kind: 'mcq', selectedOptionId: 'opt_b' });
+    expect(draft?.body).toEqual({ answer: { optionIds: ['opt_b'] } });
   });
 
   it('ADR 0002 FR-301: finishing section 1 is final and opens section 2; finishing the last submits the test', async () => {

@@ -147,10 +147,16 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
       return r.data.serverTime;
     },
     async saveDraft(questionId, body) {
+      // The API's DraftDto (whitelisted: an unknown field is a 400): CODING `{ code, language }`;
+      // MCQ `{ answer: { optionIds } }`. The screen's own `kind` field is never sent.
+      const dto =
+        body.kind === 'code'
+          ? { code: body.code, language: body.language }
+          : { answer: { optionIds: [body.selectedOptionId] } };
       const r = await requestAt(
         draftSavedSchema,
         `/answers/${encodeURIComponent(questionId)}/draft`,
-        { method: 'PUT', body, authed: true },
+        { method: 'PUT', body: dto, authed: true },
       );
       ended(r);
       if (r.ok) return { ok: true, savedAt: r.data.savedAt };
