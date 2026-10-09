@@ -13,6 +13,7 @@ import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
 import { InviteButton } from './invite-button';
+import { INVITE_CAPABILITIES } from './schemas';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
@@ -45,7 +46,7 @@ const posts = () => {
   const urls: string[] = [];
   server.events.on('request:start', ({ request }) => {
     const path = new URL(request.url).pathname;
-    if (request.method === 'POST' && path.endsWith('/bulk')) urls.push(path);
+    if (request.method === 'POST' && path.endsWith('/invitations')) urls.push(path);
   });
   return urls;
 };
@@ -68,7 +69,7 @@ describe('FR-303 TC-023: invite one candidate', () => {
     expect(within(dialog).getByText("Enter the candidate's email address.")).toBeInTheDocument();
   });
 
-  it('409: says the candidate already has an open invitation and what to do', async () => {
+  it('409: shows the API words for an active invitation, and for an erasure request', async () => {
     const { u, dialog } = await openDialog();
     await u.type(within(dialog).getByLabelText('Candidate name'), 'Tim');
     await u.type(
@@ -77,9 +78,39 @@ describe('FR-303 TC-023: invite one candidate', () => {
     );
     await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      /already has an open invitation/,
+      /already has an active invitation for this test\./,
     );
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('409: the erasure 409 is shown as the API says it, not as an open invitation', async () => {
+    setInvitationScenario({ candidateErased: true });
+    const { u, dialog } = await openDialog();
+    await u.type(within(dialog).getByLabelText('Candidate name'), 'Gone');
+    await u.type(within(dialog).getByLabelText('Candidate email'), 'gone@example.test');
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('This candidate cannot be invited.');
+    expect(alert).not.toHaveTextContent(/open invitation/);
+  });
+
+  it('D-84: accommodations are not offered or sent while the API does not accept them', async () => {
+    const { u, dialog } = await openDialog();
+    expect(within(dialog).getByTestId('accommodations-unavailable')).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('Extra time (%)')).not.toBeInTheDocument();
+    let body: unknown = null;
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST') body = await request.clone().json();
+    });
+    await u.type(within(dialog).getByLabelText('Candidate name'), 'Plain Person');
+    await u.type(within(dialog).getByLabelText('Candidate email'), 'plain@example.test');
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await waitFor(() => expect(body).not.toBeNull());
+    expect(Object.keys(body as object).sort()).toEqual(['candidate', 'windowEnd', 'windowStart']);
+    expect(Object.keys((body as { candidate: object }).candidate).sort()).toEqual([
+      'email',
+      'name',
+    ]);
   });
 
   it('429: says nothing was sent and when to try again', async () => {
@@ -99,7 +130,184 @@ describe('FR-303 TC-023: invite one candidate', () => {
   });
 });
 
+describe('FR-303: the email outcome and 422 reasons (D-84)', () => {
+  async function sendOne(email = 'mail.case@example.test') {
+    const ctx = await openDialog();
+    await ctx.u.type(within(ctx.dialog).getByLabelText('Candidate name'), 'Mia Mail');
+    await ctx.u.type(within(ctx.dialog).getByLabelText('Candidate email'), email);
+    await ctx.u.click(within(ctx.dialog).getByRole('button', { name: 'Send invitation' }));
+    return ctx;
+  }
+
+  it('FR-303: queued closes with "queued for delivery", not "sent"', async () => {
+    const { dialog } = await sendOne();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(dialog).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['disabled', /No email service is set up/],
+    ['failed', /could not be queued/],
+  ] as const)(
+    'FR-303: mail %s is a warning, never a success, and the dialog stays open',
+    async (mail, reason) => {
+      setInvitationScenario({ mail });
+      const before = mockInvitationCount();
+      const { dialog } = await sendOne();
+      const alert = await within(dialog).findByRole('alert');
+      expect(alert).toHaveTextContent('Invitation created, but the email could not be sent');
+      expect(within(dialog).getByTestId('mail-not-sent')).toHaveTextContent(reason);
+      expect(alert).toHaveTextContent(/no resend option yet/);
+      expect(alert).toHaveTextContent(/ask an administrator/i);
+      expect(document.body).not.toHaveTextContent(
+        /(?<!no )email was sent|has been sent|on its way|gets an email/i,
+      );
+      expect(mockInvitationCount()).toBe(before + 1);
+      expect(within(dialog).getByRole('button', { name: 'Send invitation' })).toBeDisabled();
+      expect(await axe(dialog)).toHaveNoViolations();
+    },
+  );
+
+  it('FR-303: an unsatisfiable test (422) names the slots and is not the closed-window text', async () => {
+    setInvitationScenario({ testUnsatisfiable: true });
+    const { dialog } = await sendOne();
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent(/cannot be given to candidates yet/);
+    expect(alert).toHaveTextContent(/randomRule matches 0/);
+    expect(alert).not.toHaveTextContent(/window has already closed/);
+  });
+
+  it('FR-303: a 422 with only a detail shows that detail as text', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Unprocessable Entity',
+            status: 422,
+            detail: '<b>The test is not published.</b>',
+          },
+          { status: 422 },
+        ),
+      ),
+    );
+    const { dialog } = await sendOne();
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('<b>The test is not published.</b>');
+    expect(alert.querySelector('b')).toBeNull();
+    expect(alert).not.toHaveTextContent(/window has already closed/);
+  });
+
+  it('FR-303: a 422 with no detail still does not blame the window', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json({ status: 422 }, { status: 422 }),
+      ),
+    );
+    const { dialog } = await sendOne();
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent(/Nothing was created/);
+    expect(alert).not.toHaveTextContent(/closed/);
+  });
+
+  it('FR-303: a window in the past is the 400 text from the API', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json(
+          {
+            status: 400,
+            detail: 'Request validation failed',
+            errors: ['windowEnd must be in the future'],
+          },
+          { status: 400 },
+        ),
+      ),
+    );
+    const { dialog } = await sendOne();
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'windowEnd must be in the future',
+    );
+  });
+
+  describe('bulk', () => {
+    let blobs: Blob[];
+    beforeEach(() => {
+      blobs = [];
+      vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+        blobs.push(b as Blob);
+        return 'blob:x';
+      });
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    async function bulk(text: string, label: RegExp) {
+      const ctx = await openDialog();
+      await ctx.u.click(within(ctx.dialog).getByLabelText('Several, from a CSV file'));
+      await ctx.u.upload(within(ctx.dialog).getByLabelText('CSV file'), csvFile(text));
+      await ctx.u.click(await within(ctx.dialog).findByRole('button', { name: label }));
+      return ctx;
+    }
+
+    it('FR-304: summarises created+queued, created but email not sent, and lets the recruiter download the latter', async () => {
+      setInvitationScenario({ mailFailedEmails: ['b@example.test'] });
+      const { u, dialog } = await bulk(
+        'email,name\r\na@example.test,A\r\nb@example.test,B\r\nc@example.test,C\r\nbad,Bad\r\n',
+        /Invite 3 candidates/,
+      );
+      const result = await within(dialog).findByTestId('bulk-result');
+      expect(result).toHaveTextContent(
+        '3 invitations created (2 queued for delivery, 1 with no email sent)',
+      );
+      expect(result).toHaveTextContent(/1 row not invited/);
+      expect(result).toHaveTextContent(/no email was sent, so they have not been told/);
+      expect(within(dialog).getByTestId('bulk-mail-not-sent')).toHaveTextContent(
+        'Row 2 (b@example.test): invited, but no email was sent.',
+      );
+      await u.click(
+        within(dialog).getByRole('button', {
+          name: /Download the invited rows whose email was not sent/,
+        }),
+      );
+      const csv = (await blobs.at(-1)?.text()) ?? '';
+      expect(csv).toContain('b@example.test');
+      expect(csv).not.toContain('a@example.test');
+    });
+
+    it('FR-304: with mail disabled every created row is listed as not emailed', async () => {
+      setInvitationScenario({ mail: 'disabled' });
+      const { dialog } = await bulk(
+        'email,name\r\na@example.test,A\r\nb@example.test,B\r\n',
+        /Invite 2 candidates/,
+      );
+      const result = await within(dialog).findByTestId('bulk-result');
+      expect(result).toHaveTextContent(
+        '2 invitations created (0 queued for delivery, 2 with no email sent)',
+      );
+      expect(within(dialog).getByTestId('bulk-mail-not-sent').querySelectorAll('li')).toHaveLength(
+        2,
+      );
+    });
+
+    it('FR-304: an unsatisfiable test stops the upload with the slots, not the closed-window text', async () => {
+      setInvitationScenario({ testUnsatisfiable: true });
+      const { dialog } = await bulk('email,name\r\na@example.test,A\r\n', /Invite 1 candidate/);
+      const result = await within(dialog).findByTestId('bulk-result');
+      expect(result).toHaveTextContent(/cannot be given to candidates yet/);
+      expect(result).toHaveTextContent(/randomRule matches 0/);
+      expect(result).not.toHaveTextContent(/window has already closed/);
+    });
+  });
+});
+
 describe('ADR 0015 C-19: accommodations and the identity waiver', () => {
+  beforeEach(() => {
+    INVITE_CAPABILITIES.accommodations = true;
+    setInvitationScenario({ acceptsAccommodations: true });
+  });
+  afterEach(() => {
+    INVITE_CAPABILITIES.accommodations = false;
+  });
   async function withWaiver(refusalOffered = false) {
     const ctx = await openDialog(MOCK_USERS.recruiter, refusalOffered);
     await ctx.u.type(within(ctx.dialog).getByLabelText('Candidate name'), 'Wen Waiver');
@@ -212,7 +420,8 @@ describe('FR-304 TC-023: invite from a CSV', () => {
     expect(await within(dialog).findByTestId('bulk-result')).toHaveTextContent(
       '2 invitations created',
     );
-    expect(urls).toEqual(['/v1/tests/test-backend/invitations/bulk']);
+    // The API has no bulk route: one single invitation per valid row.
+    expect(urls).toEqual(Array(2).fill('/v1/tests/test-backend/invitations'));
     expect(
       within(dialog).getByRole('button', { name: /Download the rows with a problem/ }),
     ).toBeInTheDocument();
@@ -223,7 +432,7 @@ describe('FR-304 TC-023: invite from a CSV', () => {
     expect(await within(dialog).findByText(/it needs "email" and "name"/)).toBeInTheDocument();
   });
 
-  it('sends 450 rows in chunks of 200 (3 requests)', async () => {
+  it('sends 450 rows as single invitations (450 requests, 4 at a time)', async () => {
     const urls = posts();
     const text =
       'email,name\n' +
@@ -233,7 +442,7 @@ describe('FR-304 TC-023: invite from a CSV', () => {
     expect(await within(dialog).findByTestId('bulk-result')).toHaveTextContent(
       '450 invitations created',
     );
-    expect(urls).toHaveLength(3);
+    expect(urls).toHaveLength(450);
   });
 
   it('429: reports how many were not sent and keeps the ones already sent', async () => {
@@ -244,9 +453,9 @@ describe('FR-304 TC-023: invite from a CSV', () => {
     const { u, dialog } = await upload(text);
     await u.click(await within(dialog).findByRole('button', { name: 'Invite 450 candidates' }));
     expect(await within(dialog).findByTestId('bulk-result')).toHaveTextContent(
-      '200 invitations created',
+      '250 invitations created',
     );
-    expect(within(dialog).getByText(/hourly limit: 250 rows were not sent/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/hourly limit: 200 rows were not sent/)).toBeInTheDocument();
   });
 
   it('keeps no candidate data in storage or the URL', async () => {
@@ -341,7 +550,7 @@ describe('FR-304: upload robustness', () => {
     expect(await within(dialog).findByTestId('bulk-result')).toHaveTextContent(
       '3 invitations created',
     );
-    expect(urls).toHaveLength(1);
+    expect(urls).toHaveLength(3);
   });
 
   async function uploadMany(n: number) {
@@ -353,12 +562,13 @@ describe('FR-304: upload robustness', () => {
     );
     return ctx;
   }
-  const failSecondChunk = (status: number | 'network') => {
+  // Request number `at` fails, the others are answered normally (so exactly one row is in doubt).
+  const failRequest = (at: number, status: number | 'network', fromThenOn = false) => {
     let calls = 0;
     server.use(
-      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations/bulk`, () => {
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () => {
         calls += 1;
-        if (calls === 1) return undefined;
+        if (fromThenOn ? calls < at : calls !== at) return undefined;
         return status === 'network'
           ? HttpResponse.error()
           : HttpResponse.json({ status, title: 'x', detail: 'x' }, { status });
@@ -366,30 +576,47 @@ describe('FR-304: upload robustness', () => {
     );
   };
 
-  it('a failure after the first chunk says how many were created, not "nothing was sent"', async () => {
-    failSecondChunk(401);
+  it('a failure part-way says how many were created, not "nothing was sent"', async () => {
+    failRequest(30, 401, true);
     const { dialog } = await uploadMany(250);
     const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
-    expect(text).toMatch(/The upload stopped after 200 invitations/);
+    expect(text).toMatch(/The upload stopped after \d+ invitations/);
     expect(text).toMatch(/Your session ended/);
     expect(text).toMatch(/Check the candidates list/);
     expect(text).not.toMatch(/nothing was sent/i);
   });
 
-  it('DL-37: a 500 on a chunk is not retried and says those rows may have been sent', async () => {
-    failSecondChunk(500);
+  it('DL-37: a 500 on a row is not retried and says that row may have been sent', async () => {
+    failRequest(30, 500);
     const { dialog } = await uploadMany(250);
     const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
-    expect(text).toMatch(/The upload stopped after 200 invitations/);
-    expect(text).toMatch(/50 rows of those may have been sent/);
+    expect(text).toMatch(/The upload stopped after \d+ invitations/);
+    expect(text).toMatch(/1 row of those may have been sent/);
     expect(text).toMatch(/Check the candidates list before trying again/);
   });
 
   it('a lost connection says the request in flight may have been sent', async () => {
-    failSecondChunk('network');
+    failRequest(30, 'network');
     const { dialog } = await uploadMany(250);
     const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
-    expect(text).toMatch(/50 rows of those may have been sent/);
+    expect(text).toMatch(/1 row of those may have been sent/);
+  });
+
+  it('FR-304: a 409 for one row is that row only, in the API words, and the rest go on', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, async ({ request }) => {
+        const b = (await request.clone().json()) as { candidate: { email: string } };
+        if (b.candidate.email !== 'q2@example.test') return undefined;
+        return HttpResponse.json(
+          { status: 409, title: 'Conflict', detail: 'This candidate cannot be invited.' },
+          { status: 409 },
+        );
+      }),
+    );
+    const { dialog } = await uploadMany(5);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/4 invitations created/);
+    expect(text).toMatch(/1 row not invited/);
   });
 
   it('after the hourly limit, the rows not sent can be downloaded and a new file chosen', async () => {
