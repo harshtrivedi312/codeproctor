@@ -135,8 +135,8 @@ pnpm dev:web                          # http://localhost:3000
 ```
 
 Check the API: <http://localhost:4000/api/v1/health> answers `{"status":"ok", ...}` with PostgreSQL and
-Redis `up`. The API log will repeat `Job consent-pdf failed`: the seeded consents have no PDF and there
-may be no PDF for a seeded consent. The "File uploads" row in section 6 says what was checked.
+Redis `up`. The API log may repeat `Job consent-pdf failed` for seeded consents that have no PDF; the
+"File uploads" row in section 6 says what was checked.
 
 **Browser**: use **Chrome or Firefox**, and always open the web app as `http://localhost:3000` (not
 `127.0.0.1`: the API's allowed web origin is exactly that). Safari does not keep the staff sign-in
