@@ -145,12 +145,22 @@ export const runResultDtoSchema = z.object({
 });
 type RunDto = z.infer<typeof runResultDtoSchema>;
 
-/** Maps the real run response to what the output panel shows. Pure; tested. */
+/**
+ * Maps the real run response to what the output panel shows. Pure; tested.
+ *
+ * Every sample that ran gets its own row, so the count is never smaller than what the API ran: a
+ * sample that timed out or crashed is a FAILED row carrying its message, not a missing one. A
+ * LOCAL_STUB sample did not run and is never a pass or a fail: it gets no row, and the result is
+ * marked `stub` (the panel then shows only the stub notice). A compile error is the same on every
+ * sample, so it is also the top-level message.
+ */
 export function toRunView(dto: RunDto): z.infer<typeof runResultSchema> {
   const rs = dto.results;
   const isStub = (r: RunDto['results'][number]): boolean =>
     r.verdict === 'LOCAL_STUB' || r.stub === true;
-  if (rs.length > 0 && rs.every(isStub)) {
+  const ran = rs.filter((r) => !isStub(r));
+  const anyStub = rs.some(isStub);
+  if (rs.length > 0 && ran.length === 0) {
     return {
       outcome: 'completed',
       tests: [],
@@ -160,33 +170,52 @@ export function toRunView(dto: RunDto): z.infer<typeof runResultSchema> {
       message: rs[0]?.message ?? LOCAL_STUB_LABEL,
     };
   }
-  const tests = rs
-    .filter((r) => !isStub(r) && (r.verdict === 'PASSED' || r.verdict === 'FAILED'))
-    .map((r) => ({
+  const NOT_A_PASS_TEXT: Record<string, string> = {
+    COMPILE_ERROR: 'The code did not compile.',
+    RUNTIME_ERROR: 'The program crashed.',
+    TIME_LIMIT: 'Time limit exceeded.',
+    MEMORY_LIMIT: 'Memory limit exceeded.',
+    OUTPUT_LIMIT: 'Output limit exceeded.',
+    INTERNAL_ERROR: 'The run could not be completed. Try again.',
+  };
+  const tests = ran.map((r) => {
+    // The verdict decides, never the `passed` flag alone: only PASSED is a pass.
+    const status = r.verdict === 'PASSED' ? ('passed' as const) : ('failed' as const);
+    const detail =
+      status === 'failed' && r.verdict !== 'FAILED'
+        ? (r.message ?? NOT_A_PASS_TEXT[r.verdict] ?? 'This sample did not complete.')
+        : undefined;
+    const printed =
+      r.stdout === undefined
+        ? undefined
+        : r.stdoutTruncated
+          ? `${r.stdout}\n(output cut short)`
+          : r.stdout;
+    return {
       id: `sample-${r.index}`,
       name: `Sample ${r.index}`,
-      status: r.passed ? ('passed' as const) : ('failed' as const),
-      ...(r.verdict === 'FAILED' && r.stdout !== undefined ? { actualOutput: r.stdout } : {}),
+      status,
+      ...(status === 'failed' && (detail !== undefined || printed !== undefined)
+        ? { actualOutput: detail ?? printed }
+        : {}),
       ...(r.timeMs != null ? { durationMs: r.timeMs } : {}),
-    }));
-  const problem = rs.find((r) => !isStub(r) && r.verdict !== 'PASSED' && r.verdict !== 'FAILED');
-  const printed = rs
-    .filter((r) => r.stdout)
-    .map((r) => (rs.length > 1 ? `Sample ${r.index}:\n${r.stdout}` : (r.stdout ?? '')))
+    };
+  });
+  const compile = ran.find((r) => r.verdict === 'COMPILE_ERROR');
+  const printedPassing = ran
+    .filter((r) => r.verdict === 'PASSED' && r.stdout)
+    .map((r) => (ran.length > 1 ? `Sample ${r.index}:\n${r.stdout}` : (r.stdout ?? '')))
     .join('\n');
-  if (!problem) return { outcome: 'completed', tests, stdout: printed, stderr: '' };
-  const outcome =
-    problem.verdict === 'COMPILE_ERROR'
-      ? 'compile_error'
-      : problem.verdict === 'RUNTIME_ERROR' || problem.verdict === 'INTERNAL_ERROR'
-        ? 'runtime_error'
-        : 'time_limit_exceeded';
-  return {
-    outcome,
-    tests,
-    stdout: printed,
-    stderr: problem.message ?? 'The run could not be completed. Try again.',
-  };
+  const view: z.infer<typeof runResultSchema> = compile
+    ? {
+        outcome: 'compile_error',
+        tests: [],
+        stdout: '',
+        stderr: compile.message ?? NOT_A_PASS_TEXT.COMPILE_ERROR ?? '',
+      }
+    : { outcome: 'completed', tests, stdout: printedPassing, stderr: '' };
+  // Some samples did not run on the local stub: say so, and never count them.
+  return anyStub ? { ...view, stub: true, message: LOCAL_STUB_LABEL } : view;
 }
 
 /** Either the real response (mapped) or the screen's own shape (demo and tests). */

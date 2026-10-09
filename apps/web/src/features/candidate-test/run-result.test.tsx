@@ -47,7 +47,7 @@ describe('run results from the answers route (FR-502, DL-58)', () => {
     ).toBe(true);
   });
 
-  it('FR-502: real verdicts map to sample tests, with the printed output', () => {
+  it('TC-040 FR-502: real verdicts map to sample tests, with the printed output', () => {
     const view = toRunView({
       ...base,
       passed: 1,
@@ -64,29 +64,84 @@ describe('run results from the answers route (FR-502, DL-58)', () => {
     ]);
     expect(view.tests[1]?.actualOutput).toBe('4');
     expect(view.stub).toBeUndefined();
-    expect(view.stdout).toContain('Sample 1:\n3');
+    expect(view.stdout).toBe('Sample 1:\n3');
   });
 
-  it('FR-502: compile error, runtime error, internal error and limits become an error outcome with the message', () => {
-    const one = (verdict: string, message: string) =>
-      toRunView({
-        ...base,
-        passed: 0,
-        total: 1,
-        results: [sample(1, { verdict, passed: false, message })],
-      });
-    expect(one('COMPILE_ERROR', 'SyntaxError')).toMatchObject({
-      outcome: 'compile_error',
-      stderr: 'SyntaxError',
+  it('TC-040 FR-502: a sample that times out or crashes is a failed row with its message, never a missing one', () => {
+    const view = toRunView({
+      ...base,
+      passed: 1,
+      total: 3,
+      results: [
+        sample(1),
+        sample(2, { verdict: 'TIME_LIMIT', passed: false, message: 'Time limit exceeded.' }),
+        sample(3, { verdict: 'RUNTIME_ERROR', passed: false, message: 'IndexError' }),
+      ],
     });
-    expect(one('RUNTIME_ERROR', 'boom')).toMatchObject({
-      outcome: 'runtime_error',
-      stderr: 'boom',
+    expect(view.tests.map((t) => [t.name, t.status])).toEqual([
+      ['Sample 1', 'passed'],
+      ['Sample 2', 'failed'],
+      ['Sample 3', 'failed'],
+    ]);
+    expect(view.tests[1]?.actualOutput).toBe('Time limit exceeded.');
+    expect(view.tests[2]?.actualOutput).toBe('IndexError');
+    expect(view.outcome).toBe('completed');
+  });
+
+  it('TC-040 FR-502: only the verdict makes a pass, whatever the passed flag says; unknown verdicts are failed rows', () => {
+    const view = toRunView({
+      ...base,
+      passed: 2,
+      total: 2,
+      results: [
+        sample(1, { verdict: 'FAILED', passed: true }),
+        sample(2, { verdict: 'SOMETHING_NEW', passed: true }),
+      ],
     });
-    expect(one('INTERNAL_ERROR', 'x').outcome).toBe('runtime_error');
-    for (const v of ['TIME_LIMIT', 'MEMORY_LIMIT', 'OUTPUT_LIMIT']) {
-      expect(one(v, 'too slow').outcome).toBe('time_limit_exceeded');
-    }
+    expect(view.tests.map((t) => t.status)).toEqual(['failed', 'failed']);
+  });
+
+  it('TC-040 FR-502: a compile error is the top-level message and has no sample rows', () => {
+    const view = toRunView({
+      ...base,
+      passed: 0,
+      total: 2,
+      results: [
+        sample(1, { verdict: 'COMPILE_ERROR', passed: false, message: 'SyntaxError' }),
+        sample(2, { verdict: 'COMPILE_ERROR', passed: false, message: 'SyntaxError' }),
+      ],
+    });
+    expect(view).toMatchObject({ outcome: 'compile_error', tests: [], stderr: 'SyntaxError' });
+  });
+
+  it('DL-58 FR-502: stub samples mixed with real ones are marked stub and never counted', () => {
+    const view = toRunView({
+      ...base,
+      passed: 1,
+      total: 2,
+      results: [sample(1), sample(2, { verdict: 'LOCAL_STUB', passed: false, stub: true })],
+    });
+    expect(view.stub).toBe(true);
+    expect(view.tests.map((t) => t.name)).toEqual(['Sample 1']);
+  });
+
+  it('FR-502: a truncated output says it was cut short', () => {
+    const view = toRunView({
+      ...base,
+      passed: 0,
+      total: 1,
+      results: [
+        sample(1, { verdict: 'FAILED', passed: false, stdout: 'abc', stdoutTruncated: true }),
+      ],
+    });
+    expect(view.tests[0]?.actualOutput).toContain('(output cut short)');
+  });
+
+  it('FR-502: an empty results array is a completed run with no samples', () => {
+    expect(toRunView({ ...base, passed: 0, total: 0, results: [] })).toMatchObject({
+      outcome: 'completed',
+      tests: [],
+    });
   });
 
   it('FR-502: the response schema accepts the real shape (mapped) and the screen shape (demo and tests)', () => {
@@ -118,7 +173,7 @@ describe('output panel (FR-502, DL-58, NFR-06)', () => {
     message: LOCAL_STUB_LABEL,
   };
 
-  it('FR-502: a stub run says "Local stub, not real execution" and shows no pass or fail', () => {
+  it('TC-040 FR-502: a stub run says "Local stub, not real execution" and shows no pass or fail', () => {
     render(<OutputPanel running={false} result={stub} errorMessage={null} />);
     expect(screen.getByTestId('run-stub-notice')).toHaveTextContent(
       /local stub, not real execution/i,
@@ -158,6 +213,55 @@ describe('output panel (FR-502, DL-58, NFR-06)', () => {
     );
     expect(screen.getByText('Your output')).toBeInTheDocument();
     expect(screen.queryByText('Expected')).not.toBeInTheDocument();
+  });
+
+  it('DL-58 FR-502: with stub set the panel shows only the notice, even if tests or an error outcome came with it', () => {
+    render(
+      <OutputPanel
+        running={false}
+        errorMessage={null}
+        result={{
+          ...stub,
+          outcome: 'runtime_error',
+          stderr: 'boom',
+          tests: [{ id: 'a', name: 'Sample 1', status: 'passed' }],
+        }}
+      />,
+    );
+    expect(screen.getByTestId('run-stub-notice')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/passed|failed|boom/i);
+  });
+
+  it('TC-040 FR-502: a completed run with no sample tests says so instead of a blank panel', () => {
+    render(
+      <OutputPanel
+        running={false}
+        errorMessage={null}
+        result={{ outcome: 'completed', tests: [], stdout: '', stderr: '' }}
+      />,
+    );
+    expect(screen.getByTestId('run-no-samples')).toHaveTextContent(/no sample tests/i);
+  });
+
+  it('TC-040 FR-502: 1 of 2 passes shows the timed-out sample as failed with its message', () => {
+    render(
+      <OutputPanel
+        running={false}
+        errorMessage={null}
+        result={toRunView({
+          ...base,
+          passed: 1,
+          total: 2,
+          results: [
+            sample(1),
+            sample(2, { verdict: 'TIME_LIMIT', passed: false, message: 'Time limit exceeded.' }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText(/1 of 2 sample tests passed/i)).toBeInTheDocument();
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText('Time limit exceeded.')).toBeInTheDocument();
   });
 
   it('NFR-06: no axe violations on the stub notice', async () => {

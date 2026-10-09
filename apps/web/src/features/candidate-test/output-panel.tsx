@@ -44,12 +44,17 @@ export function OutputPanel({
               <span className="sr-only"> ({result.message ?? LOCAL_STUB_LABEL})</span>
             </p>
           )}
-          {result.outcome !== 'completed' && (
+          {result.stub !== true && result.outcome !== 'completed' && (
             <pre className="whitespace-pre-wrap rounded-md bg-destructive-soft p-3 font-mono text-destructive">
               {result.stderr}
             </pre>
           )}
-          {result.tests.length > 0 && (
+          {result.stub !== true && result.outcome === 'completed' && result.tests.length === 0 && (
+            <p className="text-muted-foreground" data-testid="run-no-samples">
+              This question has no sample tests to run.
+            </p>
+          )}
+          {result.stub !== true && result.tests.length > 0 && (
             <>
               <p className="font-medium">
                 {result.tests.filter((t) => t.status === 'passed').length} of {result.tests.length}{' '}
