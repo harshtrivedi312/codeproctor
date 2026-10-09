@@ -49,25 +49,29 @@ describe('RedisThrottlerStorage (FU-BE-1, NFR-04)', () => {
 
   it('FU-BE-1: the window expires and the count restarts', async () => {
     const key = fresh();
-    await storage.increment(key, 300, 1, 0, 'auth');
-    expect((await storage.increment(key, 300, 1, 0, 'auth')).isBlocked).toBe(true);
-    await new Promise((r) => setTimeout(r, 450));
-    const again = await storage.increment(key, 300, 1, 0, 'auth');
+    // The window is long enough that two back-to-back calls stay inside it even on a loaded CI
+    // runner, and the sleep is well past it (a 300 ms window flaked when the two calls were apart).
+    await storage.increment(key, 1_000, 1, 0, 'auth');
+    expect((await storage.increment(key, 1_000, 1, 0, 'auth')).isBlocked).toBe(true);
+    await new Promise((r) => setTimeout(r, 1_500));
+    const again = await storage.increment(key, 1_000, 1, 0, 'auth');
     expect(again).toMatchObject({ totalHits: 1, isBlocked: false });
   });
 
   it('FU-BE-1: a block duration blocks without counting, then the window restarts clean', async () => {
     const key = fresh();
-    await storage.increment(key, 5_000, 2, 400, 'auth');
-    await storage.increment(key, 5_000, 2, 400, 'auth');
-    const tripped = await storage.increment(key, 5_000, 2, 400, 'auth');
+    // A 1.5 s block (the old 400 ms block could expire between the calls on a loaded runner).
+    await storage.increment(key, 5_000, 2, 1_500, 'auth');
+    await storage.increment(key, 5_000, 2, 1_500, 'auth');
+    const tripped = await storage.increment(key, 5_000, 2, 1_500, 'auth');
     expect(tripped.isBlocked).toBe(true);
-    expect(tripped.timeToBlockExpire).toBe(1);
-    const stillBlocked = await storage.increment(key, 5_000, 2, 400, 'auth');
+    expect(tripped.timeToBlockExpire).toBeGreaterThanOrEqual(1);
+    expect(tripped.timeToBlockExpire).toBeLessThanOrEqual(2);
+    const stillBlocked = await storage.increment(key, 5_000, 2, 1_500, 'auth');
     expect(stillBlocked.isBlocked).toBe(true);
     expect(stillBlocked.totalHits).toBe(3);
-    await new Promise((r) => setTimeout(r, 550));
-    const after = await storage.increment(key, 5_000, 2, 400, 'auth');
+    await new Promise((r) => setTimeout(r, 1_900));
+    const after = await storage.increment(key, 5_000, 2, 1_500, 'auth');
     expect(after).toMatchObject({ totalHits: 1, isBlocked: false });
   });
 

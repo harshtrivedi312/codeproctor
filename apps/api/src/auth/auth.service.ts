@@ -28,6 +28,7 @@ import type { RefreshToken, User } from '../generated/prisma/client';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import { MailPort } from '../mail/mail.port';
+import type { MailOutcome, TwoFactorNoticeTemplate } from '../mail/mail.port';
 import type { AuthSessionDto, LoginResultDto, TotpEnrollmentDto } from './dto/auth.dto';
 import {
   newOpaqueToken,
@@ -500,7 +501,6 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         await this.clearFailures(user, tx);
         phase.finished = true;
       });
-      return { recoveryCodes: codes };
     } catch (e) {
       // FU-BE-208: ONE classification. A clean rollback releases the mark (the 503 invites a
       // retry with the same code). After the callback returned, anything that is not a rollback
@@ -524,6 +524,9 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       }
       throw e;
     }
+    // D-76: the transaction resolved, so the commit is certain. Outside the try on purpose.
+    await this.notifyTwoFactorChange(user, user.id, 'two-factor-enabled', ctx);
+    return { recoveryCodes: codes };
   }
 
   /**
@@ -748,9 +751,106 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // have committed. The mark stays, no refund (the reservation was given back before the
       // transaction only because both factors had already verified).
       if (phase.started && phase.finished && !clean) {
+        // D-76: a silent turn-off would hide a takeover, so settle the outcome with a locking
+        // re-read (api-contract section 8) and mail only if the change definitely landed.
+        if (await this.disableDefinitelyCommitted(user.id, user.orgId)) {
+          await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
+        }
         throw new OutcomeUnknownError('auth.2fa.disable');
       }
       throw e;
+    }
+    // D-76: the transaction resolved, so the commit landed.
+    await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
+  }
+
+  /**
+   * D-76: FOR UPDATE re-read after an unknown commit outcome, shared by disable and reset. The
+   * read waits for a commit still in flight, but for 2 s at most (SET LOCAL lock_timeout, as
+   * session-state.service.ts does), so a hung transaction cannot hold the request. Returns null
+   * on any error or timeout (no mail: the accepted gap). `proof` runs in the same transaction; if
+   * it fails, its result is null and the flag from the locked read is still returned.
+   */
+  private async lockedReread(
+    userId: string,
+    orgId: string,
+    proof?: (tx: Db) => Promise<boolean>,
+  ): Promise<{ totpEnabled: boolean; proof: boolean | null } | null> {
+    let out: { totpEnabled: boolean; proof: boolean | null } | null = null;
+    try {
+      await this.prisma.client.$transaction(async (tx) => {
+        await this.raw(
+          'SET LOCAL lock_timeout so the re-read cannot hang the request',
+          () => tx.$executeRaw`SET LOCAL lock_timeout = '2000ms'`,
+        );
+        const rows = await this.raw('locking re-read of the 2FA flag after an unknown commit', () =>
+          tx.$queryRaw<{ totp_enabled: boolean }[]>(Prisma.sql`
+            SELECT totp_enabled FROM users WHERE id = ${userId}::uuid AND org_id = ${orgId}::uuid FOR UPDATE`),
+        );
+        const flag = rows[0]?.totp_enabled;
+        if (rows.length !== 1 || flag === undefined) return;
+        out = { totpEnabled: flag, proof: null };
+        if (proof) {
+          try {
+            // The proof lookup is bounded too; a timeout leaves it unreadable (fallback rule).
+            await this.raw(
+              'SET LOCAL statement_timeout so the audit lookup stays small and bounded',
+              () => tx.$executeRaw`SET LOCAL statement_timeout = '2000ms'`,
+            );
+            out = { totpEnabled: flag, proof: await proof(tx) };
+          } catch {
+            out = { totpEnabled: flag, proof: null };
+          }
+        }
+      });
+    } catch {
+      // A timeout or any error before the flag was read leaves null; after it, the read stands.
+    }
+    return out;
+  }
+
+  /** True only when the locked re-read shows 2FA off; any error or doubt is false (no mail). */
+  private async disableDefinitelyCommitted(userId: string, orgId: string): Promise<boolean> {
+    const read = await this.lockedReread(userId, orgId);
+    return read?.totpEnabled === false;
+  }
+
+  /**
+   * D-76: queues the account-holder mail after the change committed, then records the outcome in
+   * a separate audit row (no address). Never throws and never changes the response: the action
+   * does not depend on delivery. 'queued' means the queue accepted the job, not that it arrived.
+   */
+  private async notifyTwoFactorChange(
+    holder: Pick<User, 'id' | 'orgId' | 'email'>,
+    actorId: string,
+    template: TwoFactorNoticeTemplate,
+    ctx: RequestContext,
+  ): Promise<void> {
+    let outcome: MailOutcome;
+    try {
+      outcome = await this.mail.sendTwoFactorNotice(holder.email, template, new Date());
+      if (outcome === 'failed') this.logger.error(`2FA notice not queued (refused, ${template})`);
+    } catch (e) {
+      outcome = 'failed';
+      this.logger.error(`2FA notice not queued (${safeErrorName(e)}, ${template})`);
+    }
+    try {
+      await this.prisma.client.auditLog.create({
+        data: {
+          orgId: holder.orgId,
+          actorId,
+          action: 'AUTH_2FA_NOTICE',
+          entityType: 'user',
+          entityId: holder.id,
+          ip: ctx.ip ?? null,
+          metadata: { template, outcome },
+        },
+      });
+    } catch (e) {
+      // Name and audit action only; raises the same alertable line as the audit carve-out.
+      this.logger.error(
+        `Audit write after commit failed (${safeErrorName(e)}) for AUTH_2FA_NOTICE`,
+      );
     }
   }
 
@@ -812,61 +912,125 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       throw new BadRequestException('Use your own security settings to change your 2FA.');
     }
     const verified = await this.requireCurrentPassword(actor.id, adminPassword, ctx);
-    await this.prisma.client.$transaction(async (tx) => {
-      // The admin's password hash, role and active flag are re-checked here with a plain read (the
-      // admin row is deliberately not locked: locking it would allow an A<->B deadlock between
-      // two admins resetting each other). It runs before the lock, so a changed admin gets
-      // REAUTH_FAILED whether or not the target exists.
-      const stillAdmin = await tx.user.count({
-        where: {
-          id: actor.id,
-          orgId: actor.orgId,
-          passwordHash: verified.passwordHash ?? '',
-          role: UserRole.SUPER_ADMIN,
-          isActive: true,
-        },
-      });
-      if (stillAdmin !== 1) throw reauthFailed();
-      const locked = await this.raw(
-        'row lock on the target user, FOR NO KEY UPDATE, same org only',
-        () =>
-          tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+    // D-76: the target as read inside the transaction; the mail goes to this address only.
+    const notify: { holder: Pick<User, 'id' | 'orgId' | 'email'> | null } = { holder: null };
+    // Names this request's audit row, so an unknown commit outcome can be settled (D-76).
+    const requestRef = randomUUID();
+    // Lower bound for the audit lookup (index range stays tiny), with room for clock skew.
+    const startedAt = new Date(Date.now() - 5_000);
+    const phase: TxPhase = { started: false, finished: false };
+    try {
+      await this.prisma.client.$transaction(async (tx) => {
+        phase.started = true;
+        phase.finished = false;
+        notify.holder = null; // a re-run of the callback must not keep a stale value
+        // The admin's password hash, role and active flag are re-checked here with a plain read (the
+        // admin row is deliberately not locked: locking it would allow an A<->B deadlock between
+        // two admins resetting each other). It runs before the lock, so a changed admin gets
+        // REAUTH_FAILED whether or not the target exists.
+        const stillAdmin = await tx.user.count({
+          where: {
+            id: actor.id,
+            orgId: actor.orgId,
+            passwordHash: verified.passwordHash ?? '',
+            role: UserRole.SUPER_ADMIN,
+            isActive: true,
+          },
+        });
+        if (stillAdmin !== 1) throw reauthFailed();
+        const locked = await this.raw(
+          'row lock on the target user, FOR NO KEY UPDATE, same org only',
+          () =>
+            tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT id FROM users
           WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
           FOR NO KEY UPDATE`),
-      );
-      if (locked.length !== 1) throw new NotFoundException('User not found.');
-      // Also enforced after the lock, on the id as the database sees it.
-      if (locked[0]?.id === actorId) {
-        throw new BadRequestException('Use your own security settings to change your 2FA.');
-      }
-      const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
-      await tx.user.update({
-        where: { id: targetId },
-        data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
-      });
-      const revoked = await tx.refreshToken.updateMany({
-        where: { userId: targetId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
-      await this.validity.invalidateIssuedTokens(targetId);
-      await tx.auditLog.create({
-        data: {
-          orgId: actor.orgId,
-          actorId: actor.id,
-          action: 'AUTH_2FA_RESET_BY_ADMIN',
-          entityType: 'user',
-          entityId: targetId,
-          ip: ctx.ip ?? null,
-          metadata: {
-            previouslyEnabled: target.totpEnabled,
-            targetRole: target.role,
-            sessionsRevoked: revoked.count,
+        );
+        if (locked.length !== 1) throw new NotFoundException('User not found.');
+        // Also enforced after the lock, on the id as the database sees it.
+        if (locked[0]?.id === actorId) {
+          throw new BadRequestException('Use your own security settings to change your 2FA.');
+        }
+        const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
+        await tx.user.update({
+          where: { id: targetId },
+          data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+        });
+        const revoked = await tx.refreshToken.updateMany({
+          where: { userId: targetId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+        await this.validity.invalidateIssuedTokens(targetId);
+        await tx.auditLog.create({
+          data: {
+            orgId: actor.orgId,
+            actorId: actor.id,
+            action: 'AUTH_2FA_RESET_BY_ADMIN',
+            entityType: 'user',
+            entityId: targetId,
+            ip: ctx.ip ?? null,
+            metadata: {
+              previouslyEnabled: target.totpEnabled,
+              targetRole: target.role,
+              sessionsRevoked: revoked.count,
+              requestRef,
+            },
           },
-        },
+        });
+        // Nothing changes for an account without 2FA, and a deactivated account gets nothing.
+        if (target.totpEnabled && target.isActive) {
+          notify.holder = { id: target.id, orgId: target.orgId, email: target.email };
+        }
+        phase.finished = true;
       });
+    } catch (e) {
+      // The response stays what it is (503 BUSY for a commit-time failure). Only the mail is
+      // settled here: after the callback returned, a commit-time P2028 or P1017 may have landed
+      // and a retry would be a no-op reset that never mails the holder (D-76).
+      const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
+      if (!clean && phase.started && phase.finished && notify.holder) {
+        await this.mailIfResetLanded(notify.holder, actor.id, requestRef, startedAt, ctx);
+      }
+      throw e;
+    }
+    // Only after the transaction resolved (a commit-time failure threw above: no mail).
+    if (notify.holder) {
+      await this.notifyTwoFactorChange(notify.holder, actor.id, 'two-factor-reset', ctx);
+    }
+  }
+
+  /**
+   * Unknown commit outcome of a reset whose target had 2FA on: mail only if the locked re-read
+   * proves THIS request's reset landed (its AUTH_2FA_RESET_BY_ADMIN row exists); if the audit
+   * lookup cannot be read, fall back to 2FA being off now (it was on before the transaction).
+   * The fallback can mail in the rare case that the account's 2FA was turned off by someone else
+   * meanwhile (a concurrent self-disable or a concurrent reset) while this reset rolled back: the
+   * holder then gets a notice for a change they may have made themselves. Accepted: the notice
+   * never withholds a real turn-off, and it names no actor.
+   */
+  private async mailIfResetLanded(
+    holder: Pick<User, 'id' | 'orgId' | 'email'>,
+    actorId: string,
+    requestRef: string,
+    startedAt: Date,
+    ctx: RequestContext,
+  ): Promise<void> {
+    const read = await this.lockedReread(holder.id, holder.orgId, async (tx) => {
+      const row = await tx.auditLog.findFirst({
+        where: {
+          action: 'AUTH_2FA_RESET_BY_ADMIN',
+          entityId: holder.id,
+          createdAt: { gte: startedAt },
+          metadata: { path: ['requestRef'], equals: requestRef },
+        },
+        select: { id: true },
+      });
+      return row !== null;
     });
+    if (!read) return;
+    const landed = read.proof ?? !read.totpEnabled;
+    if (landed) await this.notifyTwoFactorChange(holder, actorId, 'two-factor-reset', ctx);
   }
 
   // ---- FR-104: refresh and logout -----------------------------------------------------------

@@ -22,6 +22,10 @@ export interface TemplateParams {
   /** pdfKey for the queued path; the direct candidate path attaches the bytes itself. */
   'consent-copy': { pdfKey?: string; documentVersion?: string; signedAt?: string };
   'erasure-delayed': { delayedUntil: string };
+  /** D-76: occurredAt is the server time (ISO UTC) right after the change committed. Nothing else. */
+  'two-factor-enabled': { occurredAt: string };
+  'two-factor-disabled': { occurredAt: string };
+  'two-factor-reset': { occurredAt: string };
 }
 export type TemplateId = keyof TemplateParams;
 
@@ -66,6 +70,9 @@ function when(iso: string): string {
     ? 'unknown'
     : `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
+
+const SIGNED_OUT = 'Every session of your account, the current one included, was signed out.';
+const NOT_YOU = 'If you did not expect this, contact your administrator and change your password.';
 
 function layout(heading: string, paragraphs: string[], link?: { url: string; label: string }) {
   const h = escapeHtml(heading);
@@ -191,6 +198,32 @@ export function renderMail(job: EmailJob, opts: RenderOptions = {}): RenderedMai
     case 'erasure-delayed':
       return make('Your erasure request is delayed', 'Erasure request delayed', [
         `We cannot complete your erasure request yet. It will be completed by ${when(job.params.delayedUntil)}.`,
+      ]);
+    // D-76: fixed text only. No name, address, code, key, recovery code or link.
+    case 'two-factor-enabled':
+      return make(
+        'Two-factor sign-in was turned on for your account',
+        'Two-factor sign-in turned on',
+        [
+          `Two-factor sign-in was turned on for your CodeProctor account at ${when(job.params.occurredAt)}.`,
+          NOT_YOU,
+        ],
+      );
+    case 'two-factor-disabled':
+      return make(
+        'Two-factor sign-in was turned off for your account',
+        'Two-factor sign-in turned off',
+        [
+          `Two-factor sign-in was turned off for your CodeProctor account at ${when(job.params.occurredAt)}.`,
+          SIGNED_OUT,
+          NOT_YOU,
+        ],
+      );
+    case 'two-factor-reset':
+      return make('Two-factor sign-in was reset on your account', 'Two-factor sign-in reset', [
+        `An administrator reset two-factor sign-in on your CodeProctor account at ${when(job.params.occurredAt)}. It is now off.`,
+        SIGNED_OUT,
+        NOT_YOU,
       ]);
   }
 }

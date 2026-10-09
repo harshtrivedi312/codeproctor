@@ -2820,7 +2820,10 @@ describe('Question bank (FR-201..FR-205, TC-010, TC-011, TC-013, TC-014)', () =>
       typeof import('../common/auth/route-registry')
     >('../common/auth/route-registry');
     const routes = listRoutes(app.get(ModulesContainer));
-    expect(routes.filter((r) => r.key.includes('/questions')).length).toBe(24);
+    // The staff question bank only: the candidate question read (/candidate/questions/:id) is another area.
+    expect(
+      routes.filter((r) => r.key.includes('/questions') && !r.key.includes('/candidate/')).length,
+    ).toBe(24);
     expect(matrixProblems(routes)).toEqual([]);
   });
 });

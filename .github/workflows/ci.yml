@@ -125,4 +125,8 @@ jobs:
       - name: Test
         env:
           REQUIRE_DB_DRILL: '1'
+          # The apps/api suite runs in one process (--runInBand) and has outgrown Node's default heap
+          # (about 4 GB on this runner: "JavaScript heap out of memory"). 6 GB is a ceiling, not a
+          # reservation; the runner has 16 GB. Scoped to this step so build, lint and typecheck keep the default.
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm test

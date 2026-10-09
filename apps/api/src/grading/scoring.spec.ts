@@ -79,9 +79,9 @@ describe('MCQ and short answer scoring (FR-205, D-23, TC-099)', () => {
       correctOptionIds: ['a', 'c'],
       multiple: true,
     };
-    expect(mcqCorrect(mcq, { optionIds: ['c', 'a'] }, 's')).toBe(true);
-    expect(mcqCorrect(mcq, { optionIds: ['a'] }, 's')).toBe(false);
-    expect(mcqCorrect(mcq, { optionIds: ['a', 'b', 'c'] }, 's')).toBe(false);
-    expect(mcqCorrect(mcq, null, 's')).toBe(false);
+    expect(mcqCorrect(mcq, { optionIds: ['c', 'a'] }, (id) => id)).toBe(true);
+    expect(mcqCorrect(mcq, { optionIds: ['a'] }, (id) => id)).toBe(false);
+    expect(mcqCorrect(mcq, { optionIds: ['a', 'b', 'c'] }, (id) => id)).toBe(false);
+    expect(mcqCorrect(mcq, null, (id) => id)).toBe(false);
   });
 });

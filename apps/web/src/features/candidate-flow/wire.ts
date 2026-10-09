@@ -1,5 +1,6 @@
 import { codeLanguageSchema } from '@codeproctor/shared';
 import { z } from 'zod';
+import { runResponseSchema } from '@/features/candidate-test/adr-wire';
 import { isAllowedUploadUrl } from './upload-url';
 
 /**
@@ -209,19 +210,9 @@ export const practiceQuestionSchema = z.object({
 });
 export type PracticeQuestion = z.infer<typeof practiceQuestionSchema>;
 
-export const practiceRunSchema = z.object({
-  outcome: z.enum(['completed', 'compile_error', 'runtime_error', 'time_limit_exceeded']),
-  tests: z.array(
-    z.object({
-      id: z.string(),
-      name: z.string(),
-      status: z.enum(['passed', 'failed']),
-      input: z.string().optional(),
-      expectedOutput: z.string().optional(),
-      actualOutput: z.string().optional(),
-      durationMs: z.number().optional(),
-    }),
-  ),
-  stdout: z.string(),
-  stderr: z.string(),
-});
+/**
+ * Practice run (Backend A's route, #342). The shape is not final: accept both the screen's own shape
+ * (`{outcome, tests, stdout, stderr}` plus `stub`/`message` for the local stub) and the answers-run
+ * response with a verdict per sample, mapped the same way as the real test.
+ */
+export const practiceRunSchema = runResponseSchema;

@@ -6,7 +6,7 @@ import type { EvidenceApi } from '../detectors/evidence';
 import { VisionMonitor } from '../detectors/vision-monitor';
 import { VoiceMonitor, createVadWebFactory } from '../detectors/voice-monitor';
 import { RecordingPipeline } from '../recording/pipeline';
-import { MediaApiError, type ChunkRef, type MediaApi } from '../recording/types';
+import { createFetchMediaApi } from '../recording/media-api';
 import { resolveModelUrls } from '../detectors/config';
 
 /**
@@ -15,7 +15,7 @@ import { resolveModelUrls } from '../detectors/config';
  * really cuts the traffic (TC-063). The "simulate network drop" checkbox does the same from inside
  * the page. Not for production use.
  *
- * The demo's injected adapters (heartbeat body, media API, evidence API, identity re-check) speak the
+ * The demo's injected adapters (heartbeat body, evidence API, identity re-check) speak the
  * wire format of ADR 0013 (Proposed, PR #39), provisional. SDK core is unchanged: where the core
  * differs from the ADR, the adapter bridges it and says so below.
  */
@@ -31,68 +31,42 @@ export interface DemoOptions {
   onStarted?: (h: { session: ProctorSession; vision: VisionMonitor }) => void;
 }
 
+const isHigh = (c: string | undefined): boolean =>
+  c !== undefined && c >= '\uD800' && c <= '\uDBFF';
+const isLow = (c: string | undefined): boolean => c !== undefined && c >= '\uDC00' && c <= '\uDFFF';
+
+/**
+ * One EDIT from a textarea value change (common prefix and suffix). The cut never falls inside a
+ * surrogate pair, so the text of an edit is always well formed (the API rejects lone surrogates).
+ */
+export function diffEdit(
+  previous: string,
+  next: string,
+): { offset: number; deleteLength: number; text: string } | null {
+  let start = 0;
+  while (start < previous.length && start < next.length && previous[start] === next[start]) start++;
+  let endPrev = previous.length;
+  let endNext = next.length;
+  while (endPrev > start && endNext > start && previous[endPrev - 1] === next[endNext - 1]) {
+    endPrev--;
+    endNext--;
+  }
+  // Do not cut a pair in two: move the start before a high surrogate, the end after a low one.
+  if (start > 0 && isHigh(next[start - 1])) start--;
+  if (endNext < next.length && isLow(next[endNext])) {
+    endNext++;
+    endPrev++;
+  }
+  if (endPrev === start && endNext === start) return null;
+  return { offset: start, deleteLength: endPrev - start, text: next.slice(start, endNext) };
+}
+
 export interface DemoHandle {
   stop(): Promise<void>;
 }
 
-const ALREADY_UPLOADED = 'already-uploaded:';
-
-async function problemCode(res: Response): Promise<string> {
-  const j = (await res.json().catch(() => null)) as { code?: unknown } | null;
-  return typeof j?.code === 'string' ? j.code : '';
-}
-
-/**
- * Media API adapter for ADR 0013 section 5.5. Bridges two differences from SDK core (both listed in
- * docs/followups/proctor-sdk.md): the ADR wants `startedAt`, `durationMs` and a bare `video/webm`
- * content type, and a per-stream unique `seq` (the SDK restarts `seq` at 0 in every segment), so the
- * adapter sends `segment * 100000 + seq`.
- */
-function createAdrMediaApi(apiBase: string, token: string, f: typeof fetch): MediaApi {
-  const wireSeq = (c: ChunkRef): number => c.segment * 100_000 + c.seq;
-  const post = async (path: string, body: unknown): Promise<Response> => {
-    let res: Response;
-    try {
-      res = await f(`${apiBase}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      });
-    } catch {
-      throw new MediaApiError('RETRY', 'network');
-    }
-    if (res.ok) return res;
-    const code = await problemCode(res);
-    const fatal = res.status === 400 || code === 'SEQ_CONFLICT' || code === 'SESSION_NOT_ACTIVE';
-    // 404 CHUNK_NOT_PRESIGNED, 409 UPLOAD_NOT_FOUND, 422 UPLOAD_MISMATCH, 429, 5xx: presign again.
-    throw new MediaApiError(fatal ? 'FATAL' : 'RETRY', code || `status ${res.status}`);
-  };
-  return {
-    async presign(c) {
-      const contentType = c.stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
-      const res = await post('/media/presign', {
-        stream: c.stream,
-        segment: c.segment,
-        seq: wireSeq(c),
-        bytes: c.bytes,
-        contentType,
-        startedAt: new Date(Date.now() - 10_000).toISOString(),
-        durationMs: 10_000,
-      });
-      const j = (await res.json()) as {
-        url?: string;
-        alreadyUploaded?: boolean;
-        headers?: Record<string, string>;
-      };
-      if (j.alreadyUploaded) return { url: ALREADY_UPLOADED };
-      if (typeof j.url !== 'string') throw new MediaApiError('RETRY', 'bad presign response');
-      return { url: j.url, headers: { 'Content-Type': contentType, ...j.headers } };
-    },
-    async confirm(c) {
-      await post('/media/confirm', { stream: c.stream, segment: c.segment, seq: wireSeq(c) });
-    },
-  };
-}
+/** Fixed question id for the demo's single editor. */
+const DEMO_QUESTION_ID = '8f14e45f-ceea-467a-9575-1b2a7c3d4e5f';
 
 export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHandle {
   container.innerHTML = `
@@ -134,6 +108,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
   let consented = false;
   /** Set by stop(): any async start step that resumes after it must tear down what it started. */
   let stopped = false;
+  let removeEditorListeners: (() => void) | null = null;
   let pipeline: RecordingPipeline | null = null;
   const lockState = new Map<string, boolean>();
 
@@ -217,8 +192,15 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         fetchFn: demoFetch,
         eventsPath: '/events',
         heartbeatPath: '/heartbeat',
+        keystrokesPath: '/keystrokes',
       });
-      const media = createAdrMediaApi(o.apiBase, token, demoFetch);
+      const media = createFetchMediaApi({
+        baseUrl: o.apiBase,
+        getToken: () => token,
+        fetchFn: demoFetch,
+        presignPath: '/media/presign',
+        confirmPath: '/media/confirm',
+      });
       pipeline = new RecordingPipeline({
         sessionId: o.sessionId,
         api: media,
@@ -226,9 +208,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
           if (!consented) throw new Error('consent required');
         },
         put: async (url, body, headers) =>
-          url === ALREADY_UPLOADED
-            ? 200
-            : (await demoFetch(url, { method: 'PUT', body, headers })).status,
+          (await demoFetch(url, { method: 'PUT', body, headers })).status,
         onCapability: (f) => {
           recordingCaps.push(`${f.id}: ${f.status}${f.detail ? ` (${f.detail})` : ''}`);
           renderCaps(recordingCaps);
@@ -299,7 +279,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
               },
               queue: {
                 pendingEventBatches: q?.unsentBatches ?? 0,
-                pendingKeystrokeBatches: 0,
+                pendingKeystrokeBatches: session.getKeystrokeStats()?.unsentBatches ?? 0,
                 rejectedBatches: q?.rejectedBatches ?? 0,
               },
             }),
@@ -315,8 +295,34 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         root,
         consent: { recordedAt: new Date().toISOString() },
         detectors: [...Object.values(monitors), vision, voice],
-        transport: { sendBatch: (b) => transport.sendBatch(b), heartbeat },
+        transport: {
+          sendBatch: (b) => transport.sendBatch(b),
+          sendKeystrokeBatch: (b) => transport.sendKeystrokeBatch(b),
+          heartbeat,
+        },
       });
+      // Editor recording (FR-608): the demo textarea stands in for Monaco. Its input events are
+      // turned into one EDIT each (common prefix and suffix), never raw key events (NFR-05).
+      const keystrokes = session.keystrokes;
+      const editor = root.querySelector('textarea');
+      if (keystrokes && editor) {
+        let previous = editor.value;
+        keystrokes.reset(DEMO_QUESTION_ID, 'python', previous);
+        const onInput = (): void => {
+          const next = editor.value;
+          const change = diffEdit(previous, next);
+          if (change) keystrokes.recordChange(change);
+          previous = next;
+        };
+        const onSelect = (): void =>
+          keystrokes.recordSelection(editor.selectionStart, editor.selectionEnd);
+        editor.addEventListener('input', onInput);
+        editor.addEventListener('select', onSelect);
+        removeEditorListeners = () => {
+          editor.removeEventListener('input', onInput);
+          editor.removeEventListener('select', onSelect);
+        };
+      }
       if (stopped) return teardownLate();
       statusEl.textContent = ' running';
       o.onStarted?.({ session, vision });
@@ -341,6 +347,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
   return {
     async stop() {
       stopped = true;
+      removeEditorListeners?.();
       consented = false; // device requests that start after this are refused by assertConsent
       clearInterval(timer);
       await session.stop();
