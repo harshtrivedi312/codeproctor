@@ -562,7 +562,8 @@ export class ProctorEventsService {
           // PROCTOR is owned by the staff routes: keep it as it is, whatever the events say.
           const next: PauseReason[] = [
             ...CANDIDATE_REASONS.filter((r) => active.has(r)),
-            ...(current.pauseReasons.includes('PROCTOR') ? (['PROCTOR'] as const) : []),
+            // Everything that is not a candidate reason (PROCTOR) is kept exactly as stored.
+            ...current.pauseReasons.filter((r) => !CANDIDATE_REASONS.includes(r)),
           ];
           const same =
             next.length === current.pauseReasons.length &&
