@@ -35,10 +35,12 @@ describe('Opaque MCQ option ids (ADR 0013 CS-4.6; FR-205, TC-011)', () => {
   });
 
   it('NFR-04: without the secret the candidate portal is unconfigured (503), never a fallback id', () => {
-    expect(() => service(undefined).of('s1', 'a')).toThrow(
-      expect.objectContaining({
-        response: expect.objectContaining({ code: 'CANDIDATE_PORTAL_UNCONFIGURED' }),
-      }),
-    );
+    let code: unknown;
+    try {
+      service(undefined).of('s1', 'a');
+    } catch (e) {
+      code = (e as { getResponse?: () => { code?: string } }).getResponse?.().code;
+    }
+    expect(code).toBe('CANDIDATE_PORTAL_UNCONFIGURED');
   });
 });
