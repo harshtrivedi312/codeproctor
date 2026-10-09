@@ -19,6 +19,7 @@ import { PrismaService } from '../database/prisma.service';
 import { sessionNotActive } from '../session/session-write-gate';
 import { VerifyEnqueueScopeError, VerifySessionJobs } from '../session/verify-session.jobs';
 import { CandidateScope } from './candidate-scope';
+import { ConsentService } from './consent.service';
 import type { CandidateContext } from './candidate.types';
 import type { BlockingReason, SystemCheckInput, SystemCheckResult } from './system-check.schema';
 
@@ -83,6 +84,7 @@ export class SystemCheckService {
     private readonly prisma: PrismaService,
     private readonly scope: CandidateScope,
     private readonly verify: VerifySessionJobs,
+    private readonly consent: ConsentService,
   ) {}
 
   async submit(
@@ -101,8 +103,10 @@ export class SystemCheckService {
         ? null
         : reported.length < 3 || !brands.some((b) => b.includes(reported) || reported.includes(b));
 
+    // The floor of the findings' times (ADR 0013 section 3), read through the consent service.
+    const floor = (await this.consent.signedAtOf(ctx)) ?? now;
     await this.scope.asOrg(ctx, () =>
-      this.store(ctx, check, { blocking, passed, uaMismatch }, now),
+      this.store(ctx, check, { blocking, passed, uaMismatch }, floor, now),
     );
 
     if (passed) {
@@ -132,6 +136,7 @@ export class SystemCheckService {
     ctx: CandidateContext,
     check: SystemCheckInput,
     outcome: { blocking: BlockingReason[]; passed: boolean; uaMismatch: boolean | null },
+    floor: Date,
     now: Date,
   ): Promise<void> {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -166,11 +171,6 @@ export class SystemCheckService {
           data: { deviceInfo: next },
         });
         if (written.count !== 1) return false;
-        const consent = await tx.consent.findUnique({
-          where: { sessionId: ctx.sessionId },
-          select: { signedAt: true },
-        });
-        const floor = consent?.signedAt ?? now;
         // New findings only, and each distinct finding once per call.
         const taken = new Set<string>(seen.filter((x): x is string => typeof x === 'string'));
         const fresh = check.findings.filter((_, i) => {

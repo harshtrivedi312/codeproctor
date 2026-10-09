@@ -93,6 +93,7 @@ describe('SystemCheckService store (ADR 0013 section 5.3 fencing; TC-056)', () =
       prisma as never,
       scope as never,
       { enqueueVerifySession: enqueue } as never,
+      { signedAtOf: () => Promise.resolve(null) } as never,
     );
     return { service, createMany, enqueue };
   }
