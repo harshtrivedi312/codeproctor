@@ -101,7 +101,8 @@ export class TestStartService {
     });
     if (session === null) throw sessionNotActive(ctx.status);
     // Idempotent: a repeated or concurrent start returns the running session, never a second one.
-    if (LIVE_STATUSES.includes(session.status)) return this.view(ctx.sessionId, now);
+    if (LIVE_STATUSES.includes(session.status))
+      return this.view(ctx.sessionId, now, { effective: true });
     if (session.status !== 'VERIFIED') throw new SessionStateConflictError(session.status);
 
     const invitation = await this.prisma.client.invitation.findUnique({
@@ -396,15 +397,21 @@ export class TestStartService {
 
   /** GET /candidate/session/test: the layout of a running session, read in the org scope (P-24 interim). */
   layout(ctx: CandidateContext, now: Date = new Date()): Promise<TestStartView> {
-    return this.scope.asOrg(ctx, () => this.view(ctx.sessionId, now, true));
+    return this.scope.asOrg(ctx, () =>
+      this.view(ctx.sessionId, now, { requireRunning: true, effective: true }),
+    );
   }
 
   /** The running session's outline: ids, positions, points and times; no question content. */
   async view(
     sessionId: string,
     now: Date = new Date(),
-    /** The GET route: only a running (IN_PROGRESS or PAUSED) session has a layout to read. */
-    requireRunning = false,
+    options: {
+      /** The GET route: only a running (IN_PROGRESS or PAUSED) session has a layout to read. */
+      requireRunning?: boolean;
+      /** Show the pause-aware effective deadlines (a running session), not the stored ones. */
+      effective?: boolean;
+    } = {},
   ): Promise<TestStartView> {
     const session = await this.prisma.client.session.findUnique({
       where: { id: sessionId },
@@ -421,6 +428,7 @@ export class TestStartService {
     if (session === null || session.startedAt === null || session.deadlineAt === null) {
       throw sessionNotActive(session?.status ?? 'INVITED');
     }
+    const { requireRunning = false, effective = false } = options;
     if (requireRunning && session.status !== 'IN_PROGRESS' && session.status !== 'PAUSED') {
       throw sessionNotActive(session.status);
     }
@@ -446,16 +454,16 @@ export class TestStartService {
     const sectionOfTq = new Map(testQuestions.map((t) => [t.id, t.sectionId]));
     // The GET route shows the EFFECTIVE deadlines: during a PROCTOR pause the stored ones are stale
     // (ADR 0013 CS-4.6, ADR 0002 P-3), so a reload while paused must not show a shorter timer than
-    // the gate and the heartbeat enforce. POST test/start has no pause to account for.
+    // the gate and the heartbeat enforce. a fresh start has no pause to account for, a replay on a running session does.
     let cap = 0;
-    if (requireRunning) {
+    if (effective) {
       const org = await this.prisma.client.organization.findUnique({
         where: { id: session.orgId },
         select: { settings: true },
       });
       cap = proctorPauseCapMs(org?.settings);
     }
-    const sessionDeadline = requireRunning
+    const sessionDeadline = effective
       ? (effectiveSessionDeadline(session, now, cap) ?? session.deadlineAt)
       : session.deadlineAt;
     return {
@@ -468,7 +476,11 @@ export class TestStartService {
         title: titles.find((t) => t.id === s.sectionId)?.title ?? '',
         timeLimitMs: s.timeLimitMs === null ? null : Number(s.timeLimitMs),
         startedAt: s.startedAt,
-        deadlineAt: requireRunning ? effectiveSectionDeadline(s, session, now, cap) : s.deadlineAt,
+        // A closed section keeps its stored deadline: no pause credit is added to it.
+        deadlineAt:
+          effective && s.endedAt === null
+            ? effectiveSectionDeadline(s, session, now, cap)
+            : s.deadlineAt,
         questions: questions
           .filter((q) => sectionOfTq.get(q.testQuestionId) === s.sectionId)
           .map((q) => ({

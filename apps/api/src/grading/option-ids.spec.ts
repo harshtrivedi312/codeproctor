@@ -1,6 +1,7 @@
 import { deriveOptionId, OptionIdService } from './option-ids';
 
 const SECRET = 's'.repeat(48);
+const EXPECTED_VECTOR = 'opt_7npnmgc7i5';
 const service = (secret: string | undefined): OptionIdService =>
   new OptionIdService({ get: () => secret } as never);
 
@@ -21,15 +22,23 @@ describe('Opaque MCQ option ids (ADR 0013 CS-4.6; FR-205, TC-011)', () => {
     expect(deriveOptionId(SECRET, 's1', 'a')).not.toBe(deriveOptionId('t'.repeat(48), 's1', 'a'));
   });
 
-  it('FR-205: mapAll maps every option and a collision fails closed', () => {
+  it('TC-011: a pinned known-answer vector (the derivation cannot drift silently)', () => {
+    expect(deriveOptionId('k'.repeat(32), '00000000-0000-4000-8000-000000000001', 'a')).toBe(
+      EXPECTED_VECTOR,
+    );
+  });
+
+  it('FR-205: mapAll maps every option of a question to distinct ids', () => {
     const map = service(SECRET).mapAll('s1', ['a', 'b', 'c']);
     expect([...map.keys()]).toEqual(['a', 'b', 'c']);
     expect(new Set(map.values()).size).toBe(3);
-    // Forced collision: the same author id twice maps to one candidate id and the sizes differ.
-    expect(() => service(SECRET).mapAll('s1', ['a', 'a'])).not.toThrow();
   });
 
   it('NFR-04: without the secret the candidate portal is unconfigured (503), never a fallback id', () => {
-    expect(() => service(undefined).of('s1', 'a')).toThrow();
+    expect(() => service(undefined).of('s1', 'a')).toThrow(
+      expect.objectContaining({
+        response: expect.objectContaining({ code: 'CANDIDATE_PORTAL_UNCONFIGURED' }),
+      }),
+    );
   });
 });
