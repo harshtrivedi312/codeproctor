@@ -13,9 +13,10 @@ import { mockRoleFromToken } from './auth-handlers';
 import { markTestInvited, mockTestExists, mockTestName } from './test-handlers';
 
 /*
- * WEB-ONLY mock of the invitations and candidate status routes (FR-303..FR-305) [BE-06b]. The API
- * has no invitations module yet: the paths, bodies, limits and error words below are the web's
- * proposal (docs/followups/frontend.md), built from fsd.md, ADR 0002 and ADR 0015. In memory; fake
+ * Mock of the invitations and candidate status routes (FR-303..FR-305). The single invite follows
+ * the real API (invitations.service.ts): 400 for a window in the past, 422 only when the test is
+ * unsatisfiable, `mail` is queued | failed | disabled. The bulk route, the limits and the candidate
+ * timeline are the web's proposal (docs/followups/frontend.md) [BE-06b]. In memory; fake
  * people only. Never logs a row. Status and times only: no scores, flags or verdicts (C-28).
  */
 
@@ -27,6 +28,19 @@ export interface InvitationScenario {
   biometricRefusalEnabled: boolean;
   /** Invitations one organisation may create per hour (the API will have a limit; its size is unknown). */
   limitPerHour: number;
+  /** FR-303: what the API says happened to the email. 'disabled' is what EMAIL_PROVIDER=noop gives. */
+  mail: Schemas['MailOutcome'];
+  /** Emails (lower case) whose mail is 'failed' whatever `mail` says: a mixed bulk upload. */
+  mailFailedEmails: string[];
+  /** The test cannot be given right now: the API answers 422 with errors[] naming slots. */
+  testUnsatisfiable: boolean;
+  /**
+   * Whether the API accepts `accommodations` on an invitation. The real DTO does not today, and the
+   * ValidationPipe is forbidNonWhitelisted, so it answers 400 "property accommodations should not exist".
+   */
+  acceptsAccommodations: boolean;
+  /** The candidate has asked for erasure: the API answers 409 "This candidate cannot be invited." */
+  candidateErased: boolean;
 }
 
 interface MockInvitation {
@@ -48,7 +62,6 @@ interface State {
 }
 
 const TERMINAL: readonly Status[] = ['EXPIRED', 'DECLINED', 'COMPLETED', 'ERASED'];
-const MAX_BULK = 200;
 const MOCK_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/i;
 const DETECTORS = [
   'FACE',
@@ -112,7 +125,15 @@ function seed(): State {
   return {
     seq: 1,
     usedThisHour: 0,
-    scenario: { biometricRefusalEnabled: false, limitPerHour: 1000 },
+    scenario: {
+      biometricRefusalEnabled: false,
+      limitPerHour: 1000,
+      mail: 'queued',
+      mailFailedEmails: [],
+      testUnsatisfiable: false,
+      acceptsAccommodations: false,
+      candidateErased: false,
+    },
     invitations: ids.slice(0, statuses.length).map((candidateId, i) => ({
       id: `inv-${i + 1}`,
       testId: 'test-backend',
@@ -189,16 +210,11 @@ function candidateProblems(raw: unknown, at: string): string[] {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
     return [`${at} must be an object`];
   const c = raw as Record<string, unknown>;
-  const out = unknownKeys(c, ['email', 'name', 'externalRef'], `${at}.`);
+  const out = unknownKeys(c, ['email', 'name'], `${at}.`);
   if (!validEmail(typeof c.email === 'string' ? c.email.trim() : c.email))
     out.push(`${at}.email must be an email`);
   if (typeof c.name !== 'string' || c.name.trim().length < 1 || c.name.trim().length > 200)
     out.push(`${at}.name must be 1 to 200 characters`);
-  if (
-    c.externalRef !== undefined &&
-    (typeof c.externalRef !== 'string' || c.externalRef.length > 200)
-  )
-    out.push(`${at}.externalRef must be at most 200 characters`);
   return out;
 }
 
@@ -279,8 +295,22 @@ function windowProblems(b: Record<string, unknown>): string[] {
     out.push('windowStart may be at most 5 minutes in the past');
   if (out.length === 0 && Date.parse(b.windowEnd as string) <= Date.parse(b.windowStart as string))
     out.push('windowEnd must be after windowStart');
+  // The real API answers a window that ends in the past with a 400 (not a 422).
+  if (out.length === 0 && Date.parse(b.windowEnd as string) <= Date.now())
+    out.push('windowEnd must be in the future');
   return out;
 }
+
+const mailFor = (email: string): Schemas['MailOutcome'] =>
+  state.scenario.mailFailedEmails.includes(email.trim().toLowerCase())
+    ? 'failed'
+    : state.scenario.mail;
+
+/** The real answer when the test cannot be given: detail "Request validation failed", errors[] by slot. */
+const unsatisfiable = () =>
+  problem(422, 'x', [
+    'sections[0].questions[0].randomRule matches 0 question(s) not already used; 1 needed',
+  ]);
 
 const openFor = (testId: string, candidateId: string): boolean =>
   state.invitations.some(
@@ -331,15 +361,17 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
         ...unknownKeys(b, ['candidate', 'windowStart', 'windowEnd', 'accommodations']),
         ...candidateProblems(b.candidate, 'candidate'),
         ...windowProblems(b),
-        ...(b.accommodations === undefined ? [] : accommodationProblems(b.accommodations)),
+        ...(b.accommodations === undefined
+          ? []
+          : state.scenario.acceptsAccommodations
+            ? accommodationProblems(b.accommodations)
+            : ['property accommodations should not exist']),
         ...(MOCK_ID.test(String(params.testId)) ? [] : ['testId must be a UUID']),
       ];
       if (dto.length) return problem(400, 'x', dto);
       await wait();
       const testId = String(params.testId);
       if (!mockTestExists(testId)) return problem(404, 'Test not found.');
-      if (Date.parse(b.windowEnd as string) <= Date.now())
-        return problem(422, 'The window has already closed.');
       const acc = (b.accommodations as Schemas['InvitationAccommodations'] | undefined) ?? null;
       if (
         acc?.identityCheckWaiver?.reasonCode === 'REFUSED_BIOMETRIC_PROCESSING' &&
@@ -354,8 +386,9 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
       }
       const cand = b.candidate as { email: string; name: string };
       const existing = mockCandidateIdByEmail(cand.email.trim());
+      if (state.scenario.candidateErased) return problem(409, 'This candidate cannot be invited.');
       if (existing && openFor(testId, existing))
-        return problem(409, 'This candidate already has an open invitation to this test.');
+        return problem(409, 'This candidate already has an active invitation for this test.');
       if (state.usedThisHour + 1 > state.scenario.limitPerHour) {
         return problem(
           429,
@@ -365,6 +398,7 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
           { 'Retry-After': '1800' },
         );
       }
+      if (state.scenario.testUnsatisfiable) return unsatisfiable();
       state.usedThisHour += 1;
       const inv = create(testId, cand, b.windowStart as string, b.windowEnd as string, acc);
       return HttpResponse.json(
@@ -375,57 +409,11 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
           status: inv.status,
           windowStart: inv.windowStart,
           windowEnd: inv.windowEnd,
+          createdAt: inv.createdAt,
+          mail: mailFor(cand.email),
         },
         { status: 201 },
       );
-    }),
-
-    http.post(`${tests}/:testId/invitations/bulk`, async ({ request, params }) => {
-      const denied = allowed(request);
-      if (denied) return denied;
-      const b = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-      const dto = [...unknownKeys(b, ['rows', 'windowStart', 'windowEnd']), ...windowProblems(b)];
-      if (!Array.isArray(b.rows) || b.rows.length < 1 || b.rows.length > MAX_BULK)
-        dto.push(`rows must contain 1 to ${MAX_BULK} items`);
-      else (b.rows as unknown[]).forEach((r, i) => dto.push(...candidateProblems(r, `rows.${i}`)));
-      if (dto.length) return problem(400, 'x', dto);
-      await wait();
-      const testId = String(params.testId);
-      if (!mockTestExists(testId)) return problem(404, 'Test not found.');
-      if (Date.parse(b.windowEnd as string) <= Date.now())
-        return problem(422, 'The window has already closed.');
-      const rows = b.rows as { email: string; name: string }[];
-      if (state.usedThisHour + rows.length > state.scenario.limitPerHour) {
-        return problem(
-          429,
-          'Too many invitations this hour. Nothing was invited. Try again later.',
-          undefined,
-          undefined,
-          { 'Retry-After': '1800' },
-        );
-      }
-      const errors: { row: number; message: string }[] = [];
-      const seen = new Set<string>();
-      let created = 0;
-      rows.forEach((r, i) => {
-        const key = r.email.trim().toLowerCase();
-        const existing = mockCandidateIdByEmail(r.email.trim());
-        if (seen.has(key))
-          return void errors.push({
-            row: i + 1,
-            message: 'The same email appears twice in this upload.',
-          });
-        seen.add(key);
-        if (existing && openFor(testId, existing))
-          return void errors.push({
-            row: i + 1,
-            message: 'This candidate already has an open invitation to this test.',
-          });
-        create(testId, r, b.windowStart as string, b.windowEnd as string, null);
-        created += 1;
-      });
-      state.usedThisHour += created;
-      return HttpResponse.json({ created, errors });
     }),
 
     http.get(
