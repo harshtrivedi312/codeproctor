@@ -13,6 +13,7 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import type { MailPort } from '../mail/mail.port';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import type { TokenService } from '../common/auth/token.service';
+import { awaitSafeWindow } from '../common/testing/window-boundary';
 
 const API = '/api/v1';
 const PASSWORD = 'Correct-Horse-9';
@@ -27,6 +28,11 @@ function stable(res: request.Response): Record<string, unknown> {
 }
 
 describe('Re-issue a pending invite (DL-23, FR-103, FR-105, TC-004, TC-008)', () => {
+  // The invite limit is a fixed window keyed by the clock hour: never straddle a boundary.
+  beforeEach(async () => {
+    await awaitSafeWindow();
+  }, 60_000);
+
   let infra: TestInfra;
   let app: INestApplication<App>;
   let owner: PrismaClient;
