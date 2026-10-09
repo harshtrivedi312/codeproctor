@@ -32,7 +32,14 @@ from worker.face.modelfile import ModelLoadError
 from worker.face.types import FaceDecision, MatchResult, ReviewReason
 from worker.modellock import LoadedLock, ModelCheck, ModelLockError, check_models, load_lock
 from worker.problem import install_problem_handlers, problem
-from worker.signing import KeyConfigError, SigningMiddleware, parse_keys
+from worker.signing import (
+    LEGACY_UNSIGNED_PREFIXES,
+    LEGACY_UNSIGNED_ROUTES,
+    UNSIGNED_ROUTES,
+    KeyConfigError,
+    SigningMiddleware,
+    parse_keys,
+)
 
 log = logging.getLogger(__name__)
 FACE_CONCURRENCY: Final = 4
@@ -455,4 +462,11 @@ def install_face_routes(
         ]
     install_problem_handlers(app)
     app.include_router(router)
-    app.add_middleware(SigningMiddleware, keys=keys or {}, docs_exempt=docs_local)
+    app.add_middleware(
+        SigningMiddleware,
+        keys=keys or {},
+        docs_exempt=docs_local,
+        # TEMPORARY until BE-12 (Integrity A) moves these routes under signed /v1/analyze/*.
+        unsigned_routes=UNSIGNED_ROUTES | LEGACY_UNSIGNED_ROUTES,
+        unsigned_prefixes=LEGACY_UNSIGNED_PREFIXES,
+    )
