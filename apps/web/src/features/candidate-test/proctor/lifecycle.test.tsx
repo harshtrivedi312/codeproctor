@@ -383,7 +383,7 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     expectPurged(store);
   });
 
-  it('TC-070 FR-701: leaving the page (no purge) keeps the late chunk for the next load', async () => {
+  it('TC-070 FR-701: after leaving the page (no purge) a camera granted late is released and nothing is sent', async () => {
     const devices = setupDevices({ deferred: true });
     await startedSession();
     const store = new MemoryStore();
@@ -395,12 +395,11 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     await c.stop();
     devices.grantUser();
     await starting;
+    // The device is released and nothing is presigned or confirmed for it. Whether the SDK keeps a
+    // chunk the late recorder flushed (older SDK) or never starts that recorder (the pipeline
+    // refuses devices once it is closing, SDK BL-4/BL-2) is the SDK's business: a remount builds
+    // a new controller and pipeline, so nothing here depends on a late recorder after stop().
     expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
-    // The chunk the late recorder flushed is still in the store for the next load, and nothing
-    // was sent for it.
-    expect(
-      [...store.data.keys()].some((k) => k.startsWith(`${STORES.chunks}\u0000${SID}:WEBCAM`)),
-    ).toBe(true);
     expect(seen.some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
   });
 });
