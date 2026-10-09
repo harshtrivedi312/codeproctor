@@ -24,7 +24,7 @@ import type { ExecLanguage } from '../judge0/language-map';
 import { mcqAnswerSpecSchema } from '../questions/answer-spec';
 import { isStorableText } from '../questions/text-rules';
 import { loadCases } from '../grading/test-data';
-import { candidateOptionId } from '../grading/option-ids';
+import { OptionIdService } from '../grading/option-ids';
 import { mcqAnswerSchema, shortAnswerAnswerSchema } from '../grading/answer-shapes';
 import { CLOSE_GRACE_MS, GradingQueue } from '../grading/grading-queue';
 import { QuestionGateService, SectionNotOpenError } from './question-gate.service';
@@ -65,6 +65,7 @@ export class AnswersService {
     private readonly limiter: SessionRateLimiter,
     private readonly submitLimiter: SubmitLimiter,
     private readonly queue: GradingQueue,
+    private readonly optionIds: OptionIdService,
   ) {}
 
   /**
@@ -249,7 +250,7 @@ export class AnswersService {
       const spec = mcqAnswerSpecSchema.safeParse(question.answerSpec);
       const parsed = mcqAnswerSchema.safeParse(raw);
       if (!spec.success || !parsed.success) throw bad('The answer is not valid for this question.');
-      const known = new Set(spec.data.options.map((o) => candidateOptionId(ctx.sessionId, o.id)));
+      const known = new Set(spec.data.options.map((o) => this.optionIds.of(ctx.sessionId, o.id)));
       const ids = parsed.data.optionIds;
       if (new Set(ids).size !== ids.length || !ids.every((id) => known.has(id))) {
         throw bad('The answer is not valid for this question.');
