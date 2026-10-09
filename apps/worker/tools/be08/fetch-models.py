@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fetch the pinned face models into ~/.cache/codeproctor/models and verify them (C-10, C-22).
 
-    python3 apps/worker/tools/be08/fetch-models.py              # report what is present, download nothing
-    python3 apps/worker/tools/be08/fetch-models.py --download   # fetch what is missing
+    python3 apps/worker/tools/be08/fetch-models.py             # report only, download nothing
+    python3 apps/worker/tools/be08/fetch-models.py --download  # fetch what is missing
 
 Only files listed in apps/worker/models.lock.json with a component of FACE_EMBED or FACE_LANDMARK
 are ever considered. Every file is checked against the lock's SHA-256 and byte size before it is
@@ -45,9 +45,7 @@ def sha256(path: Path) -> str:
 
 def ok(path: Path, entry: dict[str, object]) -> bool:
     return (
-        path.is_file()
-        and path.stat().st_size == entry["bytes"]
-        and sha256(path) == entry["sha256"]
+        path.is_file() and path.stat().st_size == entry["bytes"] and sha256(path) == entry["sha256"]
     )
 
 
@@ -58,7 +56,8 @@ def main() -> int:
     ap.add_argument("--dir", default=os.path.expanduser("~/.cache/codeproctor/models"))
     args = ap.parse_args()
     root = Path(args.dir)
-    entries = [e for e in json.loads(LOCK.read_text())["files"] if e["component"] in FACE_COMPONENTS]
+    files = json.loads(LOCK.read_text())["files"]
+    entries = [e for e in files if e["component"] in FACE_COMPONENTS]
     failed = False
     for e in entries:
         name = e["name"]
@@ -66,7 +65,8 @@ def main() -> int:
         if ok(dest, e):
             print(f"ok       {name}")
             continue
-        flat = root / Path(name).name  # the first download went in flat; the worker wants the lock's layout
+        # The first download went in flat; the worker wants the lock's layout.
+        flat = root / Path(name).name
         if flat != dest and ok(flat, e):
             dest.parent.mkdir(parents=True, exist_ok=True)
             os.link(flat, dest)  # a hard link keeps one copy; a symlink would be refused
@@ -78,7 +78,10 @@ def main() -> int:
             failed = True
             continue
         if e["status"] != "approved" and not args.accept_unverified_licence:
-            print(f"REFUSED  {name}: licence status is {e['status']!r} ({e['flag']}); see {e['licenceUrl']}")
+            print(
+                f"REFUSED  {name}: licence status is {e['status']!r} ({e['flag']}); "
+                f"see {e['licenceUrl']}"
+            )
             failed = True
             continue
         url = SOURCES.get(name)
