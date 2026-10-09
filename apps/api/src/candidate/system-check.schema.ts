@@ -7,12 +7,15 @@ import { z } from 'zod';
 export const CAPABILITY_STATUSES = ['SUPPORTED', 'UNSUPPORTED', 'DENIED', 'UNVERIFIABLE'] as const;
 export const SYSTEM_CHECK_FINDING_TYPES = ['MULTI_MONITOR', 'VIRTUAL_CAMERA'] as const;
 
+// A NUL character makes Postgres jsonb fail (22P05): refuse it as a 400 instead of a 500.
+const noNul = (value: unknown): boolean => !JSON.stringify(value).includes('\\u0000');
+
 const capabilitySchema = z
   .object({
     id: z.string().regex(/^[a-z][a-z0-9-]{1,47}$/),
     status: z.enum(CAPABILITY_STATUSES),
     // Untrusted text: rendered as plain text only (ADR 0013 section 5.8).
-    detail: z.string().max(128).optional(),
+    detail: z.string().max(128).refine(noNul).optional(),
   })
   .strict();
 
@@ -23,17 +26,23 @@ const findingSchema = z
     payload: z.record(z.string(), z.unknown()),
   })
   .strict()
-  .superRefine((finding, ctx) => {
-    if (!EVENT_PAYLOAD_SCHEMAS[finding.type].safeParse(finding.payload).success) {
+  // The stored payload is the PARSED, STRIPPED value of the shared schema (ADR 0010): unknown keys
+  // are dropped, so a candidate cannot put arbitrary JSON in an evidence row, and the dedupe
+  // fingerprint is computed from the same canonical value.
+  .transform((finding, ctx) => {
+    const parsed = EVENT_PAYLOAD_SCHEMAS[finding.type].safeParse(finding.payload);
+    if (!parsed.success || !noNul(parsed.data)) {
       ctx.addIssue({ code: 'custom', path: ['payload'], message: 'invalid payload' });
+      return z.NEVER;
     }
+    return { type: finding.type, occurredAt: finding.occurredAt, payload: parsed.data };
   });
 
 export const systemCheckBodySchema = z
   .object({
     browser: z
       .object({
-        brand: z.string().trim().min(1).max(64),
+        brand: z.string().trim().min(1).max(64).refine(noNul),
         majorVersion: z.int().min(0).max(999),
       })
       .strict(),
@@ -49,7 +58,12 @@ export const systemCheckBodySchema = z
       })
       .strict(),
     findings: z.array(findingSchema).max(4),
-    capabilities: z.array(capabilitySchema).max(32),
+    capabilities: z
+      .array(capabilitySchema)
+      .max(32)
+      .refine((list) => new Set(list.map((c) => c.id)).size === list.length, {
+        message: 'duplicate capability id',
+      }),
   })
   .strict();
 

@@ -5,6 +5,8 @@
 // Backend A's ProblemFilter turns these into 503 with Retry-After so the client retries; the code
 // here only has to give back what it took BEFORE the failing statement and rethrow the error as it
 // is. FU-BEB-117: when the session-job branch merges, replace this with session/busy-lock.ts.
+import { SessionLockRetryError } from '../database/errors';
+
 const BUSY = new Set(['55P03', '40P01', 'P2034', 'P2028']);
 
 type Probe = {
@@ -17,6 +19,7 @@ type Probe = {
 const busy = (value: unknown): boolean => typeof value === 'string' && BUSY.has(value);
 
 export function isBusyLockError(error: unknown): boolean {
+  if (error instanceof SessionLockRetryError) return true;
   let current: unknown = error;
   for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth++) {
     const e = current as Probe;

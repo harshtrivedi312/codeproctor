@@ -39,6 +39,7 @@ import {
   SignConsentDto,
   TestStartedDto,
 } from './dto/candidate.dto';
+import { busyLockToProblem } from '../session/busy-lock';
 import { SessionRateLimiter } from './session-rate-limiter';
 import { systemCheckBodySchema } from './system-check.schema';
 import type { SystemCheckResult } from './system-check.schema';
@@ -165,11 +166,22 @@ export class CandidateSessionController {
     const parsed = systemCheckBodySchema.safeParse(raw);
     // Fixed message: the rejected value is never echoed.
     if (!parsed.success) throw new BadRequestException('The system check is malformed.');
-    await this.limiter.hit('system-check-total', ctx.sessionId, 50, 86_400);
     const secChUa = req.headers['sec-ch-ua'];
-    return this.limiter.guarded('system-check', ctx.sessionId, 10, 60, () =>
-      this.systemCheck.submit(ctx, parsed.data, typeof secChUa === 'string' ? secChUa : undefined),
-    );
+    try {
+      // The per-minute limit is checked first, then the per-session total: a refused or busy
+      // request gives both slots back (DL-37), so a retry loop cannot use up the lifetime budget.
+      return await this.limiter.guarded('system-check', ctx.sessionId, 10, 60, () =>
+        this.limiter.guarded('system-check-total', ctx.sessionId, 50, 86_400, () =>
+          this.systemCheck.submit(
+            ctx,
+            parsed.data,
+            typeof secChUa === 'string' ? secChUa : undefined,
+          ),
+        ),
+      );
+    } catch (e) {
+      throw busyLockToProblem(e) ?? e;
+    }
   }
 
   @CandidateRoute('candidate_session:start')

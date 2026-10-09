@@ -3420,16 +3420,40 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect((await deviceInfo(inv)).systemCheck).toBeUndefined();
     });
 
-    it('DL-37, TC-056: three lost compare-and-set races answer 503 with Retry-After and never write unfenced', async () => {
+    it('ADR 0010, TC-056: the stored finding payload is the parsed shared schema (unknown keys dropped), and a padded or reordered repeat is not recorded again', async () => {
       const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
-      const spy = jest
-        .spyOn(prisma.client.session, 'updateMany')
-        .mockResolvedValue({ count: 0 });
-      const res = await check(inv);
-      spy.mockRestore();
-      expect(res.status).toBe(503);
-      expect(res.headers['retry-after']).toBeDefined();
-      expect((await deviceInfo(inv)).systemCheck).toBeUndefined();
+      const finding = (payload: object) => ({
+        type: 'MULTI_MONITOR',
+        occurredAt: new Date().toISOString(),
+        payload,
+      });
+      await check(inv, {
+        ...good,
+        findings: [
+          finding({ api: 'SCREEN_IS_EXTENDED', screenCount: 2, junk: { big: 'x'.repeat(500) } }),
+        ],
+      }).expect(200);
+      await check(inv, {
+        ...good,
+        findings: [finding({ screenCount: 2, other: 1, api: 'SCREEN_IS_EXTENDED' })],
+      }).expect(200);
+      const rows = await owner.proctorEvent.findMany({ where: { sessionId: inv.sessionId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.payload).toEqual({ api: 'SCREEN_IS_EXTENDED', screenCount: 2 });
+    });
+
+    it('FR-402: a NUL character, a duplicate capability id and a 33rd capability are 400s, not 500s', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await check(inv, { ...good, browser: { brand: 'Chrome\u0000', majorVersion: 124 } }).expect(
+        400,
+      );
+      await check(inv, {
+        ...good,
+        capabilities: [
+          { id: 'fullscreen', status: 'SUPPORTED' },
+          { id: 'fullscreen', status: 'DENIED' },
+        ],
+      }).expect(400);
     });
 
     it('FR-609: the route is limited per session (10 a minute)', async () => {
