@@ -227,6 +227,8 @@ export class ProctorSession {
   /** Until this time beats carry no body (the server refused one). */
   private bodylessUntil = 0;
   private lastTokenExpiry = 0;
+  /** Bumped when the app re-authenticated (resume, setKey): a renewal sent before that is stale. */
+  private tokenGen = 0;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
   private config: ProctorSessionConfig | null = null;
@@ -461,6 +463,7 @@ export class ProctorSession {
         const { body, commit } = bodyless
           ? { body: undefined, commit: () => undefined }
           : this.beatBody();
+        const tokenGen = this.tokenGen;
         const r = await config.transport.heartbeat(body);
         // An answer that arrives after stop(), the end of the session or a restart belongs to a run
         // that is over: nothing is committed or delivered (a late token could overwrite a fresh one).
@@ -478,7 +481,7 @@ export class ProctorSession {
         // (body refused, then a body-less retry) and answer after the Heartbeat stopped waiting. A
         // late renewed token of a LIVE run must still reach the app.
         if (typeof r === 'object' && 'ok' in r) {
-          this.deliverBeat(r, config, body !== undefined && Object.keys(body).length > 0);
+          this.deliverBeat(r, config, body !== undefined && Object.keys(body).length > 0, tokenGen);
         }
         return r;
       },
@@ -739,6 +742,7 @@ export class ProctorSession {
     r: Extract<HeartbeatResult, { ok: true }>,
     config: ProctorSessionConfig,
     carriedBody: boolean,
+    tokenGen: number,
   ): void {
     if (r.bodyRejected) {
       this.bodylessUntil = Date.now() + FLAG_RESEND_MS;
@@ -762,8 +766,10 @@ export class ProctorSession {
       // newer token with an older one.
       if (r.renewal) {
         const exp = Date.parse(r.renewal.sessionTokenExpiresAt);
-        if (Number.isNaN(exp) || exp > this.lastTokenExpiry) {
-          if (!Number.isNaN(exp)) this.lastTokenExpiry = exp;
+        // Fail closed: a renewal signed before the app re-authenticated, one that cannot be
+        // ordered (unparseable expiry) and one that is not newer than the last are all dropped.
+        if (tokenGen === this.tokenGen && !Number.isNaN(exp) && exp > this.lastTokenExpiry) {
+          this.lastTokenExpiry = exp;
           config.onToken?.(r.renewal);
         }
       }
@@ -846,6 +852,7 @@ export class ProctorSession {
     this.currentKey = key;
     this.keyGen++;
     this.reauthSignalled = false; // a fresh key comes with a fresh token (OTP resume)
+    this.tokenGen++;
     this.heartbeat?.resume();
     if (epoch !== undefined) await this.persistKey(key, epoch);
     if (stale()) return;
@@ -870,6 +877,7 @@ export class ProctorSession {
   /** The app refreshed the candidate token after `onReauthRequired`: send again. */
   resume(): void {
     this.reauthSignalled = false;
+    this.tokenGen++; // the app has a fresh token now: renewals sent before are stale
     this.heartbeat?.resume();
     this.queue?.resume();
     this.keystrokeQueue?.resume();

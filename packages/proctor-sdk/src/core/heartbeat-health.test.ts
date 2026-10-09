@@ -793,4 +793,33 @@ describe('late answers never reach a stopped, ended or restarted run (FR-609, TC
     await vi.waitFor(() => expect(seen).toEqual(['UNVERIFIABLE', 'SUPPORTED']), { timeout: 3000 });
     await s.stop();
   });
+
+  it('a renewal sent before the app re-authenticated (resume) is stale; an unparseable expiry is dropped', async () => {
+    const gate = late();
+    const tokens: string[] = [];
+    let beats = 0;
+    const r = rig({ heartbeatIntervalMs: 200, onToken: (t) => tokens.push(t.sessionToken) });
+    r.cfg.transport.heartbeat = () => {
+      beats++;
+      if (beats === 1) return gate.promise;
+      return Promise.resolve({
+        ok: true as const,
+        renewal: { sessionToken: 'bad-expiry', sessionTokenExpiresAt: 'not a date' },
+      });
+    };
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(beats).toBe(1));
+    s.resume(); // the app refreshed its token while the beat was in flight
+    gate.resolve({
+      ok: true,
+      renewal: { sessionToken: TOKEN, sessionTokenExpiresAt: '2026-01-01T00:15:00Z' },
+    });
+    await new Promise((x) => setTimeout(x, 30));
+    expect(tokens).toEqual([]);
+    await vi.waitFor(() => expect(beats).toBeGreaterThan(1), { timeout: 3000 }); // a later beat
+    await new Promise((x) => setTimeout(x, 30));
+    expect(tokens).toEqual([]); // 'not a date' fails closed
+    await s.stop();
+  });
 });

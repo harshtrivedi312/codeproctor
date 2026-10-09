@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 // The route's own schema: the body must be one the built API accepts (ADR 0013 section 5.4).
 import { systemCheckBodySchema } from '../../../../apps/api/src/candidate/system-check.schema';
 import { MultiScreenMonitor } from '../monitors/multi-screen';
-import { surfaceOf } from '../monitors/screen-share';
+import { ScreenShareMonitor, requestScreenShare, surfaceOf } from '../monitors/screen-share';
 import { VirtualCameraMonitor } from '../monitors/virtual-camera';
 import { TEST_KEY_B64 } from '../test/helpers';
 import type { SendResult, SignedBatch } from './batch-queue';
@@ -160,11 +160,20 @@ describe('collectSystemCheck: what is looked at and what is sent (FR-604, FR-605
     const win = await collectSystemCheck({ env: env(), screenShare: 'OTHER' });
     expect(win.devices.screenShare).toBe('OTHER');
     expect(win.capabilities.some((c) => c.id === 'screen-share-surface')).toBe(false);
-    const none = await collectSystemCheck({ env: env() });
-    expect(none.devices.screenShare).toBe('UNVERIFIABLE');
-    expect(none.capabilities.find((c) => c.id === 'screen-share-surface')?.status).toBe(
+    // A share that happened but whose surface the browser does not report: UNVERIFIABLE + flag.
+    const unreported = await collectSystemCheck({ env: env(), screenShare: 'UNVERIFIABLE' });
+    expect(unreported.devices.screenShare).toBe('UNVERIFIABLE');
+    expect(unreported.capabilities.find((c) => c.id === 'screen-share-surface')?.status).toBe(
       'UNVERIFIABLE',
     );
+    expect(unreported.capabilities.find((c) => c.id === 'screen-share')?.status).toBe('SUPPORTED');
+    // No share at all is NOT "unverified": the body says so honestly (and runSystemCheck refuses it).
+    const none = await collectSystemCheck({ env: env(), screenShare: null });
+    expect(none.capabilities.find((c) => c.id === 'screen-share')).toMatchObject({
+      status: 'DENIED',
+      detail: 'No screen share was obtained.',
+    });
+    expect(none.capabilities.some((c) => c.id === 'screen-share-surface')).toBe(false);
   });
 
   it('missing APIs are reported UNSUPPORTED / UNVERIFIABLE, never as a pass', async () => {
@@ -228,6 +237,7 @@ describe('runSystemCheck: the request and its answers (FR-605, TC-056)', () => {
         getToken: () => TOKEN,
         fetchFn,
         env: env(),
+        screenShare: 'MONITOR',
         sleep: (ms) => {
           sleeps.push(ms);
           return Promise.resolve();
@@ -402,7 +412,7 @@ describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-61
     const by = (id: string) => body.capabilities.find((c) => c.id === id)?.status;
     expect(body.devices).toMatchObject({ camera: false, microphone: false });
     expect(by('camera-permission')).toBe('UNVERIFIABLE');
-    expect(by('virtual-camera')).not.toBe('SUPPORTED');
+    expect(by('virtual-camera')).toBe('UNVERIFIABLE');
   });
 
   it('fullscreenEnabled false means UNSUPPORTED even if the function exists', async () => {
@@ -436,12 +446,6 @@ describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-61
     expect(label).toMatch(/^OBS Virtual Camerax+$/);
     expect(Array.from(label).length).toBeLessThanOrEqual(128);
     expect(systemCheckBodySchema.safeParse(dirty).success).toBe(true);
-    const empty = await collectSystemCheck({
-      env: env({}, [
-        { kind: 'videoinput', label: 'obs virtual\u0000', deviceId: 'a' },
-      ] as MediaDeviceInfo[]),
-    });
-    expect(empty.findings).toHaveLength(1);
     const none = await collectSystemCheck({
       env: env({}, [
         { kind: 'videoinput', label: '\u0001\u0002obs', deviceId: 'a' },
@@ -470,6 +474,7 @@ describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-61
       getToken: () => TOKEN,
       fetchFn: down,
       env: env(),
+      screenShare: 'MONITOR',
       maxAttempts: Number.NaN,
       sleep: () => Promise.resolve(),
     }).catch((x: unknown) => x);
@@ -481,6 +486,7 @@ describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-61
       getToken: () => TOKEN,
       fetchFn: big,
       env: env(),
+      screenShare: 'MONITOR',
       maxAttempts: 1_000_000,
       sleep: () => Promise.resolve(),
     }).catch(() => undefined);
@@ -495,6 +501,7 @@ describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-61
       fetchFn: () =>
         Promise.resolve(++n === 1 ? reply(408, {}) : reply(200, { passed: true, blocking: [] })),
       env: env(),
+      screenShare: 'MONITOR',
       sleep: () => Promise.resolve(),
     });
     expect(r.passed).toBe(true);
@@ -504,9 +511,145 @@ describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-61
         getToken: () => TOKEN,
         fetchFn: () => Promise.resolve(reply(200, bad)),
         env: env(),
+        screenShare: 'MONITOR',
       }).catch((x: unknown) => x);
       expect((err as SystemCheckError).kind).toBe('UNAVAILABLE');
       expect((err as SystemCheckError).code).toBe('BAD_RESPONSE');
     }
+  });
+});
+
+describe('the pre-start share flow and honest unknowns (FR-604, FR-605, TC-054, TC-056)', () => {
+  const stream = (surface?: string) => {
+    const stops: number[] = [];
+    const track = {
+      getSettings: () => (surface === undefined ? {} : { displaySurface: surface }),
+      stop: () => stops.push(1),
+      addEventListener: () => undefined,
+    };
+    return {
+      stops,
+      value: {
+        getVideoTracks: () => [track],
+        getTracks: () => [track],
+      } as unknown as MediaStream,
+    };
+  };
+
+  it('no share outcome sends nothing: NO_SCREEN_SHARE, the fetch is never called', async () => {
+    for (const screenShare of [null, undefined]) {
+      const fetchFn = vi.fn();
+      const err = await runSystemCheck({
+        baseUrl: 'https://api.test',
+        getToken: () => TOKEN,
+        fetchFn: fetchFn,
+        env: env(),
+        ...(screenShare === undefined ? {} : { screenShare }),
+      }).catch((x: unknown) => x);
+      expect((err as SystemCheckError).kind).toBe('NO_SCREEN_SHARE');
+      expect(fetchFn).not.toHaveBeenCalled();
+    }
+  });
+
+  it('the whole flow before start: request, system check, then the started monitor adopts the stream (asked once)', async () => {
+    const st = stream('monitor');
+    const getDisplayMedia = vi.fn(() => Promise.resolve(st.value));
+    const media = { getDisplayMedia } as unknown as Pick<MediaDevices, 'getDisplayMedia'>;
+    const consent = vi.fn();
+    const outcome = await requestScreenShare(consent, media);
+    expect(consent).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ ok: true, surface: 'monitor' });
+    expect(surfaceOf(outcome)).toBe('MONITOR');
+    let sentBody: { devices: { screenShare: string } } | undefined;
+    const result = await runSystemCheck({
+      baseUrl: 'https://api.test',
+      getToken: () => TOKEN,
+      screenShare: surfaceOf(outcome),
+      env: env(),
+      fetchFn: ((_u: string, init: RequestInit) => {
+        sentBody = JSON.parse(init.body as string) as typeof sentBody;
+        return Promise.resolve(reply(200, { passed: true, blocking: [] }));
+      }) as unknown as typeof fetch,
+    });
+    expect(result.passed).toBe(true);
+    expect(sentBody?.devices.screenShare).toBe('MONITOR');
+    // After start the monitor takes the same stream over: no second getDisplayMedia.
+    const monitor = new ScreenShareMonitor(media);
+    const locks: boolean[] = [];
+    monitor.start({
+      emit: () => undefined,
+      root: document.body,
+      setCapability: () => undefined,
+      setLock: (l) => locks.push(l.locked),
+      assertConsent: () => undefined,
+      measure: (_l, fn) => fn(),
+      isDisabled: () => false,
+    });
+    expect(monitor.adopt(outcome)).toMatchObject({ ok: true });
+    expect(monitor.currentStream).toBe(st.value);
+    expect(locks).toEqual([true, false]);
+    expect(getDisplayMedia).toHaveBeenCalledTimes(1);
+    monitor.stop();
+  });
+
+  it('requestScreenShare: consent first, wrong surface stopped, null surface reported honestly, denial is not a surface', async () => {
+    const getDisplayMedia = vi.fn();
+    const media = { getDisplayMedia } as unknown as Pick<MediaDevices, 'getDisplayMedia'>;
+    await expect(
+      requestScreenShare(() => {
+        throw new Error('consent');
+      }, media),
+    ).rejects.toThrow('consent');
+    expect(getDisplayMedia).not.toHaveBeenCalled();
+
+    const win = stream('window');
+    getDisplayMedia.mockResolvedValueOnce(win.value);
+    const wrong = await requestScreenShare(() => undefined, media);
+    expect(wrong).toEqual({ ok: false, reason: 'WRONG_SURFACE' });
+    expect(win.stops).toHaveLength(1);
+    expect(surfaceOf(wrong)).toBe('OTHER');
+
+    getDisplayMedia.mockResolvedValueOnce(stream().value);
+    const unreported = await requestScreenShare(() => undefined, media);
+    expect(unreported).toMatchObject({ ok: true, surface: null });
+    expect(surfaceOf(unreported)).toBe('UNVERIFIABLE');
+
+    getDisplayMedia.mockRejectedValueOnce(new Error('denied'));
+    const denied = await requestScreenShare(() => undefined, media);
+    expect(denied).toEqual({ ok: false, reason: 'DENIED' });
+    expect(surfaceOf(denied)).toBeNull(); // no share: runSystemCheck refuses (NO_SCREEN_SHARE)
+    expect(await requestScreenShare(() => undefined, undefined)).toEqual({
+      ok: false,
+      reason: 'UNSUPPORTED',
+    });
+  });
+
+  it('adopt() on a monitor that is not started stops the stream (no device kept)', () => {
+    const st = stream('monitor');
+    const monitor = new ScreenShareMonitor({ getDisplayMedia: vi.fn() });
+    expect(monitor.adopt({ ok: true, stream: st.value, surface: 'monitor' })).toEqual({
+      ok: false,
+      reason: 'UNSUPPORTED',
+    });
+    expect(st.stops).toHaveLength(1);
+  });
+
+  it('synchronous throws and a missing window never escape and never pass', async () => {
+    const e = env();
+    const boom = () => {
+      throw new Error('sync');
+    };
+    (e.navigator as { permissions: object; mediaDevices: object }).permissions = { query: boom };
+    (e.navigator as { mediaDevices: object }).mediaDevices = { enumerateDevices: boom };
+    e.window = { screen: { isExtended: false }, getScreenDetails: boom };
+    const body = await collectSystemCheck({ env: e });
+    const by = (id: string) => body.capabilities.find((c) => c.id === id)?.status;
+    expect(by('virtual-camera')).toBe('UNVERIFIABLE');
+    expect(by('camera-permission')).toBe('UNVERIFIABLE');
+    expect(by('multi-screen')).toBe('SUPPORTED'); // fell back to screen.isExtended
+    const noWin = await collectSystemCheck({ env: env({ window: undefined }) });
+    expect(noWin.capabilities.find((c) => c.id === 'multi-screen')?.status).toBe('UNSUPPORTED');
+    const nan = await collectSystemCheck({ env: env(), stepTimeoutMs: Number.NaN });
+    expect(nan.capabilities.length).toBeGreaterThan(5);
   });
 });

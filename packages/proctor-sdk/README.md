@@ -47,14 +47,23 @@ pipeline.seedCounters(counters?.media ?? {}); // media streams continue at max(l
 ## System check before the start (ADR 0013 section 5.4; FR-604, FR-605, FR-610)
 
 ```ts
-const outcome = await screenShare.request(); // the app asks, on a user gesture
+// 1. Before the start (no session, no key yet), on a user gesture:
+const outcome = await requestScreenShare(() => assertConsent()); // asks for the whole screen once
+// 2. The system check. A missing share is NOT "unverified": surfaceOf() gives null and
+//    runSystemCheck throws SystemCheckError('NO_SCREEN_SHARE') without sending anything.
 const { passed, blocking } = await runSystemCheck({
   baseUrl,
   getToken: () => token,
-  // MONITOR, OTHER, UNVERIFIABLE (the browser does not report the surface) or null (no share)
+  // MONITOR, OTHER (a window or tab: the gate blocks), UNVERIFIABLE (shared, but the browser does
+  // not report the surface) or null (no share obtained)
   screenShare: surfaceOf(outcome),
 });
+// 3. After the session started, hand the SAME stream to the monitor: the candidate is not asked twice.
+screenShareMonitor.adopt(outcome);
 ```
+
+If the app keeps its own pre-check share (as the precheck step does), it passes its own enum
+(`MONITOR`, `OTHER`, `UNVERIFIABLE`) and keeps the stream for `adopt()` the same way.
 
 - A pure function: it only looks (no camera, microphone or screen prompt; `getScreenDetails()` is used only when the window-management permission is already granted, otherwise `screen.isExtended`; each browser step is cut after 3 s and reported UNVERIFIABLE) and posts `POST /candidate/session/system-check` with the candidate token. No key exists yet, so there is no HMAC. `collectSystemCheck()` builds the same body without a request for the app's own pre-flight screen.
 - Body: browser brand and major version, network downlink/rtt when the browser reports them, `devices` as booleans plus the screen-share surface enum, MULTI_MONITOR and VIRTUAL_CAMERA findings, and capability flags (`multi-screen`, `virtual-camera`, `camera-permission`, `microphone-permission`, `screen-share`, `screen-share-surface`, `media-recorder` WebM VP8/Opus, `fullscreen-api`, `idb`, `web-crypto`). A check the browser cannot make is UNSUPPORTED or UNVERIFIABLE, never a pass.

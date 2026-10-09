@@ -7,6 +7,40 @@ export type ScreenShareOutcome =
 type DisplayMedia = Pick<MediaDevices, 'getDisplayMedia'>;
 
 /**
+ * Asks for the whole-screen share WITHOUT a started session (the pre-start system check runs
+ * before a key exists, so no monitor has a context yet). Call it on a user gesture. Consent is
+ * checked first through `assertConsent` (it throws when consent is not recorded). A wrong surface
+ * is stopped here; a share the browser does not describe comes back with `surface: null`. Pass
+ * `surfaceOf(outcome)` to `runSystemCheck`, and after the session started hand the outcome to
+ * `ScreenShareMonitor.adopt(outcome)` so the candidate is not asked a second time.
+ */
+export async function requestScreenShare(
+  assertConsent: () => void,
+  media: DisplayMedia | undefined = typeof navigator === 'undefined'
+    ? undefined
+    : navigator.mediaDevices,
+): Promise<ScreenShareOutcome> {
+  assertConsent();
+  if (typeof media?.getDisplayMedia !== 'function') return { ok: false, reason: 'UNSUPPORTED' };
+  let stream: MediaStream;
+  try {
+    stream = await media.getDisplayMedia({
+      video: { displaySurface: 'monitor', frameRate: { ideal: 5, max: 10 } },
+      audio: false,
+    });
+  } catch {
+    return { ok: false, reason: 'DENIED' };
+  }
+  const track = stream.getVideoTracks()[0];
+  const surface = track?.getSettings()?.displaySurface ?? null;
+  if (surface !== null && surface !== 'monitor') {
+    stream.getTracks().forEach((t) => t.stop());
+    return { ok: false, reason: 'WRONG_SURFACE' };
+  }
+  return { ok: true, stream, surface };
+}
+
+/**
  * Maps the outcome of `request()` to the system-check `devices.screenShare` value, never a fake
  * pass: a verified whole-screen share is MONITOR, a share whose surface the browser does not
  * report is UNVERIFIABLE, a wrong surface is OTHER. A refused or unsupported request has no
@@ -62,23 +96,38 @@ export class ScreenShareMonitor implements Detector {
     const ctx = this.ctx;
     if (!ctx) return { ok: false, reason: 'UNSUPPORTED' };
     ctx.assertConsent();
-    if (typeof this.media?.getDisplayMedia !== 'function') {
+    const got = await requestScreenShare(() => ctx.assertConsent(), this.media);
+    if (!got.ok) {
+      if (got.reason === 'DENIED') ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
+      if (got.reason === 'WRONG_SURFACE')
+        ctx.emit('SCREEN_SHARE_STOPPED', { reason: 'WRONG_SURFACE' });
+      return got;
+    }
+    return this.accept(ctx, got.stream, got.surface);
+  }
+
+  /**
+   * Takes over a share the app obtained BEFORE the session started (pre-start system check, see
+   * `requestScreenShare`) so the candidate is not asked twice. Only a successful outcome is
+   * adopted; anything else is returned unchanged and nothing happens.
+   */
+  adopt(outcome: ScreenShareOutcome): ScreenShareOutcome {
+    const ctx = this.ctx;
+    if (!outcome.ok) return outcome;
+    if (!ctx) {
+      outcome.stream.getTracks().forEach((t) => t.stop()); // not started: nothing may keep a device
       return { ok: false, reason: 'UNSUPPORTED' };
     }
-    let stream: MediaStream;
-    try {
-      stream = await this.media.getDisplayMedia({
-        video: { displaySurface: 'monitor', frameRate: { ideal: 5, max: 10 } },
-        audio: false,
-      });
-    } catch {
-      ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
-      return { ok: false, reason: 'DENIED' };
-    }
+    ctx.assertConsent();
+    return this.accept(ctx, outcome.stream, outcome.surface);
+  }
+
+  private accept(
+    ctx: DetectorContext,
+    stream: MediaStream,
+    surface: string | null,
+  ): ScreenShareOutcome {
     const track = stream.getVideoTracks()[0];
-    const surface =
-      (track?.getSettings() as MediaTrackSettings & { displaySurface?: string }).displaySurface ??
-      null;
     if (surface !== null && surface !== 'monitor') {
       stream.getTracks().forEach((t) => t.stop());
       ctx.emit('SCREEN_SHARE_STOPPED', { reason: 'WRONG_SURFACE' });

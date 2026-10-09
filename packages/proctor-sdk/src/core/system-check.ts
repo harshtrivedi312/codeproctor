@@ -83,6 +83,7 @@ export interface SystemCheckResult {
 export type SystemCheckErrorKind =
   | 'REJECTED' // 400: the body was refused; will not succeed again
   | 'UNAUTHENTICATED' // 401
+  | 'NO_SCREEN_SHARE' // the app gave no share outcome: FR-604 needs the share, nothing was sent
   | 'NOT_ACTIVE' // 409 SESSION_NOT_ACTIVE
   | 'UNAVAILABLE'; // retries ran out (network, timeout, 429, 5xx)
 
@@ -164,12 +165,22 @@ const SCREEN_PERMISSIONS = [
 
 /**
  * Builds the body without any network call. Exported for the app's own pre-flight UI and tests.
- * Never requests a device: `enumerateDevices` and `permissions.query` do not prompt.
+ * Never requests a device: `enumerateDevices` and `permissions.query` do not prompt. The browser
+ * steps run in parallel, each bounded by `stepTimeoutMs`; a step that fails or hangs is
+ * UNVERIFIABLE, never a pass.
+ *
+ * `screenShare` null/undefined means no share was obtained: the body then says `screen-share`
+ * DENIED or UNSUPPORTED (honestly) and `devices.screenShare` UNVERIFIABLE; `runSystemCheck`
+ * refuses to send such a body.
  */
 export async function collectSystemCheck(
   o: Pick<SystemCheckOptions, 'env' | 'screenShare' | 'now' | 'stepTimeoutMs'> = {},
 ): Promise<SystemCheckBody> {
-  const step = Math.min(10_000, Math.max(1, o.stepTimeoutMs ?? 3000)); // per browser step
+  const stepIn =
+    typeof o.stepTimeoutMs === 'number' && Number.isFinite(o.stepTimeoutMs)
+      ? o.stepTimeoutMs
+      : 3000;
+  const step = Math.min(10_000, Math.max(1, stepIn)); // per browser step
   const g = globalThis as unknown as Record<string, unknown>;
   // A field the caller sets (even to undefined) is used as given: "absent" is a valid test and
   // browser state; only a field that is not mentioned falls back to the real global.
@@ -196,44 +207,86 @@ export async function collectSystemCheck(
   };
   const nav = env.navigator ?? {};
   const now = (o.now ?? (() => new Date()))().toISOString();
-  const capabilities: CapabilityFlag[] = [];
-  const findings: SystemCheckFinding[] = [];
 
-  // Screens (FR-605): count and API only.
-  // getScreenDetails() would show the window-management prompt while the permission is "prompt"
-  // (and never settle while it is open): only use it when the permission is already granted, else
-  // fall back to the prompt-free screen.isExtended.
-  let win = env.window;
-  if (win && typeof win.getScreenDetails === 'function') {
-    let granted = false;
-    if (nav.permissions && typeof nav.permissions.query === 'function') {
-      const q = nav.permissions;
+  /** A permission state or 'unknown' (no API, a throw, a hang). A synchronous throw is caught too. */
+  const permissionState = (name: string): Promise<string> => {
+    const q = nav.permissions;
+    if (!q || typeof q.query !== 'function') return Promise.resolve('unavailable');
+    return within(
+      Promise.resolve()
+        .then(() => q.query({ name }))
+        .then(
+          (r) => r.state,
+          () => 'unknown',
+        ),
+      step,
+      'unknown',
+    );
+  };
+
+  // Screens (FR-605): count and API only. getScreenDetails() would show the window-management
+  // prompt while the permission is "prompt" (and never settle while it is open): it is only used
+  // when the permission is already granted, else the prompt-free screen.isExtended.
+  const screensP = (async () => {
+    let win = env.window;
+    if (!win) return undefined; // no window at all
+    if (typeof win.getScreenDetails === 'function') {
+      let granted = false;
       for (const name of ['window-management', 'window-placement']) {
-        const st = await within(
-          q.query({ name }).then(
-            (r) => r.state,
-            () => 'unknown',
-          ),
-          step,
-          'unknown',
-        );
+        const st = await permissionState(name);
         if (st === 'granted') {
           granted = true;
           break;
         }
-        if (st !== 'unknown') break;
+        if (st !== 'unknown' && st !== 'unavailable') break;
       }
+      if (!granted) win = { screen: win.screen };
     }
-    if (!granted) win = { screen: win.screen };
-  }
-  const ms = win
-    ? await within(
-        checkMultiScreen(win).catch(() => null),
-        step,
-        null,
-      )
-    : null;
-  if (ms?.kind === 'MULTI') {
+    const w = win;
+    return within(
+      Promise.resolve()
+        .then(() => checkMultiScreen(w))
+        .catch(() => null),
+      step,
+      null,
+    );
+  })();
+
+  // Devices: counts as booleans; labels only for a virtual-camera match (FR-610).
+  const md = nav.mediaDevices;
+  const devicesP = (async () => {
+    if (!md || typeof md.enumerateDevices !== 'function') return 'UNSUPPORTED' as const;
+    const list = await within<readonly { kind: string; label: string }[] | null>(
+      Promise.resolve()
+        .then(() => md.enumerateDevices())
+        .then(
+          (l) => l as readonly { kind: string; label: string }[],
+          () => null,
+        ),
+      step,
+      null,
+    );
+    return list;
+  })();
+
+  const permsP = Promise.all(SCREEN_PERMISSIONS.map(([name]) => permissionState(name)));
+  const idbP = (async (): Promise<CapabilityFlag['status']> => {
+    if (!env.indexedDB) return 'UNSUPPORTED';
+    const r = await within<boolean | null>(idbWorks(env.indexedDB), step, null);
+    return r === null ? 'UNVERIFIABLE' : r ? 'SUPPORTED' : 'UNSUPPORTED';
+  })();
+  const [ms, devices, perms, idbStatus] = await Promise.all([screensP, devicesP, permsP, idbP]);
+
+  const capabilities: CapabilityFlag[] = [];
+  const findings: SystemCheckFinding[] = [];
+
+  if (ms === undefined) {
+    capabilities.push({
+      id: 'multi-screen',
+      status: 'UNSUPPORTED',
+      detail: 'Cannot tell how many screens are connected.',
+    });
+  } else if (ms?.kind === 'MULTI') {
     findings.push({
       type: 'MULTI_MONITOR',
       occurredAt: now,
@@ -253,25 +306,24 @@ export async function collectSystemCheck(
     });
   }
 
-  // Cameras and microphones: counts as booleans; labels only for a virtual-camera match (FR-610).
   let camera = false;
   let microphone = false;
-  const md = nav.mediaDevices;
-  if (md && typeof md.enumerateDevices === 'function') {
-    // Unknown (a rejection or a hang) leaves both false and is never a pass.
-    const list: readonly { kind: string; label: string }[] | null = await within(
-      md.enumerateDevices().then(
-        (l) => l as readonly { kind: string; label: string }[] | null,
-        () => null,
-      ),
-      step,
-      null,
-    );
-    if (list) {
-      camera = list.some((d) => d.kind === 'videoinput');
-      microphone = list.some((d) => d.kind === 'audioinput');
-    }
-    const vc = list ? classifyCameras(list) : ({ kind: 'UNSUPPORTED' } as const);
+  if (devices === 'UNSUPPORTED') {
+    capabilities.push({
+      id: 'virtual-camera',
+      status: 'UNSUPPORTED',
+      detail: 'enumerateDevices is not available.',
+    });
+  } else if (devices === null) {
+    capabilities.push({
+      id: 'virtual-camera',
+      status: 'UNVERIFIABLE',
+      detail: 'The device list could not be read in time.',
+    });
+  } else {
+    camera = devices.some((d) => d.kind === 'videoinput');
+    microphone = devices.some((d) => d.kind === 'audioinput');
+    const vc = classifyCameras(devices);
     // The label is untrusted text: printable, trimmed, at most 128; an empty one is no finding.
     const label = vc.kind === 'VIRTUAL' ? clean(vc.label, 128) : '';
     if (vc.kind === 'VIRTUAL' && label !== '' && label !== 'Unknown') {
@@ -279,72 +331,65 @@ export async function collectSystemCheck(
       capabilities.push({ id: 'virtual-camera', status: 'SUPPORTED' });
     } else if (vc.kind === 'CLEAN' && camera) {
       capabilities.push({ id: 'virtual-camera', status: 'SUPPORTED' });
-    } else if (vc.kind === 'CLEAN' || vc.kind === 'VIRTUAL') {
+    } else if (vc.kind === 'LABELS_HIDDEN') {
+      capabilities.push({
+        id: 'virtual-camera',
+        status: 'UNVERIFIABLE',
+        detail: 'Camera labels are hidden until camera permission is granted.',
+      });
+    } else {
       // No camera to look at (or an unusable label): nothing was verified.
       capabilities.push({
         id: 'virtual-camera',
         status: 'UNVERIFIABLE',
         detail: camera ? 'The camera name could not be read.' : 'No camera was found.',
       });
-    } else {
-      capabilities.push({
-        id: 'virtual-camera',
-        status: vc.kind === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'UNVERIFIABLE',
-        detail:
-          vc.kind === 'LABELS_HIDDEN'
-            ? 'Camera labels are hidden until camera permission is granted.'
-            : 'enumerateDevices is not available.',
-      });
     }
-  } else {
-    capabilities.push({
-      id: 'virtual-camera',
-      status: 'UNSUPPORTED',
-      detail: 'enumerateDevices is not available.',
-    });
   }
 
   // Permission states as enums (no prompt).
-  for (const [name, id] of SCREEN_PERMISSIONS) {
-    if (!nav.permissions || typeof nav.permissions.query !== 'function') {
+  SCREEN_PERMISSIONS.forEach(([, id], i) => {
+    const s = perms[i] ?? 'unknown';
+    if (s === 'unavailable') {
       capabilities.push({
         id,
         status: 'UNVERIFIABLE',
         detail: 'The Permissions API is not available.',
       });
-      continue;
-    }
-    try {
-      const s = await within(
-        nav.permissions.query({ name }).then((r) => r.state),
-        step,
-        'unknown',
-      );
-      capabilities.push({
-        id,
-        status: s === 'granted' ? 'SUPPORTED' : s === 'denied' ? 'DENIED' : 'UNVERIFIABLE',
-        ...(s === 'prompt' ? { detail: 'Not asked yet.' } : {}),
-      });
-    } catch {
+    } else if (s === 'unknown') {
       capabilities.push({
         id,
         status: 'UNVERIFIABLE',
         detail: 'The permission state is not readable.',
       });
+    } else {
+      capabilities.push({
+        id,
+        status: s === 'granted' ? 'SUPPORTED' : s === 'denied' ? 'DENIED' : 'UNVERIFIABLE',
+        ...(s === 'prompt' ? { detail: 'Not asked yet.' } : {}),
+      });
     }
-  }
-
-  // Screen share: capability only (getDisplayMedia needs a user gesture; the app asks).
-  const surface: ScreenShareSurface = o.screenShare ?? 'UNVERIFIABLE';
-  capabilities.push({
-    id: 'screen-share',
-    status: typeof md?.getDisplayMedia === 'function' ? 'SUPPORTED' : 'UNSUPPORTED',
   });
-  if (surface === 'UNVERIFIABLE') {
+
+  // Screen share: the app asks (getDisplayMedia needs a user gesture) and passes the surface.
+  const obtained = o.screenShare !== undefined && o.screenShare !== null;
+  const surface: ScreenShareSurface = o.screenShare ?? 'UNVERIFIABLE';
+  const canShare = typeof md?.getDisplayMedia === 'function';
+  if (obtained) {
+    capabilities.push({ id: 'screen-share', status: 'SUPPORTED' });
+    if (surface === 'UNVERIFIABLE') {
+      // A share happened, but this browser does not report which surface it is.
+      capabilities.push({
+        id: 'screen-share-surface',
+        status: 'UNVERIFIABLE',
+        detail: 'This browser does not report which surface was shared.',
+      });
+    }
+  } else {
     capabilities.push({
-      id: 'screen-share-surface',
-      status: 'UNVERIFIABLE',
-      detail: 'The shared surface was not verified in this browser.',
+      id: 'screen-share',
+      status: canShare ? 'DENIED' : 'UNSUPPORTED',
+      detail: canShare ? 'No screen share was obtained.' : 'This browser cannot share the screen.',
     });
   }
 
@@ -369,14 +414,7 @@ export async function collectSystemCheck(
       ? fe
       : typeof env.document?.documentElement?.requestFullscreen === 'function';
   capabilities.push({ id: 'fullscreen-api', status: fs ? 'SUPPORTED' : 'UNSUPPORTED' });
-  capabilities.push({
-    id: 'idb',
-    ...(await (async (): Promise<{ status: CapabilityFlag['status'] }> => {
-      if (!env.indexedDB) return { status: 'UNSUPPORTED' };
-      const r = await within<boolean | null>(idbWorks(env.indexedDB), step, null);
-      return { status: r === null ? 'UNVERIFIABLE' : r ? 'SUPPORTED' : 'UNSUPPORTED' };
-    })()),
-  });
+  capabilities.push({ id: 'idb', status: idbStatus });
   const subtle = env.crypto?.subtle;
   capabilities.push({
     id: 'web-crypto',
@@ -469,6 +507,12 @@ function parseResult(text: string): SystemCheckResult | null {
  * virtual-camera monitors emit MULTI_MONITOR and VIRTUAL_CAMERA events through the session.
  */
 export async function runSystemCheck(o: SystemCheckOptions): Promise<SystemCheckResult> {
+  // The screen share is part of the gate (FR-604): without an outcome nothing may be sent, or a
+  // missing share would pass as "unverified". The app obtains it with requestScreenShare() (or its
+  // own getDisplayMedia) on a user gesture and passes surfaceOf(outcome).
+  if (o.screenShare === undefined || o.screenShare === null) {
+    throw new SystemCheckError('NO_SCREEN_SHARE');
+  }
   const body = await collectSystemCheck(o);
   const f = o.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
