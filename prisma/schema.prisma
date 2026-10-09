@@ -319,6 +319,22 @@ enum QuestionScoring {
   @@map("question_scoring")
 }
 
+// ADR 0017 section 4.7 (C-53): the kind and the status of a scheduled window.
+enum ScheduledWindowKind {
+  SLOT
+  REVIEW
+
+  @@map("scheduled_window_kind")
+}
+
+enum ScheduledWindowStatus {
+  SCHEDULED
+  CANCELLED
+  DONE
+
+  @@map("scheduled_window_status")
+}
+
 // ---------- Identity ----------
 
 model Organization {
@@ -339,6 +355,7 @@ model Organization {
   invitations        Invitation[]
   sessions           Session[]
   webhookEndpoints   WebhookEndpoint[]
+  scheduledWindows   ScheduledWindow[]
 
   @@map("organizations")
 }
@@ -376,6 +393,7 @@ model User {
   flagDecisions                 FlagDecision[]
   assignedAppeals               Appeal[]
   createdWebhookEndpoints       WebhookEndpoint[]
+  requestedScheduledWindows     ScheduledWindow[]
 
   @@index([orgId])
   @@map("users")
@@ -623,20 +641,55 @@ model Invitation {
   usedAt         DateTime? @map("used_at") @db.Timestamptz(6)
   createdById    String?   @map("created_by") @db.Uuid
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  // ADR 0017 section 4.7 (C-53): an IANA zone name chosen by the recruiter, for the invitation and reminder
+  // emails (FR-304). Candidate data: nulled at erasure (ADR 0004 9.5), hidden from CANDIDATE reads (CS-4).
+  timeZone       String?   @map("time_zone")
 
-  org       Organization @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  test      Test         @relation(fields: [testId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
-  candidate Candidate    @relation(fields: [candidateId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
-  createdBy User?        @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  org              Organization      @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  test             Test              @relation(fields: [testId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  candidate        Candidate         @relation(fields: [candidateId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  createdBy        User?             @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
   // At most one: sessions.invitation_id is UNIQUE. This is a list because Prisma cannot model a
   // one-to-one over the composite FK (invitation_id, org_id) without an extra unique constraint,
   // which the DDL does not have.
-  sessions  Session[]
+  sessions         Session[]
+  // The SLOT rows of the invitation (ADR 0017 4.7): at most one SCHEDULED at a time (partial unique index).
+  scheduledWindows ScheduledWindow[]
 
   @@unique([id, orgId])
   @@index([testId])
   @@index([candidateId])
   @@map("invitations")
+}
+
+// ADR 0017 section 4.7 (C-53, ADR 0008 delta): one row per window that the start and stop schedules act on.
+// A SLOT row belongs to an invitation (`invitation_id`, composite with `org_id`); a REVIEW row to the reviewer
+// who requested it (`requested_by`, a RULE_I staff reference). A SLOT row is DELETED, never nulled, at erasure
+// and retention (the CHECK would refuse a SLOT row without an invitation). `status` has no default: the
+// service names it. The cross-organisation capacity read is the system-scope reason SCHEDULE_CAPACITY
+// (org-context.ts, schedule-capacity.ts), over five columns only.
+// Not expressible here, in the migration: the two named CHECKs (scheduled_windows_times_check and
+// scheduled_windows_kind_refs_check), the partial unique index on (invitation_id) WHERE status = 'SCHEDULED',
+// and the updated_at trigger.
+model ScheduledWindow {
+  id            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String                @map("org_id") @db.Uuid
+  kind          ScheduledWindowKind
+  invitationId  String?               @map("invitation_id") @db.Uuid
+  requestedById String?               @map("requested_by") @db.Uuid
+  startsAt      DateTime              @map("starts_at") @db.Timestamptz(6)
+  endsAt        DateTime              @map("ends_at") @db.Timestamptz(6)
+  ceilingAt     DateTime              @map("ceiling_at") @db.Timestamptz(6)
+  status        ScheduledWindowStatus
+  createdAt     DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime              @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invitation  Invitation?  @relation(fields: [invitationId, orgId], references: [id, orgId], onDelete: NoAction, onUpdate: NoAction)
+  requestedBy User?        @relation(fields: [requestedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([orgId, startsAt])
+  @@map("scheduled_windows")
 }
 
 model Session {

@@ -220,6 +220,8 @@ CREATE TYPE identity_check_status    AS ENUM ('PENDING','PASSED','LOW_CONFIDENCE
 CREATE TYPE identity_review_reason   AS ENUM ('BELOW_THRESHOLD','NO_FACE','MULTIPLE_FACES','LIVENESS_NOT_CONFIRMED','MATCH_ERROR');
 CREATE TYPE identity_manual_decision AS ENUM ('MATCH','NO_MATCH','INCONCLUSIVE');
 CREATE TYPE question_scoring         AS ENUM ('AUTO','MANUAL_PENDING','MANUAL');
+CREATE TYPE scheduled_window_kind    AS ENUM ('SLOT','REVIEW');                 -- ADR 0017 §4.7 (C-53)
+CREATE TYPE scheduled_window_status  AS ENUM ('SCHEDULED','CANCELLED','DONE');  -- ADR 0017 §4.7 (C-53)
 
 -- ---------- Identity ----------
 
@@ -426,6 +428,7 @@ CREATE TABLE invitations (
   used_at         timestamptz,              -- set when the session starts (VERIFIED -> IN_PROGRESS)
   created_by      uuid REFERENCES users(id),
   created_at      timestamptz NOT NULL DEFAULT now(),
+  time_zone       text,                     -- C-53: IANA zone the emails show the slot in, besides UTC (ADR 0017 §4.7, FR-304); candidate data: nulled at erasure, hidden in CANDIDATE scope
   CHECK (window_end > window_start),
   UNIQUE (id, org_id),
   FOREIGN KEY (test_id, org_id)      REFERENCES tests (id, org_id),
@@ -689,6 +692,32 @@ CREATE TABLE webhook_deliveries (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ON webhook_deliveries (endpoint_id, created_at DESC);
+
+-- ---------- Schedule (ADR 0017 §4.7, C-53; P-40/D-60) ----------
+-- One row per window that the start and stop schedules act on: a SLOT row per recruiter-picked slot of an
+-- invitation, a REVIEW row per reviewer-requested window. A cancelled or moved window keeps its row as CANCELLED,
+-- so its old ceiling stays known (the stale-ceiling rule, ADR 0017 §4.3). Retention and erasure DELETE the SLOT
+-- rows of an invitation (never null invitation_id: the second CHECK refuses that). The cross-organisation read
+-- (capacity, stale ceilings, monthly hours) is the SCHEDULE_CAPACITY system scope, five columns only (ADR 0017
+-- §4.7, schedule-capacity.ts); every write is org-scoped. updated_at is kept by the set_updated_at trigger.
+CREATE TABLE scheduled_windows (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id         uuid NOT NULL REFERENCES organizations(id),
+  kind           scheduled_window_kind NOT NULL,
+  invitation_id  uuid,                      -- SLOT rows only
+  requested_by   uuid REFERENCES users(id), -- REVIEW rows only: the reviewer (RULE_I; the service checks the org)
+  starts_at      timestamptz NOT NULL,      -- the gate opening, or the review window start
+  ends_at        timestamptz NOT NULL,      -- the window end of §4.3: accommodated time and the analysis allowance included
+  ceiling_at     timestamptz NOT NULL,      -- ends_at plus 2 hours
+  status         scheduled_window_status NOT NULL,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT scheduled_windows_times_check CHECK (ends_at > starts_at AND ceiling_at > ends_at),
+  CONSTRAINT scheduled_windows_kind_refs_check CHECK ((kind = 'SLOT') = (invitation_id IS NOT NULL) AND (kind = 'REVIEW') = (requested_by IS NOT NULL)),
+  FOREIGN KEY (invitation_id, org_id) REFERENCES invitations (id, org_id)
+);
+CREATE INDEX ON scheduled_windows (org_id, starts_at);
+CREATE UNIQUE INDEX ON scheduled_windows (invitation_id) WHERE status = 'SCHEDULED';  -- one live window per invitation
 
 -- ---------- Roles and grants (ADR 0006 section 7, D-35) ----------
 -- The audit_append_only migration creates app_user if it does not exist (LOGIN, no password;
