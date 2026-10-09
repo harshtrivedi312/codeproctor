@@ -114,9 +114,9 @@ export interface SystemCheckBody {
 }
 
 /**
- * ADR 0013 section 5.6: the initial ID and selfie upload uses the evidence presign shape with
- * purpose ID_IMAGE or SELFIE (at most 5 MiB). The route for these purposes is pinned by BE-08, so
- * its path here is PROVISIONAL.
+ * POST /candidate/session/identity/presign (apps/api identity.dto.ts IdentityPresignedDto; D-61 made
+ * these routes canonical, ADR 0013 section 5.6): a single-use `name` (identity/<attempt>/<id|selfie>-
+ * <ULID>.jpg, NOT an object key) and a 60 s PUT URL. PUT the file with exactly `headers`.
  */
 export const presignSchema = z.object({
   // Real uploads are https only. Plain http is accepted with mocks on (localhost mock upload).
@@ -128,22 +128,34 @@ export const presignSchema = z.object({
     }),
   method: z.literal('PUT'),
   headers: z.record(z.string(), z.string()),
-  evidenceKey: z.string().min(1),
+  name: z.string().min(1),
+  attempt: z.number().int().min(1),
   expiresAt: z.string(),
 });
 export type Presign = z.infer<typeof presignSchema>;
 
 /**
- * PROVISIONAL (BE-08 pins this). Per ADR 0004 and FR-403 the candidate sees only that the photos
- * were received. `retrySuggested` is true once, when the first attempt could not be read well; it
- * carries no score and no reason a candidate could game.
+ * POST /candidate/session/identity (202) and GET /candidate/session/identity (IdentityStatusDto).
+ * Status only: never a score, a threshold, a model id or a reason (NFR-05, D-05). The match runs in
+ * the background, so a submit answers PENDING first and the page polls the GET until it leaves
+ * PENDING. LOW_CONFIDENCE with canRetry means "take both photos again, once"; MANUAL_REVIEW and
+ * REVIEWED mean a person looks, which is not a failure; WAIVED means skip the step.
  */
-export const identityReceivedSchema = z.object({
-  status: z.literal('RECEIVED'),
-  attempt: z.number().int().min(1).max(2),
-  retrySuggested: z.boolean(),
+export const IDENTITY_STATUSES = [
+  'NOT_STARTED',
+  'PENDING',
+  'PASSED',
+  'LOW_CONFIDENCE',
+  'MANUAL_REVIEW',
+  'REVIEWED',
+  'WAIVED',
+] as const;
+export const identityStatusSchema = z.object({
+  attempt: z.number().int().min(0).max(2),
+  status: z.enum(IDENTITY_STATUSES),
+  canRetry: z.boolean(),
 });
-export type IdentityReceived = z.infer<typeof identityReceivedSchema>;
+export type IdentityStatus = z.infer<typeof identityStatusSchema>;
 
 export const testStartedSchema = z.object({
   status: z.enum(['IN_PROGRESS', 'PAUSED']),

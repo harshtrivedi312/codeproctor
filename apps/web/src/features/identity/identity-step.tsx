@@ -5,6 +5,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { StepFrame } from '@/features/candidate-flow/step-frame';
+import type { IdentityStatus } from '@/features/candidate-flow/wire';
 import {
   LIVENESS_PROMPTS,
   MAX_IMAGE_BYTES,
@@ -12,7 +13,7 @@ import {
   type IdentityDeps,
 } from './capture';
 
-type Phase = 'id' | 'selfie' | 'review' | 'sending' | 'received';
+type Phase = 'id' | 'selfie' | 'review' | 'sending' | 'checking' | 'received';
 
 /** A captured image and the object URL used to preview it. Both live in memory only. */
 interface Shot {
@@ -50,12 +51,20 @@ export const IDENTITY_COPY = {
  * manual review). In-browser face landmark detection would need WebAssembly, which the stepper's
  * CSP does not allow (D-45), so it is a follow-up that needs an owner decision.
  */
+/** How often and how long the page asks for the result of the background face match. */
+const STATUS_POLL_MS = 1500;
+const STATUS_POLL_TRIES = 20;
+/** A submit whose upload had not landed yet is repeated with the same names, a few times. */
+const UPLOAD_NOT_FOUND_TRIES = 3;
+
 export function IdentityStep({
   deps: injected,
+  pollMs = STATUS_POLL_MS,
   onDone,
   onSessionEnded,
 }: {
   deps?: Partial<IdentityDeps>;
+  pollMs?: number;
   onDone: () => void;
   onSessionEnded: () => void;
 }): React.JSX.Element {
@@ -70,6 +79,14 @@ export function IdentityStep({
     gcTime: 0,
     retry: false,
   });
+  // Where the check stands on the server (a reload, or coming back to this step).
+  const status = useQuery({
+    queryKey: ['candidate', 'identity-status'],
+    queryFn: () => candidateApi.getIdentityStatus(),
+    gcTime: 0,
+    retry: false,
+    staleTime: Infinity,
+  });
   const [forcedWaived, setForcedWaived] = React.useState(false);
 
   const [phase, setPhase] = React.useState<Phase>('id');
@@ -83,6 +100,13 @@ export function IdentityStep({
   const [retryHint, setRetryHint] = React.useState(false);
   const streamRef = React.useRef<MediaStream | null>(null);
   const sendingRef = React.useRef(false);
+  const alive = React.useRef(true);
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const shotsRef = React.useRef<{ id: Shot | null; selfie: Shot | null }>({
     id: null,
@@ -119,6 +143,21 @@ export function IdentityStep({
     const r = accommodations.data;
     if (r && !r.ok && r.kind === 'problem' && r.status === 401) onSessionEnded();
   }, [accommodations.data, onSessionEnded]);
+
+  // Resume from the server's answer: waived, already checked, still being checked, or one retry open.
+  const resumed = React.useRef(false);
+  React.useEffect(() => {
+    const r = status.data;
+    if (!r || resumed.current) return;
+    resumed.current = true;
+    if (!r.ok) {
+      if (r.kind === 'problem' && r.status === 401) onSessionEnded();
+      return;
+    }
+    if (r.data.status === 'PENDING') void pollResult(0);
+    else if (r.data.status !== 'NOT_STARTED') applyStatus(r.data, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on the first answer
+  }, [status.data]);
 
   async function turnOnCamera(): Promise<void> {
     setCameraError(null);
@@ -185,6 +224,75 @@ export function IdentityStep({
     }
   }
 
+  /** Photos are with the server (or the check is finished): drop our copies and the camera. */
+  function releaseCapture(): void {
+    replaceShot('id', null);
+    replaceShot('selfie', null);
+    stopCamera();
+  }
+
+  /** What the candidate sees for a status. Never a score, a reason or the word "failed". */
+  function applyStatus(
+    result: { status: IdentityStatus['status']; canRetry: boolean },
+    resumedNow = false,
+  ): void {
+    switch (result.status) {
+      case 'WAIVED':
+        releaseCapture();
+        setForcedWaived(true);
+        return;
+      case 'LOW_CONFIDENCE':
+        releaseCapture();
+        if (result.canRetry && attempt === 1) {
+          // One retake, once. After that a person looks at the photos.
+          setAttempt(2);
+          setRetryHint(true);
+          setPromptIndex(0);
+          setPhase('id');
+        } else {
+          setRetryHint(false);
+          setPhase('received');
+        }
+        return;
+      case 'PASSED':
+      case 'REVIEWED':
+      case 'MANUAL_REVIEW':
+        releaseCapture();
+        setRetryHint(false);
+        setPhase('received');
+        return;
+      case 'PENDING':
+      case 'NOT_STARTED':
+        if (!resumedNow) void pollResult(0);
+        return;
+    }
+  }
+
+  /** Asks for the result until it leaves PENDING; a long wait ends as "received" (a person may look). */
+  async function pollResult(tries: number): Promise<void> {
+    releaseCapture();
+    setPhase('checking');
+    for (let i = tries; i < STATUS_POLL_TRIES; i += 1) {
+      await new Promise((r) => setTimeout(r, pollMs));
+      if (!alive.current) return;
+      const r = await candidateApi.getIdentityStatus();
+      if (!alive.current) return;
+      if (!r.ok) {
+        if (r.kind === 'problem' && r.status === 401) {
+          onSessionEnded();
+          return;
+        }
+        continue;
+      }
+      if (r.data.status !== 'PENDING' && r.data.status !== 'NOT_STARTED') {
+        applyStatus(r.data);
+        return;
+      }
+    }
+    // Still checking after a while: the photos are in; the server decides at Start.
+    setPhase('received');
+  }
+
   async function sendOnce(): Promise<void> {
     const idBlob = idShot?.blob;
     const selfieBlob = selfieShot?.blob;
@@ -192,6 +300,7 @@ export function IdentityStep({
     setProblem(null);
     setPhase('sending');
     const names: string[] = [];
+    const attempts: number[] = [];
     for (const [purpose, blob] of [
       ['ID_IMAGE', idBlob],
       ['SELFIE', selfieBlob],
@@ -208,6 +317,15 @@ export function IdentityStep({
           void accommodations.refetch();
           return;
         }
+        if (presign.kind === 'problem' && presign.code === 'IDENTITY_CHECK_PENDING') {
+          void pollResult(0);
+          return;
+        }
+        if (presign.kind === 'problem' && presign.code === 'IDENTITY_ATTEMPTS_EXHAUSTED') {
+          releaseCapture();
+          setPhase('received');
+          return;
+        }
         setProblem(
           'We could not start the upload. Check your internet connection and press "Send my photos" again.',
         );
@@ -222,45 +340,75 @@ export function IdentityStep({
         setPhase('review');
         return;
       }
-      names.push(presign.data.evidenceKey);
+      names.push(presign.data.name);
+      attempts.push(presign.data.attempt);
     }
     const [idImageName, selfieName] = names;
     if (idImageName === undefined || selfieName === undefined) return;
-    const result = await candidateApi.submitIdentity({
+    if (attempts[0] !== attempts[1]) {
+      // Both names must come from the same attempt; take the photos again.
+      setProblem('Something went wrong with the upload. Please press "Send my photos" again.');
+      setPhase('review');
+      return;
+    }
+    let result = await candidateApi.submitIdentity({
       idImageName,
       selfieName,
-      liveness: { prompts: LIVENESS_PROMPTS.map((p) => p.id), completed: true },
+      livenessConfirmed: true,
     });
+    // The upload may not have landed yet: repeat the submit with the same names, a few times.
+    for (
+      let i = 1;
+      !result.ok &&
+      result.kind === 'problem' &&
+      result.code === 'UPLOAD_NOT_FOUND' &&
+      i < UPLOAD_NOT_FOUND_TRIES;
+      i += 1
+    ) {
+      await new Promise((r) => setTimeout(r, pollMs));
+      if (!alive.current) return;
+      result = await candidateApi.submitIdentity({
+        idImageName,
+        selfieName,
+        livenessConfirmed: true,
+      });
+    }
+    if (!alive.current) return;
     if (!result.ok) {
       if (result.kind === 'problem' && result.status === 401) {
         onSessionEnded();
         return;
       }
-      if (result.kind === 'problem' && result.code === 'IDENTITY_CHECK_WAIVED') {
-        stopCamera();
-        setForcedWaived(true);
-        return;
+      if (result.kind === 'problem') {
+        if (result.code === 'IDENTITY_CHECK_WAIVED') {
+          stopCamera();
+          setForcedWaived(true);
+          return;
+        }
+        if (result.code === 'IDENTITY_CHECK_PENDING') {
+          void pollResult(0);
+          return;
+        }
+        if (result.code === 'IDENTITY_ATTEMPTS_EXHAUSTED') {
+          releaseCapture();
+          setPhase('received');
+          return;
+        }
+        if (result.code === 'IDENTITY_NAME_INVALID' || result.code === 'IDENTITY_IMAGE_REJECTED') {
+          // The server could not use these photos: take both again (no reason is given or needed).
+          restart();
+          setProblem('We could not use those photos. Please take both photos again.');
+          return;
+        }
       }
       setProblem('We could not finish sending your photos. Press "Send my photos" again.');
       setPhase('review');
       return;
     }
-    // Photos are in the server's hands now; drop our copies and the camera.
-    replaceShot('id', null);
-    replaceShot('selfie', null);
-    stopCamera();
-    if (result.data.retrySuggested && attempt === 1) {
-      setAttempt(2);
-      setRetryHint(true);
-      setPromptIndex(0);
-      setPhase('id');
-    } else {
-      setRetryHint(false);
-      setPhase('received');
-    }
+    applyStatus(result.data);
   }
 
-  if (accommodations.isPending) {
+  if (accommodations.isPending || status.isPending) {
     return (
       <StepFrame title="Identity check">
         <p role="status">One moment...</p>
@@ -278,6 +426,16 @@ export function IdentityStep({
         <Button size="lg" className="min-h-11" onClick={onDone}>
           Continue
         </Button>
+      </StepFrame>
+    );
+  }
+
+  if (phase === 'checking') {
+    return (
+      <StepFrame title="Checking your photos" focusKey="checking">
+        <p role="status" data-testid="identity-checking">
+          Your photos were received. This takes a few seconds. Please keep this page open.
+        </p>
       </StepFrame>
     );
   }
