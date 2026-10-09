@@ -104,6 +104,29 @@ describe('grade-session dev review flow (DL-72; BE-12 and FU-BEB-145 own the rea
     await expect(service.grade('o1', 's1')).resolves.toBe('already-graded');
   });
 
+  it('FR-506: development, a throwing enqueue leaves the session GRADED (not moved) so the retry enqueues again', async () => {
+    const { service, transition, enqueueAnalyze } = build(
+      'development',
+      'development',
+      'SUBMITTED',
+    );
+    enqueueAnalyze.mockRejectedValueOnce(new Error('queue down'));
+    await expect(service.grade('o1', 's1')).rejects.toThrow('queue down');
+    expect(edges(transition.mock.calls)).toEqual([['SUBMITTED', 'GRADED']]);
+    const retry = build('development', 'development', 'GRADED');
+    retry.enqueueAnalyze.mockRejectedValueOnce(new Error('queue down'));
+    await expect(retry.service.grade('o1', 's1')).rejects.toThrow('queue down');
+    expect(retry.transition).not.toHaveBeenCalled();
+  });
+
+  it('FR-506: development, losing the GRADED -> UNDER_REVIEW race on the fresh path is still graded', async () => {
+    const { service, transition } = build('development', 'development', 'SUBMITTED');
+    transition.mockResolvedValueOnce(undefined);
+    transition.mockRejectedValueOnce(new SessionStateConflictError('UNDER_REVIEW'));
+    await expect(service.grade('o1', 's1')).resolves.toBe('graded');
+    expect(transition).toHaveBeenCalledTimes(2);
+  });
+
   const others: [string, string][] = [
     ['staging', 'production'],
     ['pilot', 'production'],

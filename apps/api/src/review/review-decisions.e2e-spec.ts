@@ -761,6 +761,68 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
     });
   });
 
+  describe('DL-72: non-development configs refuse coding manual scoring even when built by hand', () => {
+    const configs: Record<string, string>[] = [
+      { APP_ENV: 'development', NODE_ENV: 'production' },
+      { APP_ENV: 'staging', NODE_ENV: 'production' },
+      { APP_ENV: 'staging' },
+    ];
+    for (const cfg of configs) {
+      it(`FR-205, TC-099: ${JSON.stringify(cfg)} answers ANSWER_NOT_MANUAL for a stub-pending and for a MANUAL coding answer`, async () => {
+        const mod = jest.requireActual<typeof import('./review-decisions.service')>(
+          './review-decisions.service',
+        );
+        const ctx =
+          jest.requireActual<typeof import('../database/org-context')>('../database/org-context');
+        const prismaMod = jest.requireActual<typeof import('../database/prisma.service')>(
+          '../database/prisma.service',
+        );
+        const stateMod = jest.requireActual<typeof import('../session/session-state.service')>(
+          '../session/session-state.service',
+        );
+        const orgContext = app.get(ctx.OrgContextService);
+        const svc = new mod.ReviewDecisionsService(
+          app.get(prismaMod.PrismaService),
+          orgContext,
+          app.get(stateMod.SessionStateService),
+          { get: (k: string) => cfg[k] } as never,
+        );
+        const real = await make(UserRole.REVIEWER);
+        const s = await seedSession();
+        const pending = await seedAnswer(s, {
+          type: 'CODING',
+          position: 1,
+          scoring: 'MANUAL_PENDING',
+          score: null,
+          scoringNote: 'not graded (local stub)',
+        });
+        const manual = await seedAnswer(s, {
+          type: 'CODING',
+          position: 2,
+          scoring: 'MANUAL_PENDING',
+          score: null,
+          scoringNote: 'not graded (local stub)',
+        });
+        // The check constraint ties MANUAL to scored_by and scored_at: set all three together.
+        await owner.sessionQuestion.update({
+          where: { id: manual },
+          data: { scoring: 'MANUAL', score: '10.00', scoredById: real.id, scoredAt: new Date() },
+        });
+        for (const id of [pending, manual]) {
+          await expect(
+            orgContext.runAsUser({ orgId: orgA, userId: real.id, role: UserRole.REVIEWER }, () =>
+              svc.scoreAnswer({ id: real.id, orgId: orgA }, undefined, s.sessionId, id, {
+                correct: true,
+              }),
+            ),
+          ).rejects.toMatchObject({ code: 'ANSWER_NOT_MANUAL' });
+        }
+        const row = await owner.sessionQuestion.findUniqueOrThrow({ where: { id: pending } });
+        expect(row).toMatchObject({ scoring: 'MANUAL_PENDING', score: null });
+      });
+    }
+  });
+
   describe('FR-902, TC-099: verdict', () => {
     it('TC-099: 409 MANUAL_PENDING while an answer waits (status stays UNDER_REVIEW, no review row); 200 after every answer is decided', async () => {
       const s = await seedPendingSession();

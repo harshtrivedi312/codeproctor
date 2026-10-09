@@ -8,6 +8,8 @@
 //      race rolls everything back) and the scores;
 //   4. queue analyze-session (BE-12). BE-12 also owns GRADED -> UNDER_REVIEW (C-28: every session
 //      ends UNDER_REVIEW; there is no GRADED -> COMPLETED edge).
+//      DEV-ONLY STOPGAP (DL-72): with APP_ENV exactly development, devMoveToReview also does
+//      GRADED -> UNDER_REVIEW here; BE-12 and FU-BEB-145 own the real behaviour.
 // Hidden-test results are stored without stdin, stdout, expected output or variant data
 // (CS-4.4: `{ testCaseId, passed, status, timeMs, memoryKb }`). Only the close snapshot is graded,
 // never final_code. The close writes one snapshot per coding question of a started section (empty
@@ -123,8 +125,9 @@ export class GradeSessionService {
     if (head === null) return 'skipped';
     if (head.status === 'GRADED') {
       // A retry after a failed enqueue: grading is done, the hand-off is not.
-      await this.devMoveToReview(orgId, sessionId, now);
+      // Enqueue first: a failed enqueue must leave the session GRADED so the retry enqueues again.
       await this.queue.enqueueAnalyze(orgId, sessionId);
+      await this.devMoveToReview(orgId, sessionId, now);
       return 'already-graded';
     }
     if (head.status !== 'SUBMITTED') return 'skipped';
@@ -142,8 +145,9 @@ export class GradeSessionService {
       this.store(orgId, sessionId, outcomes, now),
     );
     if (!wrote) return 'lost-race';
-    await this.devMoveToReview(orgId, sessionId, now);
+    // Enqueue first (see above): the move is idempotent, the enqueue is deduplicated by job id.
     await this.queue.enqueueAnalyze(orgId, sessionId);
+    await this.devMoveToReview(orgId, sessionId, now);
     return 'graded';
   }
 

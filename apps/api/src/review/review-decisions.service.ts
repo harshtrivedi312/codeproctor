@@ -21,7 +21,7 @@ import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { formatHundredths, toHundredths } from '../grading/scoring';
 import { Prisma } from '../generated/prisma/client';
-import type { SessionStatus } from '../generated/prisma/enums';
+import type { QuestionScoring, SessionStatus } from '../generated/prisma/enums';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { SessionStateService } from '../session/session-state.service';
 import type {
@@ -70,7 +70,7 @@ export class ReviewDecisionsService {
    * production behaviour: BE-12 and FU-BEB-145 own the real coding review contract. In every other
    * environment a CODING answer stays 409 ANSWER_NOT_MANUAL.
    */
-  private devCodingManual(scoring: string, scoringNote: string | null): boolean {
+  private devCodingManual(scoring: QuestionScoring, scoringNote: string | null): boolean {
     if (
       !devReviewFlowEnabled({
         APP_ENV: this.config.get('APP_ENV', { infer: true }),
