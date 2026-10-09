@@ -37,15 +37,29 @@ export function PhoneStep({
     },
   });
   const data = status.data?.ok ? status.data.data : null;
+  // The side-camera routes are PROVISIONAL (ARC-03 part 2) and may not exist on the server yet. A
+  // 404 means "this server has no side-camera feature", so there is nothing to connect: do not
+  // block the candidate behind a retry that can never succeed. Network errors and 5xx still show
+  // the retry (the server may only be unreachable); a 401 still ends the session.
+  // Skipping here is acceptable only because the server fails closed: for a STRICT test
+  // verify-conditions always lists SIDE_CAMERA as unmet, so the session never becomes VERIFIED and
+  // Start answers 409 (apps/api session/verify-conditions.port.ts, candidate/test-start.service.ts).
+  // When the real route ships (BE-10 / ARC-03 part 2) remove this branch or narrow it (FU-FEB-62).
+  const r = status.data;
+  const notAvailable = r !== undefined && !r.ok && r.kind === 'problem' && r.status === 404;
 
   React.useEffect(() => {
-    const r = status.data;
     if (r && !r.ok && r.kind === 'problem' && r.status === 401) onSessionEnded();
-  }, [status.data, onSessionEnded]);
+  }, [r, onSessionEnded]);
   React.useEffect(() => {
     if (data) onRequiredKnown?.(data.required);
     if (data && !data.required) onDone();
   }, [data, onRequiredKnown, onDone]);
+  React.useEffect(() => {
+    if (!notAvailable) return;
+    onRequiredKnown?.(false);
+    onDone();
+  }, [notAvailable, onRequiredKnown, onDone]);
 
   // gcTime 0: the link token must not stay in the mutation cache after this step closes.
   const link = useMutation({ mutationFn: () => candidateApi.createSideCameraLink(), gcTime: 0 });
@@ -94,7 +108,7 @@ export function PhoneStep({
     link.mutate();
   }
 
-  if (status.isPending || (data && !data.required)) {
+  if (status.isPending || notAvailable || (data && !data.required)) {
     return (
       <StepFrame title="Phone camera">
         <p role="status">One moment...</p>
