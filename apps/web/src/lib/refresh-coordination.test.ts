@@ -438,8 +438,8 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     rc.resetRefreshCoordinationForTests();
     let release: () => void = () => undefined;
     void navigator.locks.request('cp.refresh', () => new Promise<void>((r) => (release = r)));
-    const sendA = vi.fn(async () => ({ kind: 'error' as const }));
-    const sendB = vi.fn(async () => ({ kind: 'busy' as const }));
+    const sendA = vi.fn(() => Promise.resolve({ kind: 'error' as const }));
+    const sendB = vi.fn(() => Promise.resolve({ kind: 'busy' as const }));
     const first = rc.coordinateRefresh(sendA);
     await flush();
     // Another tab's outcome for the first call arrives while that call still waits.
