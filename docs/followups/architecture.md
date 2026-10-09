@@ -137,7 +137,7 @@ From the ADR 0013 / 0006 section 8 / 0014 / 0016 reviews and the CI PRs. Owner-g
 
 ### CI (PRs #86, #87, #105, #110)
 - `qa.yml`: reject an empty host in the three allow-list steps; lowercase `host` consistently (`ALLOWED_HOSTS`, `web_host`, `api_host`); run the ZAP verdict step with `if: ${{ !cancelled() }}`; the node tests for `packages/qa/zap` and `k6/lib/guard.test.mjs` do not run in CI (needs a QA A script); the `K6_SESSIONS_JSON` secret may exceed 48 KB for 200 sessions.
-- `backup-nightly.yml`: `PGSSLROOTCERT=system` needs a publicly signed certificate matching `STAGING_BACKUP_PGHOST`; document in the runbook. Pin `postgres:16` by digest in both workflow files, kept in sync with `POSTGRES_IMAGE` in `verify-drill-support.mjs`. The `verify` job may need a longer `timeout-minutes` now that it runs the restore drill.
+- `backup-nightly.yml` is removed (C-63): no scheduled GitHub workflow and no GitHub secrets for backups. The earlier item (PGSSLROOTCERT, digest pinning) is moot.
 
 ### Owner-gated (not done here)
 - ADR 0011 amendment: `currentPassword` step-up also covers `POST /admin/users`, `PATCH /admin/users/:userId` and `POST .../unlock`, and `PATCH /admin/org-settings` (step-up, api-contract section 2). ADR 0010 section 6: `account:self`, heartbeat, appeals, reports and webhooks permissions and a CANDIDATE route variant (PR #113 adds `candidate_session:read|start|heartbeat|key`).

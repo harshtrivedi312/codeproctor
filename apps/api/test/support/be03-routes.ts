@@ -142,6 +142,13 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
   'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
   'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  // Invitations (FR-303, BE-06 slice 6c): role matrix, isolation, audit and races in apps/api/src/invitations/invitations.e2e-spec.ts.
+  'POST /tests/:id/invitations': 'apps/api/src/invitations/invitations.e2e-spec.ts',
+  // Reviewer read API (REVIEWER and SUPER_ADMIN): role matrix, cross-org 404, audit in apps/api/src/review/review.e2e-spec.ts. BE13_DEFAULT stays false.
+  'GET /review/queue': 'apps/api/src/review/review.e2e-spec.ts',
+  'GET /review/sessions/:id': 'apps/api/src/review/review.e2e-spec.ts',
+  'GET /review/sessions/:id/recordings/:recordingId/playback':
+    'apps/api/src/review/review.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
@@ -1473,7 +1480,8 @@ export const BE03_ROUTES: Be03Route[] = [
     method: 'GET',
     template: '/review/queue',
     permission: 'review_queue:read',
-    audit: null, // ASSUMED: the queue lists sessions but opens none
+    audit: { action: 'REVIEW_QUEUE_VIEWED', entityType: 'session' }, // built: apps/api/src/review
+    interceptor: true,
     mutating: false,
     ok: [200],
     prepare: () =>
@@ -1490,7 +1498,8 @@ export const BE03_ROUTES: Be03Route[] = [
     template: '/review/sessions/:id',
     permission: 'review_session:read',
     // TC-006 expected result: a row with actor, entity, IP when a reviewer opens a review. FR-105.
-    audit: { action: 'REVIEW_SESSION_VIEWED', entityType: 'session' }, // ASSUMED action name
+    audit: { action: 'REVIEW_SESSION_VIEWED', entityType: 'session' }, // built: apps/api/src/review
+    interceptor: true,
     mutating: false, // a read, but audited: the audit test treats `audit !== null` as the rule
     ok: [200],
     prepare: async (h, orgId) => {
@@ -1608,6 +1617,9 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/identity/presign', permission: 'candidate_identity:upload' },
   { key: 'POST /candidate/session/identity', permission: 'candidate_identity:upload' },
   { key: 'GET /candidate/session/identity', permission: 'candidate_identity:upload' },
+  // BE-10 proctor event ingestion (Integrity A, PR #301): signed batches, ADR 0013 section 2.
+  { key: 'POST /candidate/session/events', permission: 'candidate_events:write' },
+  { key: 'POST /candidate/session/keystrokes', permission: 'candidate_keystrokes:write' },
   // BE-11 answers and finish (Backend B, PR #187, gated): keys and permissions as registered on that branch.
   { key: 'POST /candidate/answers/:questionId/run', permission: 'candidate_answer:run' },
   { key: 'POST /candidate/answers/:questionId/submit', permission: 'candidate_answer:submit' },

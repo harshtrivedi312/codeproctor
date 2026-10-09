@@ -61,7 +61,10 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
 
   it('FR-101: every auth route the web calls is served by the API under the /api prefix', async () => {
     const notFound: string[] = [];
-    for (const r of webAuthRoutes()) {
+    // FR-102 (2FA optional for every role): the pre-login enrollment routes are gone from the API.
+    // The web openapi.yaml still lists them until Frontend A drops them; remove this list then.
+    const REMOVED_IN_API = new Set(['/v1/auth/2fa/enroll/start', '/v1/auth/2fa/enroll/confirm']);
+    for (const r of webAuthRoutes().filter((x) => !REMOVED_IN_API.has(x.path))) {
       const res = await (
         request(h.app.getHttpServer()) as unknown as Record<string, (u: string) => request.Test>
       )[r.method]!(`/api${r.path}`).send({});
@@ -96,7 +99,7 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
     expect(refreshed.totpEnabled).toBe(false);
   });
 
-  it('FR-102: 2fa/verify, enroll/confirm and refresh carry totpEnabled: true; challenge and error bodies never carry it', async () => {
+  it('FR-102: 2fa/verify and refresh carry totpEnabled: true and twoFactorRecommended: false; challenge and error bodies never carry it', async () => {
     const post = (path: string): request.Test =>
       request(h.app.getHttpServer()).post(`${API}/auth/${path}`);
 
@@ -122,23 +125,22 @@ describe('Web OpenAPI contract against the real API (FR-101, FR-102, FR-104, FR-
     expect(typeof rUser.totpEnabled).toBe('boolean');
     expect(rUser.totpEnabled).toBe(true);
 
-    // Forced enrolment: challenge has none, confirm says true (the row was just updated).
+    // No TOTP, any role: password-only sign-in; both flags are present booleans on login and refresh.
     const r = await createUser(h, { role: UserRole.REVIEWER });
-    const enrol = await login(h, r.email).expect(200);
-    expect((enrol.body as Body).status).toBe('two_factor_enrollment_required');
-    expectNoTotpEnabled(enrol);
-    const challengeToken = (enrol.body as Body).challengeToken;
-    const start = (await post('2fa/enroll/start').send({ challengeToken }).expect(200))
-      .body as Body;
-    expectNoTotpEnabled(
-      await post('2fa/enroll/confirm').send({ challengeToken, code: '000000' }).expect(400),
+    const plain = await login(h, r.email).expect(200);
+    expect((plain.body as Body).status).toBe('authenticated');
+    const pUser = sessionUser(plain.body, 'nested');
+    expect(pUser.totpEnabled).toBe(false);
+    expect(pUser.twoFactorRecommended).toBe(true);
+    const pRefreshed = sessionUser(
+      (await refresh(h, refreshCookie(plain)).expect(200)).body,
+      'flat',
     );
-    const done = await post('2fa/enroll/confirm')
-      .send({ challengeToken, code: authenticator.generate(start.manualKey) })
-      .expect(200);
-    const eUser = sessionUser(done.body, 'nested');
-    expect(typeof eUser.totpEnabled).toBe('boolean');
-    expect(eUser.totpEnabled).toBe(true);
+    expect(pRefreshed.totpEnabled).toBe(false);
+    expect(pRefreshed.twoFactorRecommended).toBe(true);
+    // Enrolled: recommended is false (the exact inverse of totpEnabled).
+    expect(vUser.twoFactorRecommended).toBe(false);
+    expect(rUser.twoFactorRecommended).toBe(false);
 
     // Error bodies.
     expectNoTotpEnabled(await login(h, t.email, 'wrong-password-1').expect(401));

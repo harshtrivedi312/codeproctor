@@ -5,7 +5,7 @@ import { apiBaseUrl } from '@/lib/env';
 
 /*
  * Mock staff auth API (FR-101, FR-102, FR-104, FR-107). Fake users and fake codes only.
- * The mock server keeps a little state (failed logins, enrolled users, used reset tokens, "refresh
+ * The mock server keeps a little state (failed logins, users with 2FA on, used reset tokens, "refresh
  * cookie") so flows behave like the real thing across page reloads. In the browser that state
  * lives in one mock-only cookie; in Vitest it lives in the same cookie of jsdom. It is never real
  * credentials, and nothing here is bundled unless mocking is enabled.
@@ -38,7 +38,7 @@ export const MOCK_USERS = {
     password: 'Reviewer-Pass-12',
     name: 'Robin Reviewer',
     role: 'REVIEWER',
-    // Not enrolled yet: first login forces enrollment (TC-003).
+    // Not enrolled: signs in with a password alone and sees the recommendation (FR-102).
     totp: false,
   },
 } as const satisfies Record<string, MockUser>;
@@ -53,7 +53,7 @@ interface MockUser {
 
 /** Any six digits except the value below are rejected. */
 export const MOCK_TOTP_CODE = '123456';
-/** One recovery code that works once for the admin; enrollment issues the codes in MOCK_RECOVERY_CODES. */
+/** One recovery code that works once for the admin; setup issues the codes in MOCK_RECOVERY_CODES. */
 export const MOCK_ADMIN_RECOVERY_CODE = 'ABCDEFGH23456723';
 export const MOCK_RECOVERY_CODES = [
   'KJ4HG7ABCD23XY56',
@@ -77,12 +77,13 @@ export const LOCK_MS = 15 * 60 * 1000;
 interface MockAuthState {
   failed: Record<string, number>;
   lockExpiresAt: Record<string, number>;
-  enrolled: string[];
   usedRecovery: string[];
   usedTokens: string[];
   refreshFor: string | null;
-  /** Users with optional roles (recruiter, author) who turned 2FA on from the Security page. */
+  /** Users who turned 2FA on from the Security page (any role). */
   totpOn: string[];
+  /** Seeded-on users (the admin) who turned 2FA off from the Security page. */
+  totpOff: string[];
   /** Recovery-code set per user, bumped on every issue; older sets stop working. 0 = the seed set. */
   recoveryGen: Record<string, number>;
   /** When a TOTP code was last accepted by disable, per user: the same code is refused again (replay). */
@@ -92,11 +93,11 @@ interface MockAuthState {
 const EMPTY: MockAuthState = {
   failed: {},
   lockExpiresAt: {},
-  enrolled: [],
   usedRecovery: [],
   usedTokens: [],
   refreshFor: null,
   totpOn: [],
+  totpOff: [],
   recoveryGen: {},
   disableCodeAt: {},
 };
@@ -153,8 +154,7 @@ export function seedMockTwoFactor(email: string): void {
   const user = findUser(email);
   if (!user) return;
   const state = load();
-  const list = isMandatory(user) ? state.enrolled : state.totpOn;
-  if (!list.includes(user.email)) list.push(user.email);
+  if (!state.totpOn.includes(user.email)) state.totpOn.push(user.email);
   save(state);
 }
 
@@ -169,17 +169,13 @@ function sessionFor(user: MockUser): Schemas['AuthSession'] {
       orgName: 'Acme Hiring (demo)',
       // Read from the per-user mock 2FA state at the time of the call, like the real session user.
       totpEnabled: twoFactorOn(user, load()),
+      // Always the opposite of totpEnabled: 2FA is optional for every role and recommended.
+      twoFactorRecommended: !twoFactorOn(user, load()),
     },
   };
 }
-/** FR-102: mandatory for these roles, so the API refuses to turn it off. */
-function isMandatory(user: MockUser): boolean {
-  return user.role === 'SUPER_ADMIN' || user.role === 'REVIEWER';
-}
 function twoFactorOn(user: MockUser, state: MockAuthState): boolean {
-  return isMandatory(user)
-    ? user.totp || state.enrolled.includes(user.email)
-    : state.totpOn.includes(user.email);
+  return (user.totp && !state.totpOff.includes(user.email)) || state.totpOn.includes(user.email);
 }
 
 function seedRecoveryCodes(user: MockUser): string[] {
@@ -209,7 +205,7 @@ function problem(
   request: Request,
   status: number,
   detail: string,
-  code?: 'REAUTH_FAILED' | 'TWO_FACTOR_REQUIRED_FOR_ROLE',
+  code?: 'REAUTH_FAILED',
   errors?: string[],
 ): Response {
   const titles: Record<number, string> = {
@@ -351,49 +347,13 @@ export function createAuthHandlers() {
       }
       state.failed[key] = 0;
       const challengeToken = `mock-challenge-${user.email}`;
-      if (isMandatory(user) || twoFactorOn(user, state)) {
-        const enrolled = twoFactorOn(user, state);
+      if (twoFactorOn(user, state)) {
         save(state);
-        return HttpResponse.json({
-          status: enrolled
-            ? ('two_factor_required' as const)
-            : ('two_factor_enrollment_required' as const),
-          challengeToken,
-        });
+        return HttpResponse.json({ status: 'two_factor_required' as const, challengeToken });
       }
       state.refreshFor = user.email;
       save(state);
       return HttpResponse.json({ status: 'authenticated' as const, session: sessionFor(user) });
-    }),
-
-    http.post(`${base}/2fa/enroll/start`, async ({ request }) => {
-      const { challengeToken } = (await request.json()) as { challengeToken: string };
-      // A stale or unknown challenge: 401 problem body (Backend #184), the same words as everywhere.
-      if (!userFromChallenge(challengeToken)) {
-        return problem(request, 401, 'Your sign-in has expired. Sign in again.');
-      }
-      return HttpResponse.json({
-        manualKey: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
-        otpauthUri:
-          'otpauth://totp/CodeProctor:reviewer%40example.test?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CodeProctor',
-      });
-    }),
-
-    http.post(`${base}/2fa/enroll/confirm`, async ({ request }) => {
-      const body = (await request.json()) as { challengeToken: string; code: string };
-      const user = userFromChallenge(body.challengeToken);
-      if (!user) return expired();
-      if (body.code !== MOCK_TOTP_CODE) {
-        return HttpResponse.json(
-          { code: 'invalid_code', message: 'That code did not match.' },
-          { status: 400 },
-        );
-      }
-      const state = load();
-      state.enrolled.push(user.email);
-      state.refreshFor = user.email;
-      save(state);
-      return HttpResponse.json({ session: sessionFor(user), recoveryCodes: MOCK_RECOVERY_CODES });
     }),
 
     http.post(`${base}/2fa/verify`, async ({ request }) => {
@@ -438,9 +398,10 @@ export function createAuthHandlers() {
       if (body.code !== MOCK_TOTP_CODE) {
         return problem(request, 400, 'The code is not valid.');
       }
-      // Mandatory roles are enrolled through the login flow; for them this just records it.
-      if (isMandatory(user)) state.enrolled.push(user.email);
-      else state.totpOn.push(user.email);
+      state.totpOn.push(user.email);
+      state.totpOff = state.totpOff.filter((email) => email !== user.email);
+      // The server revokes every refresh family, the caller's included (D-70): a refresh now 401s.
+      state.refreshFor = null;
       const gen = (state.recoveryGen[user.email] ?? 0) + 1;
       state.recoveryGen[user.email] = gen;
       save(state);
@@ -448,7 +409,7 @@ export function createAuthHandlers() {
     }),
 
     // Backend PR #51: needs the current password AND a 6-digit TOTP code (never a recovery code).
-    // Order: password, 409 if off, code, role refusal. Success revokes every refresh token.
+    // Order: password, 409 if off, code. Allowed for every role. Success revokes every refresh token.
     http.post(`${base}/2fa/disable`, async ({ request }) => {
       const checked = await reauth(request, totpCodeOnly, false, REAUTH_DISABLE_DETAIL);
       if (checked instanceof Response) return checked;
@@ -461,19 +422,10 @@ export function createAuthHandlers() {
         countFailure(state, user.email);
         return reauthFailed(request, REAUTH_DISABLE_DETAIL);
       }
-      // The code is spent even if the role then refuses the request.
       state.disableCodeAt[user.email] = Date.now();
       state.failed[user.email] = 0;
-      if (isMandatory(user)) {
-        save(state);
-        return problem(
-          request,
-          403,
-          'Two-factor authentication is required for your role.',
-          'TWO_FACTOR_REQUIRED_FOR_ROLE',
-        );
-      }
       state.totpOn = state.totpOn.filter((email) => email !== user.email);
+      state.totpOff.push(user.email);
       state.refreshFor = null;
       save(state);
       return new HttpResponse(null, { status: 204 });

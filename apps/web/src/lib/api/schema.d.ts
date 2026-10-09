@@ -4,4295 +4,4566 @@
  */
 
 export interface paths {
-  '/v1/health': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Liveness probe */
+        get: operations["getHealth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Liveness probe */
-    get: operations['getHealth'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/time': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/time": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Server clock, used to seed client countdown timers (FR-505) */
+        get: operations["getServerTime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Server clock, used to seed client countdown timers (FR-505) */
-    get: operations['getServerTime'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/candidate/session': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/candidate/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The candidate's running session with the open section and its questions (FR-301, FR-505) */
+        get: operations["getCandidateSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** The candidate's running session with the open section and its questions (FR-301, FR-505) */
-    get: operations['getCandidateSession'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/candidate/questions/{questionId}/draft': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/candidate/questions/{questionId}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Autosave a code draft or an answer (FR-504) */
+        put: operations["saveDraft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    /** Autosave a code draft or an answer (FR-504) */
-    put: operations['saveDraft'];
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/candidate/questions/{questionId}/run': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/candidate/questions/{questionId}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run code against the sample tests (FR-502). One run per 5 seconds. */
+        post: operations["runSampleTests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Run code against the sample tests (FR-502). One run per 5 seconds. */
-    post: operations['runSampleTests'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/candidate/sections/{sectionId}/finish': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/candidate/sections/{sectionId}/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Finish the open section. Final, it cannot be reopened (ADR 0002 S-1). */
+        post: operations["finishSection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Finish the open section. Final, it cannot be reopened (ADR 0002 S-1). */
-    post: operations['finishSection'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/login': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Staff password login (FR-101). Placeholder path, see fsd.md section 4 (/auth/login). */
+        post: operations["login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Staff password login (FR-101). Placeholder path, see fsd.md section 4 (/auth/login). */
-    post: operations['login'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/enroll/start': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/2fa/setup/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Signed-in user begins optional TOTP set-up. Mirrors backend PR */
+        post: operations["startTwoFactorSetup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Begin forced TOTP enrollment (FR-102). Needs the challenge token from login. */
-    post: operations['startTwoFactorEnrollment'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/enroll/confirm': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/2fa/setup/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm optional set-up with a first code; returns the one-time recovery codes */
+        post: operations["confirmTwoFactorSetup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Confirm enrollment with a first code; returns the one-time recovery codes (ADR 0003 section 1) */
-    post: operations['confirmTwoFactorEnrollment'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/setup/start': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/2fa/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR */
+        post: operations["disableTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Signed-in user begins optional TOTP set-up. Mirrors backend PR */
-    post: operations['startTwoFactorSetup'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/setup/confirm': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/2fa/recovery-codes/regenerate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replace all recovery codes; the old set stops working */
+        post: operations["regenerateRecoveryCodes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Confirm optional set-up with a first code; returns the one-time recovery codes */
-    post: operations['confirmTwoFactorSetup'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/disable': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/2fa/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete login with a 6-digit TOTP code or a recovery code (FR-102, ADR 0003 section 1) */
+        post: operations["verifyTwoFactor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Turn TOTP off. Needs password and TOTP code; revokes all refresh tokens and clears the cookie (backend PR */
-    post: operations['disableTwoFactor'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/recovery-codes/regenerate': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rotate the refresh cookie and return a new access token (FR-104). Cookie is httpOnly. */
+        post: operations["refreshSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Replace all recovery codes; the old set stops working */
-    post: operations['regenerateRecoveryCodes'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/verify': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke the refresh-token family and clear the cookie */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Complete login with a 6-digit TOTP code or a recovery code (FR-102, ADR 0003 section 1) */
-    post: operations['verifyTwoFactor'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/refresh': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/password/forgot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request a reset link. Always 202 with the same body (FR-107, D-22). */
+        post: operations["forgotPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Rotate the refresh cookie and return a new access token (FR-104). Cookie is httpOnly. */
-    post: operations['refreshSession'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/logout': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/auth/password/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set a password with a single-use reset or invite token (FR-107, ADR 0003 section 4). Never signs in. */
+        post: operations["resetPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Revoke the refresh-token family and clear the cookie */
-    post: operations['logout'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/password/forgot': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Staff users of the caller's organisation (SUPER_ADMIN, FR-103) */
+        get: operations["listStaffUsers"];
+        put?: never;
+        /** Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4) */
+        post: operations["inviteStaffUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Request a reset link. Always 202 with the same body (FR-107, D-22). */
-    post: operations['forgotPassword'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/password/reset': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/users/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change a role or deactivate or reactivate a user (revokes their refresh tokens) */
+        patch: operations["updateStaffUser"];
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Set a password with a single-use reset or invite token (FR-107, ADR 0003 section 4). Never signs in. */
-    post: operations['resetPassword'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/admin/users': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Organisation settings (retention, erasure hold, risk scoring, decline contact) */
+        get: operations["getOrgSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change some organisation settings */
+        patch: operations["updateOrgSettings"];
+        trace?: never;
     };
-    /** Staff users of the caller's organisation (SUPER_ADMIN, FR-103) */
-    get: operations['listStaffUsers'];
-    put?: never;
-    /** Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4) */
-    post: operations['inviteStaffUser'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/admin/users/{userId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/consent-texts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Consent document versions (D-17), newest first */
+        get: operations["listConsentTexts"];
+        put?: never;
+        /** Add a new version. It starts as a placeholder; Legal approval is recorded outside this API (Q-43). */
+        post: operations["createConsentText"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /** Change a role or deactivate or reactivate a user (revokes their refresh tokens) */
-    patch: operations['updateStaffUser'];
-    trace?: never;
-  };
-  '/v1/admin/settings': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/consent-texts/{consentTextId}/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Make this version the one candidates sign */
+        put: operations["setCurrentConsentText"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Organisation settings (retention, erasure hold, risk scoring, decline contact) */
-    get: operations['getOrgSettings'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /** Change some organisation settings */
-    patch: operations['updateOrgSettings'];
-    trace?: never;
-  };
-  '/v1/admin/consent-texts': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Candidates of the organisation with their erasure state (list view only; the full page is FE-05) */
+        get: operations["listCandidates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Consent document versions (D-17), newest first */
-    get: operations['listConsentTexts'];
-    put?: never;
-    /** Add a new version. It starts as a placeholder; Legal approval is recorded outside this API (Q-43). */
-    post: operations['createConsentText'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/admin/consent-texts/{consentTextId}/current': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/admin/candidates/{candidateId}/erasure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request erasure of a candidate's data (NFR-05, D-19). Waits while a review or appeal is open if the hold is on. */
+        post: operations["requestCandidateErasure"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    /** Make this version the one candidates sign */
-    put: operations['setCurrentConsentText'];
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/admin/candidates': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** REAL. List questions (question:read). Readers without question:update see published versions only and never archived questions. */
+        get: operations["listQuestions"];
+        put?: never;
+        /** REAL. Create a question with draft version 1 (question:create). */
+        post: operations["createQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** Candidates of the organisation with their erasure state (list view only; the full page is FE-05) */
-    get: operations['listCandidates'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/admin/candidates/{candidateId}/erasure': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/questions/ai-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** REAL. The AI reference policy of your organization (permission ai_reference:read, held by Author and Super Admin; recruiters and reviewers get 403). Read-only. */
+        get: operations["getAiPolicy"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** Request erasure of a candidate's data (NFR-05, D-19). Waits while a review or appeal is open if the hold is on. */
-    post: operations['requestCandidateErasure'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/questions/{questionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        /** REAL. One question with one version (the latest by default, `version` selects another). Callers with question:update get the full QuestionDetail. Every other reader (Recruiter) gets QuestionDetailRedacted: published versions only (a draft, a never-published, a missing and another organization's question are the identical 404), no revision, reference solution, answer key or validation report, and hidden test cases as id, position, isHidden and weight only. A published but archived question is still readable. */
+        get: operations["getQuestion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** REAL. Change fields of the question (question:update). Every field is optional but at least one is needed. A draft is edited in place; if the latest version is published this creates the next version as a draft (createdNewVersion true). Test cases are NOT part of this body: use the test-case routes. expectedRevision (the revision as loaded) makes a concurrent change a 409. */
+        patch: operations["updateQuestion"];
+        trace?: never;
     };
-    /** REAL. List questions (question:read). Readers without question:update see published versions only and never archived questions. */
-    get: operations['listQuestions'];
-    put?: never;
-    /** REAL. Create a question with draft version 1 (question:create). */
-    post: operations['createQuestion'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/ai-policy': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/questions/{questionId}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is incomplete; for a CODING question also until a passing validation run of the current revision exists and every allowed language has enough AI reference solutions. 409 when there is no draft, the question is archived, or expectedRevision no longer matches. */
+        post: operations["publishQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. The AI reference policy of your organization (permission ai_reference:read, held by Author and Super Admin; recruiters and reviewers get 403). Read-only. */
-    get: operations['getAiPolicy'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** REAL. Soft-archive a question (question:update); hidden from lists, never deleted. */
+        post: operations["archiveQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. One question with one version (the latest by default, `version` selects another). Callers with question:update get the full QuestionDetail. Every other reader (Recruiter) gets QuestionDetailRedacted: published versions only (a draft, a never-published, a missing and another organization's question are the identical 404), no revision, reference solution, answer key or validation report, and hidden test cases as id, position, isHidden and weight only. A published but archived question is still readable. */
-    get: operations['getQuestion'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /** REAL. Change fields of the question (question:update). Every field is optional but at least one is needed. A draft is edited in place; if the latest version is published this creates the next version as a draft (createdNewVersion true). Test cases are NOT part of this body: use the test-case routes. expectedRevision (the revision as loaded) makes a concurrent change a 409. */
-    patch: operations['updateQuestion'];
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/publish': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/unarchive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** REAL. Restore an archived question (question:update). */
+        post: operations["unarchiveQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** REAL. Publish the latest draft (question:update). 422 with errors[] while the draft is incomplete; for a CODING question also until a passing validation run of the current revision exists and every allowed language has enough AI reference solutions. 409 when there is no draft, the question is archived, or expectedRevision no longer matches. */
-    post: operations['publishQuestion'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/archive': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/test-cases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** REAL. Add a test case to a draft version of a coding question (question:update). */
+        post: operations["addTestCase"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** REAL. Soft-archive a question (question:update); hidden from lists, never deleted. */
-    post: operations['archiveQuestion'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/unarchive': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                testCaseId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** REAL. Remove a test case from a draft version (question:update). The revision check is a query parameter. */
+        delete: operations["removeTestCase"];
+        options?: never;
+        head?: never;
+        /** REAL. Change a test case of a draft version (question:update). */
+        patch: operations["updateTestCase"];
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** REAL. Restore an archived question (question:update). */
-    post: operations['unarchiveQuestion'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/test-cases': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/variants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        /** REAL. The variants of a version with params and per-slot overrides, plus the version revision (question:update). The writer detail carries the same variants in version.variants. */
+        get: operations["listVariants"];
+        put?: never;
+        /** REAL. Add a variant to a draft version (question:update). Every {{placeholder}} of the statement, starter code and reference solution of an ACTIVE variant needs a param (400 otherwise). At most 50 per version. */
+        post: operations["createVariant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** REAL. Add a test case to a draft version of a coding question (question:update). */
-    post: operations['addTestCase'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/test-cases/{testCaseId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        testCaseId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/variants/{variantId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** REAL. Remove a variant and its overrides from a draft (question:update). The revision check is a query parameter. */
+        delete: operations["removeVariant"];
+        options?: never;
+        head?: never;
+        /** REAL. Change the params or the active flag of a variant of a draft (question:update). An empty body is 400. */
+        patch: operations["updateVariant"];
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    /** REAL. Remove a test case from a draft version (question:update). The revision check is a query parameter. */
-    delete: operations['removeTestCase'];
-    options?: never;
-    head?: never;
-    /** REAL. Change a test case of a draft version (question:update). */
-    patch: operations['updateTestCase'];
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/variants': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/variants/{variantId}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+            };
+            cookie?: never;
+        };
+        /** REAL. The candidate-shaped view of one variant: rendered statement and starter code, its own sample cases, no params, hidden data, reference solution or answer spec (question:read). Without question:update only published versions and active variants are visible (404 otherwise). A variant that does not render is 422 with reasons for a writer and a plain 422 for others. */
+        get: operations["previewVariant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. The variants of a version with params and per-slot overrides, plus the version revision (question:update). The writer detail carries the same variants in version.variants. */
-    get: operations['listVariants'];
-    put?: never;
-    /** REAL. Add a variant to a draft version (question:update). Every {{placeholder}} of the statement, starter code and reference solution of an ACTIVE variant needs a param (400 otherwise). At most 50 per version. */
-    post: operations['createVariant'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/variants/{variantId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+                testCaseId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Answers the override and the new revision of the version, computed in the same transaction. */
+        put: operations["setVariantOverride"];
+        post?: never;
+        /** REAL. Remove an override; the slot's own input and output apply again (question:update). */
+        delete: operations["removeVariantOverride"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    post?: never;
-    /** REAL. Remove a variant and its overrides from a draft (question:update). The revision check is a query parameter. */
-    delete: operations['removeVariant'];
-    options?: never;
-    head?: never;
-    /** REAL. Change the params or the active flag of a variant of a draft (question:update). An empty body is 400. */
-    patch: operations['updateVariant'];
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/variants/{variantId}/preview': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/prefill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** WEB-ONLY placeholder (BE-04b did not add a prefill route; ADR 0007 helper). Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals. */
+        post: operations["prefillVariantOutputs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. The candidate-shaped view of one variant: rendered statement and starter code, its own sample cases, no params, hidden data, reference solution or answer spec (question:read). Without question:update only published versions and active variants are visible (404 otherwise). A variant that does not render is 422 with reasons for a writer and a plain 422 for others. */
-    get: operations['previewVariant'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/variants/{variantId}/test-cases/{testCaseId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-        testCaseId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** REAL. Start validating the latest DRAFT (question:validate, coding questions only): the reference solution of every allowed language runs on every test slot of every active variant with that variant's data. The run happens after the response; poll GET .../validation. The result is bound to the revision returned here. One run per question at a time. */
+        post: operations["validateQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    /** REAL. Override the input and expected output of one test slot for a variant (question:update). The slot must belong to the same version; its hidden flag and weight stay the slot's. Answers the override and the new revision of the version, computed in the same transaction. */
-    put: operations['setVariantOverride'];
-    post?: never;
-    /** REAL. Remove an override; the slot's own input and output apply again (question:update). */
-    delete: operations['removeVariantOverride'];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/prefill': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/validation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        /** REAL. The state of the latest validation run of the latest version and its stored report (question:validate). There is no job id in the path: one status per question. A run whose content changed meanwhile is STALE and never opens the publish gate. */
+        get: operations["getValidation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** WEB-ONLY placeholder (BE-04b did not add a prefill route; ADR 0007 helper). Run the reference solution on a variant's inputs and PROPOSE expected outputs (ADR 0007). Nothing is stored; the author must accept the proposals. */
-    post: operations['prefillVariantOutputs'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/validate': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/ai-references": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        /** REAL. The AI reference solutions of a version, current and superseded (ai_reference:read). Rows belong to ONE version; a new version starts with none. Never shown to recruiters or candidates, never used for grading. */
+        get: operations["listAiReferences"];
+        put?: never;
+        /** REAL. Record an AI reference solution for a language of a version (ai_reference:create, append-only). collectedAt is the server's time. */
+        post: operations["addAiReference"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** REAL. Start validating the latest DRAFT (question:validate, coding questions only): the reference solution of every allowed language runs on every test slot of every active variant with that variant's data. The run happens after the response; poll GET .../validation. The result is bound to the revision returned here. One run per question at a time. */
-    post: operations['validateQuestion'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/validation': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
+    "/v1/questions/{questionId}/versions/{version}/ai-references/{aiReferenceId}/supersede": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                aiReferenceId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** REAL. Retire a row (sets supersededAt; the row stays), optionally inserting its replacement in the same transaction (ai_reference:supersede). */
+        post: operations["supersedeAiReference"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. The state of the latest validation run of the latest version and its stored report (question:validate). There is no job id in the path: one status per question. A run whose content changed meanwhile is STALE and never opens the publish gate. */
-    get: operations['getValidation'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/ai-references': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
+    "/v1/tests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** REAL. Test templates of your organisation (test:read), newest first. */
+        get: operations["listTests"];
+        put?: never;
+        /** REAL. Create a test with ordered sections, fixed or random questions, a STANDARD or STRICT profile and a pass score (test:create). */
+        post: operations["createTest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. The AI reference solutions of a version, current and superseded (ai_reference:read). Rows belong to ONE version; a new version starts with none. Never shown to recruiters or candidates, never used for grading. */
-    get: operations['listAiReferences'];
-    put?: never;
-    /** REAL. Record an AI reference solution for a language of a version (ai_reference:create, append-only). collectedAt is the server's time. */
-    post: operations['addAiReference'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/questions/{questionId}/versions/{version}/ai-references/{aiReferenceId}/supersede': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        aiReferenceId: string;
-      };
-      cookie?: never;
+    "/v1/tests/{testId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        /** REAL. One test with its sections and questions (test:read). */
+        get: operations["getTest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** REAL. Edit a test that has no invitation or session yet (test:update). Sections, when sent, replace ALL sections. There is NO revision or If-Match: two editors are last-write-wins. passScore cannot be cleared once set. */
+        patch: operations["updateTest"];
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** REAL. Retire a row (sets supersededAt; the row stays), optionally inserting its replacement in the same transaction (ai_reference:supersede). */
-    post: operations['supersedeAiReference'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tests': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/tests/{testId}/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create). Creates the invitation and its session in status INVITED, and links or creates the candidate by email. */
+        post: operations["createInvitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. Test templates of your organisation (test:read), newest first. */
-    get: operations['listTests'];
-    put?: never;
-    /** REAL. Create a test with ordered sections, fixed or random questions, a STANDARD or STRICT profile and a pass score (test:create). */
-    post: operations['createTest'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tests/{testId}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
+    "/v1/tests/{testId}/invitations/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here. */
+        post: operations["createInvitationsBulk"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** REAL. One test with its sections and questions (test:read). */
-    get: operations['getTest'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /** REAL. Edit a test that has no invitation or session yet (test:update). Sections, when sent, replace ALL sections. There is NO revision or If-Match: two editors are last-write-wins. passScore cannot be cleared once set. */
-    patch: operations['updateTest'];
-    trace?: never;
-  };
-  '/v1/tests/{testId}/invitations': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
+    "/v1/admin/candidates/{candidateId}/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidateId: string;
+            };
+            cookie?: never;
+        };
+        /** WEB-ONLY [BE-06b]. The invitations of one candidate with their session status and the time each status was reached (invitation:create). Status only, no scores, flags or verdicts. */
+        get: operations["listCandidateInvitations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create). Creates the invitation and its session in status INVITED, and links or creates the candidate by email. */
-    post: operations['createInvitation'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tests/{testId}/invitations/bulk': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
+    "/v1/review/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** REAL. Sessions awaiting or under review, oldest first (review_queue:read). Default filter GRADED + UNDER_REVIEW. */
+        get: operations["listReviewQueue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /** WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here. */
-    post: operations['createInvitationsBulk'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/admin/candidates/{candidateId}/invitations': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        candidateId: string;
-      };
-      cookie?: never;
+    "/v1/review/sessions/{sessionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** REAL. The review bundle of one session (review_session:read). */
+        get: operations["getReviewSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /** WEB-ONLY [BE-06b]. The invitations of one candidate with their session status and the time each status was reached (invitation:create). Status only, no scores, flags or verdicts. */
-    get: operations['listCandidateInvitations'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
+    "/v1/review/sessions/{sessionId}/recordings/{recordingId}/playback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** REAL. A presigned GET for one recording, valid 900 s (review_session:read). */
+        get: operations["getReviewPlayback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/review/sessions/{sessionId}/answers/{sessionQuestionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Manual scoring of a short answer (review_verdict:set, docs/api-contract.md section 7). */
+        patch: operations["scoreReviewAnswer"];
+        trace?: never;
+    };
+    "/v1/review/sessions/{sessionId}/verdict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED. */
+        post: operations["setReviewVerdict"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-  schemas: {
-    /** @enum {string} */
-    StaffRole: 'SUPER_ADMIN' | 'RECRUITER' | 'AUTHOR' | 'REVIEWER';
-    AuthUser: {
-      id: string;
-      email: string;
-      name: string;
-      role: components['schemas']['StaffRole'];
-      orgName: string;
-      totpEnabled: boolean;
-    };
-    AuthSession: {
-      accessToken: string;
-      user: components['schemas']['AuthUser'];
-    };
-    ChallengeRequest: {
-      challengeToken: string;
-    };
-    LoginResult: {
-      /** @enum {string} */
-      status: 'authenticated' | 'two_factor_required' | 'two_factor_enrollment_required';
-      session?: components['schemas']['AuthSession'];
-      challengeToken?: string;
-    };
-    /** @enum {string} */
-    QuestionType: 'CODING' | 'MCQ' | 'SHORT_ANSWER';
-    /** @enum {string} */
-    Difficulty: 'EASY' | 'MEDIUM' | 'HARD';
-    Limits: {
-      cpuMs: number;
-      /** @description Not below cpuMs */
-      wallMs: number;
-      memoryKb: number;
-    };
-    /** @description A test slot. For a reader without question:update a HIDDEN case carries only id, position, isHidden and weight: the input and expectedOutput keys are absent, not null. */
-    TestCase: {
-      id: string;
-      position: number;
-      isHidden: boolean;
-      weight: number;
-      input?: string;
-      expectedOutput?: string;
-    };
-    TestCaseInput: {
-      input: string;
-      expectedOutput: string;
-      /** @default true */
-      isHidden: boolean;
-      /**
-       * @description At most 2 decimals
-       * @default 1
-       */
-      weight: number;
-      /** @description Default after the last slot */
-      position?: number;
-      expectedRevision?: string;
-    };
-    TestCasePatch: {
-      expectedRevision?: string;
-      input?: string;
-      expectedOutput?: string;
-      isHidden?: boolean;
-      weight?: number;
-      position?: number;
-    };
-    McqOption: {
-      id: string;
-      text: string;
-    };
-    /** @description MCQ answer spec (the question type says which shape applies). 2 to 10 options. */
-    McqAnswerSpec: {
-      options: components['schemas']['McqOption'][];
-      correctOptionIds: string[];
-      multiple: boolean;
-    };
-    /** @description SHORT_ANSWER answer spec (D-23). */
-    ShortAnswerSpec: {
-      canonical: string;
-      acceptedVariants: string[];
-    };
-    AnswerSpec: components['schemas']['McqAnswerSpec'] | components['schemas']['ShortAnswerSpec'];
-    QuestionVersionRef: {
-      id: string;
-      version: number;
-      isPublished: boolean;
-      title: string;
-      difficulty: components['schemas']['Difficulty'];
-      /** Format: date-time */
-      validatedAt: string | null;
-      /** Format: date-time */
-      createdAt: string;
-    };
-    QuestionSummary: {
-      id: string;
-      slug: string;
-      type: components['schemas']['QuestionType'];
-      tags: string[];
-      isArchived: boolean;
-      /** Format: date-time */
-      createdAt: string;
-      /** @description The published version tests use; null until the first publish */
-      published: components['schemas']['QuestionVersionRef'] | null;
-      /** @description Highest version number (maybe a draft); for a reader without question:update the highest PUBLISHED version */
-      latest: components['schemas']['QuestionVersionRef'];
-    };
-    QuestionList: {
-      items: components['schemas']['QuestionSummary'][];
-      page: number;
-      pageSize: number;
-      total: number;
-    };
-    ValidationCell: {
-      language: components['schemas']['Language'];
-      passed: boolean;
-      testsPassed: number;
-      testsTotal: number;
-    };
-    ValidationFailure: {
-      language: components['schemas']['Language'];
-      testCaseId: string | null;
-      position: number | null;
-      /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE. A client must cope with a value it does not know. */
-      verdict: string;
-      /** @description Only for a visible (sample) slot, never a hidden one */
-      actualOutput?: string;
-      diagnostic?: string;
-    };
-    ValidationVariantResult: {
-      /** @description Null for the base content (a version with no active variant) */
-      variantId: string | null;
-      passed: boolean;
-      cells: components['schemas']['ValidationCell'][];
-      failures: components['schemas']['ValidationFailure'][];
-    };
-    /** @description Stored in the version's validationReport (question:update readers only). `revision` is the content revision the run was bound to, taken under the question lock at start: publish refuses a report of any other revision. `error` is set when the run could not complete; then passed is false and perVariant is empty. */
-    ValidationReport: {
-      passed: boolean;
-      revision: string;
-      /** Format: date-time */
-      startedAt: string;
-      /** Format: date-time */
-      finishedAt: string;
-      /** @enum {string} */
-      error?: 'EXECUTION_ERROR' | 'TIMEOUT';
-      perVariant: components['schemas']['ValidationVariantResult'][];
-    };
-    StartValidation: {
-      expectedRevision?: string;
-    };
-    ValidationStarted: {
-      jobId: string;
-      /** @enum {string} */
-      status: 'RUNNING';
-      /** @description The content revision this run validates */
-      revision: string;
-      version: number;
-      /** Format: date-time */
-      startedAt: string;
-    };
-    ValidationStatus: {
-      /**
-       * @description NONE never run on this content; RUNNING; PASSED or FAILED finished on the current content; STALE the content changed while it ran, the result was discarded (publish stays closed); ERROR the run could not complete (fail closed).
-       * @enum {string}
-       */
-      status: 'NONE' | 'RUNNING' | 'PASSED' | 'FAILED' | 'STALE' | 'ERROR';
-      jobId: string | null;
-      version: number;
-      currentRevision: string;
-      /** @description The revision the run was bound to */
-      revision: string | null;
-      /** Format: date-time */
-      startedAt: string | null;
-      /** Format: date-time */
-      finishedAt: string | null;
-      /**
-       * Format: date-time
-       * @description Set only by a passing run of the current content
-       */
-      validatedAt: string | null;
-      /** @description A ValidationReport when one is stored */
-      report: {
-        [key: string]: unknown;
-      } | null;
-    };
-    /** @description The full version a caller with question:update gets */
-    QuestionVersion: components['schemas']['QuestionVersionRef'] & {
-      statementMd: string;
-      allowedLanguages: components['schemas']['Language'][];
-      limits: components['schemas']['Limits'];
-      starterCode: {
-        [key: string]: string;
-      };
-      referenceSolution: {
-        [key: string]: string;
-      };
-      answerSpec: components['schemas']['AnswerSpec'] | null;
-      validationReport: components['schemas']['ValidationReport'] | null;
-      /** @description Opaque SHA-256 of the version content, test cases and variants with their overrides (question:update only). Send it back as expectedRevision; it changes with every content, test-case, variant or override change. */
-      revision: string;
-      testCases: components['schemas']['TestCase'][];
-      /** @description Variants with params and overrides (writers only; a reader never gets this key). */
-      variants: components['schemas']['Variant'][];
-    };
-    /** @description What a reader without question:update gets of a version: an allowlist. No revision, referenceSolution, answerSpec or validationReport, and hidden test cases without input and expectedOutput. */
-    QuestionVersionRead: {
-      id: string;
-      version: number;
-      isPublished: boolean;
-      title: string;
-      difficulty: components['schemas']['Difficulty'];
-      /** Format: date-time */
-      validatedAt: string | null;
-      /** Format: date-time */
-      createdAt: string;
-      statementMd: string;
-      allowedLanguages: components['schemas']['Language'][];
-      limits: components['schemas']['Limits'];
-      starterCode: {
-        [key: string]: string;
-      };
-      testCases: components['schemas']['TestCase'][];
-    };
-    /** @description A question with one full version (question:update) */
-    QuestionDetail: components['schemas']['QuestionSummary'] & {
-      /** @description Oldest first */
-      versions: components['schemas']['QuestionVersionRef'][];
-      version: components['schemas']['QuestionVersion'];
-      /** @description true when this PATCH created a new version because the latest was published */
-      createdNewVersion: boolean;
-    };
-    /** @description The detail a reader without question:update gets (an allowlist, DL-32, BE-04a staff-view.ts) */
-    QuestionDetailRedacted: {
-      id: string;
-      slug: string;
-      type: components['schemas']['QuestionType'];
-      tags: string[];
-      isArchived: boolean;
-      /** Format: date-time */
-      createdAt: string;
-      published: components['schemas']['QuestionVersionRef'] | null;
-      latest: components['schemas']['QuestionVersionRef'];
-      versions: components['schemas']['QuestionVersionRef'][];
-      version: components['schemas']['QuestionVersionRead'];
-      createdNewVersion: boolean;
-    };
-    CreateQuestion: {
-      type?: components['schemas']['QuestionType'];
-      /** @description Unique per organization; generated from the title when omitted */
-      slug?: string;
-      title: string;
-      statementMd: string;
-      difficulty: components['schemas']['Difficulty'];
-      tags?: string[];
-      allowedLanguages?: components['schemas']['Language'][];
-      limits?: components['schemas']['Limits'];
-      starterCode?: {
-        [key: string]: string;
-      };
-      referenceSolution?: {
-        [key: string]: string;
-      };
-      answerSpec?: components['schemas']['AnswerSpec'];
-      testCases?: components['schemas']['TestCaseInput'][];
-    };
-    /** @description Every field is optional, at least one is needed. Test cases have their own routes. */
-    UpdateQuestion: {
-      expectedRevision?: string;
-      title?: string;
-      statementMd?: string;
-      difficulty?: components['schemas']['Difficulty'];
-      tags?: string[];
-      allowedLanguages?: components['schemas']['Language'][];
-      limits?: components['schemas']['Limits'];
-      starterCode?: {
-        [key: string]: string;
-      };
-      referenceSolution?: {
-        [key: string]: string;
-      };
-      answerSpec?: components['schemas']['AnswerSpec'];
-    };
-    PublishRequest: {
-      expectedRevision?: string;
-    };
-    /**
-     * @description The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED, IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added here when the web starts branching on them. Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web retries it automatically, bounded). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
-     * @enum {string}
-     */
-    ProblemCode:
-      | 'REAUTH_FAILED'
-      | 'TWO_FACTOR_REQUIRED_FOR_ROLE'
-      | 'SETTINGS_CONFLICT'
-      | 'VARIANT_HAS_AI_REFERENCES'
-      | 'BUSY'
-      | 'REASON_NOT_ENABLED'
-      | 'ANSWER_NOT_MANUAL'
-      | 'SESSION_NOT_UNDER_REVIEW'
-      | 'VERDICT_ALREADY_SET';
-    /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference rows). The UI branches on status and endpoint, and on that code. */
-    Problem: {
-      type: string;
-      title: string;
-      status: number;
-      detail?: string;
-      instance?: string;
-      traceId?: string;
-      errors?: string[];
-      code?: components['schemas']['ProblemCode'];
-    };
-    /** @description One test slot's input and expected output for a variant. isHidden and position come from the slot. */
-    VariantOverride: {
-      testCaseId: string;
-      isHidden: boolean;
-      position: number;
-      input: string;
-      expectedOutput: string;
-    };
-    /** @description An explicit variant (ADR 0007). It has NO label or name: the UI names it by its place in the list and its params. renderedStatement is the statement rendered with params, kept for the author. Variants are sorted by id, which is NOT a meaningful order, and a fork gives every variant a new id. */
-    Variant: {
-      id: string;
-      isActive: boolean;
-      params: {
-        [key: string]: string | number | boolean;
-      };
-      renderedStatement: string;
-      testCaseOverrides: components['schemas']['VariantOverride'][];
-    };
-    /** @description The revision of a version after a writer-only change (never in a recruiter-reachable body). */
-    RevisionResult: {
-      /** @description The new revision, computed inside the same transaction as the change; send it as expectedRevision. */
-      revision: string;
-    };
-    TestCaseMutation: components['schemas']['TestCase'] & components['schemas']['RevisionResult'];
-    VariantOverrideMutation: components['schemas']['VariantOverride'] &
-      components['schemas']['RevisionResult'];
-    /** @description The edited question plus the revision of the version the edit left (the new version after a fork). */
-    QuestionUpdateResult: components['schemas']['QuestionDetail'] &
-      components['schemas']['RevisionResult'];
-    VariantList: {
-      items: components['schemas']['Variant'][];
-      revision: string;
-    };
-    VariantMutation: {
-      variant: components['schemas']['Variant'];
-      /** @description The new revision of the version */
-      revision: string;
-    };
-    CreateVariant: {
-      params: {
-        [key: string]: string | number | boolean;
-      };
-      /** @default true */
-      isActive: boolean;
-      expectedRevision?: string;
-    };
-    UpdateVariant: {
-      params?: {
-        [key: string]: string | number | boolean;
-      };
-      isActive?: boolean;
-      expectedRevision?: string;
-    };
-    OverrideInput: {
-      input: string;
-      expectedOutput: string;
-      expectedRevision?: string;
-    };
-    CandidateQuestionPreview: {
-      type: components['schemas']['QuestionType'];
-      title: string;
-      statementMd: string;
-      languages: string[];
-      limits: components['schemas']['Limits'];
-      starterCode: {
-        [key: string]: string;
-      };
-      samples: {
-        input: string;
-        expectedOutput: string;
-      }[];
-      mcq?: {
-        multiple: boolean;
-        options: {
-          id: string;
-          text: string;
-        }[];
-      };
-    };
-    AiPolicy: {
-      /** @description Assistants required per language to publish; 0 is off. */
-      minAssistants: number;
-      /** @description True when the org has no valid setting and the default applies */
-      isDefault: boolean;
-      /** @description AI-4 refresh interval in days; null until the API implements the setting. */
-      refreshIntervalDays: number | null;
-    };
-    CreateAiReference: {
-      /** @description Assistant product name, for example ChatGPT */
-      assistant: string;
-      modelLabel: string;
-      language: components['schemas']['Language'];
-      solutionCode: string;
-      promptText?: string;
-      /** @description A variant of this version; absent means the base statement */
-      variantId?: string;
-    };
-    AiReference: {
-      id: string;
-      variantId: string | null;
-      assistant: string;
-      modelLabel: string;
-      language: components['schemas']['Language'];
-      solutionCode: string;
-      promptText: string | null;
-      /**
-       * Format: date-time
-       * @description Server time of the insert
-       */
-      collectedAt: string;
-      /** @description The user id; the API sends no name */
-      collectedById: string;
-      /** Format: date-time */
-      supersededAt: string | null;
-      /** Format: date-time */
-      createdAt: string;
-    };
-    AiReferenceList: {
-      items: components['schemas']['AiReference'][];
-    };
-    SupersedeAiReference: {
-      replacement?: components['schemas']['CreateAiReference'];
-    };
-    SupersedeResult: {
-      superseded: components['schemas']['AiReference'];
-      replacement: components['schemas']['AiReference'] | null;
-    };
-    PrefillRequest: {
-      language: components['schemas']['Language'];
-      params: {
-        [key: string]: unknown;
-      };
-      /** @description The template as edited (may be unsaved); the API renders it with params */
-      referenceSolution: string;
-      slots: {
-        testCaseId: string;
-        /** @description The input that applies to this variant (override or default) */
-        input: string;
-      }[];
-    };
-    PrefillResponse: {
-      proposals: {
-        testCaseId: string;
-        expectedOutput?: string;
-        /** @description Why no output could be produced (runtime error, limit) */
-        error?: string;
-      }[];
-    };
-    /**
-     * @description STANDARD records the web session; STRICT adds a second camera. LOCKDOWN is not offered in this build.
-     * @enum {string}
-     */
-    TestProfile: 'STANDARD' | 'STRICT';
-    /** @description Exactly { tags?, difficulty?, type? }; unknown keys are refused. There is NO count: one question slot picks one question, and N slots with the same rule need N different matching published questions. Tags are lower-cased, 1 to 20, all must match. */
-    RandomRule: {
-      tags?: string[];
-      difficulty?: components['schemas']['Difficulty'];
-      type?: components['schemas']['QuestionType'];
-    };
-    /** @description Exactly one of questionVersionId and randomRule. */
-    TestQuestionInput: {
-      /** @description A PUBLISHED version of a non-archived question */
-      questionVersionId?: string;
-      randomRule?: components['schemas']['RandomRule'];
-      /** @default 100 */
-      points: number;
-      position?: number;
-    };
-    TestSectionInput: {
-      title: string;
-      position?: number;
-      /** @description Section limits together may not exceed durationMinutes (ADR 0002) */
-      timeLimitMin?: number;
-      questions: components['schemas']['TestQuestionInput'][];
-    };
-    CreateTest: {
-      name: string;
-      description?: string;
-      durationMinutes: number;
-      profile?: components['schemas']['TestProfile'];
-      /** @description From 0 to the points of all questions together */
-      passScore?: number;
-      sections: components['schemas']['TestSectionInput'][];
-    };
-    UpdateTest: {
-      name?: string;
-      description?: string;
-      durationMinutes?: number;
-      profile?: components['schemas']['TestProfile'];
-      passScore?: number;
-      sections?: components['schemas']['TestSectionInput'][];
-    };
-    TestQuestion: {
-      id: string;
-      position: number;
-      points: number;
-      questionVersionId: string | null;
-      title: string | null;
-      /** @enum {string|null} */
-      difficulty: 'EASY' | 'MEDIUM' | 'HARD' | null;
-      randomRule: {
-        [key: string]: unknown;
-      } | null;
-    };
-    TestSection: {
-      id: string;
-      title: string;
-      position: number;
-      timeLimitMin: number | null;
-      questions: components['schemas']['TestQuestion'][];
-    };
-    TestSummary: {
-      id: string;
-      name: string;
-      description: string | null;
-      durationMinutes: number;
-      profile: components['schemas']['TestProfile'];
-      passScore: number | null;
-      createdById: string | null;
-      /** Format: date-time */
-      createdAt: string;
-      sectionCount: number;
-      questionCount: number;
-      /** @description The test has an invitation or a session, so it can no longer be edited. */
-      used: boolean;
-    };
-    TestDetail: components['schemas']['TestSummary'] & {
-      sections: components['schemas']['TestSection'][];
-    };
-    TestList: {
-      items: components['schemas']['TestSummary'][];
-      page: number;
-      pageSize: number;
-      total: number;
-    };
-    /**
-     * @description The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
-     * @enum {string}
-     */
-    SessionStatus:
-      | 'INVITED'
-      | 'OPENED'
-      | 'CONSENTED'
-      | 'VERIFIED'
-      | 'IN_PROGRESS'
-      | 'PAUSED'
-      | 'SUBMITTED'
-      | 'GRADED'
-      | 'UNDER_REVIEW'
-      | 'COMPLETED'
-      | 'EXPIRED'
-      | 'APPEALED'
-      | 'DECLINED'
-      | 'ERASED';
-    /** @enum {string} */
-    IdentityWaiverReason: 'REFUSED_BIOMETRIC_PROCESSING' | 'CANNOT_COMPLETE_ID_CHECK' | 'OTHER';
-    /** @description ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500 characters) is required and allowed only with OTHER. Never put health details in it. */
-    IdentityCheckWaiver: {
-      reasonCode: components['schemas']['IdentityWaiverReason'];
-      reasonNote?: string;
-    };
-    /** @description Per-candidate accommodations (FR-305, ADR 0015). Only on a single invitation. */
-    InvitationAccommodations: {
-      /** @description Scales the total and every section limit by the same percentage */
-      extraTimePct?: number;
-      disabledDetectors?: (
-        | 'FACE'
-        | 'GAZE'
-        | 'OBJECT'
-        | 'VOICE'
-        | 'MULTI_MONITOR'
-        | 'DEVTOOLS'
-        | 'VIRTUAL_CAMERA'
-        | 'EXTENSION'
-      )[];
-      allowedAssistiveTools?: string[];
-      notes?: string;
-      identityCheckWaiver?: components['schemas']['IdentityCheckWaiver'];
-    };
-    InviteCandidate: {
-      email: string;
-      name: string;
-      externalRef?: string;
-    };
-    CreateInvitation: {
-      candidate: components['schemas']['InviteCandidate'];
-      /** Format: date-time */
-      windowStart: string;
-      /** Format: date-time */
-      windowEnd: string;
-      accommodations?: components['schemas']['InvitationAccommodations'];
-    };
-    InvitationResult: {
-      id: string;
-      testId: string;
-      candidateId: string;
-      status: components['schemas']['SessionStatus'];
-      /** Format: date-time */
-      windowStart: string;
-      /** Format: date-time */
-      windowEnd: string;
-    };
-    BulkInvitations: {
-      rows: components['schemas']['InviteCandidate'][];
-      /** Format: date-time */
-      windowStart: string;
-      /** Format: date-time */
-      windowEnd: string;
-    };
-    BulkInvitationResult: {
-      created: number;
-      /** @description By row index (1 is the first row of THIS request) and reason; no email is echoed */
-      errors: {
-        row: number;
-        message: string;
-      }[];
-    };
-    StatusStep: {
-      status: components['schemas']['SessionStatus'];
-      /** Format: date-time */
-      at: string;
-    };
-    CandidateInvitation: {
-      id: string;
-      testId: string;
-      testName: string;
-      status: components['schemas']['SessionStatus'];
-      /** Format: date-time */
-      windowStart: string;
-      /** Format: date-time */
-      windowEnd: string;
-      /** @description The statuses reached so far, oldest first */
-      history: components['schemas']['StatusStep'][];
-    };
-    ApiError: {
-      code: string;
-      message: string;
-    };
-    ProblemDetails: {
-      type: string;
-      title: string;
-      status: number;
-      detail?: string;
-      instance: string;
-      traceId: string;
-      errors?: string[];
-      code?: components['schemas']['ProblemCode'];
-    };
-    RecoveryCodes: {
-      recoveryCodes: string[];
-    };
-    /** @enum {string} */
-    Language: 'python' | 'javascript' | 'java';
-    DraftRequest: {
-      /** @enum {string} */
-      kind: 'code' | 'mcq';
-      language?: components['schemas']['Language'];
-      code?: string;
-      selectedOptionId?: string | null;
-    };
-    RunRequest: {
-      language: components['schemas']['Language'];
-      code: string;
-    };
-    SampleTestResult: {
-      id: string;
-      name: string;
-      /** @enum {string} */
-      status: 'passed' | 'failed';
-      input?: string;
-      expectedOutput?: string;
-      actualOutput?: string;
-      durationMs?: number;
-    };
-    RunResult: {
-      /** @enum {string} */
-      outcome: 'completed' | 'compile_error' | 'runtime_error' | 'time_limit_exceeded';
-      tests: components['schemas']['SampleTestResult'][];
-      stdout: string;
-      stderr: string;
-    };
-    SampleTest: {
-      id: string;
-      name: string;
-      input: string;
-      expectedOutput: string;
-    };
-    Question: {
-      id: string;
-      /** @enum {string} */
-      type: 'coding' | 'mcq';
-      title: string;
-      points: number;
-      statementMarkdown: string;
-      languages?: components['schemas']['Language'][];
-      /** @description Starter code keyed by language */
-      starterCode?: {
-        [key: string]: string;
-      };
-      sampleTests?: components['schemas']['SampleTest'][];
-      options?: {
-        id: string;
-        label: string;
-      }[];
-    };
-    CandidateSession: {
-      testTitle: string;
-      /** Format: date-time */
-      testDeadlineAt: string;
-      section: {
-        id: string;
-        position: number;
-        totalSections: number;
-        title: string;
-        /** Format: date-time */
-        deadlineAt: string | null;
-      };
-      /** @description Questions of the open section only */
-      questions: components['schemas']['Question'][];
-    };
-    StaffUser: {
-      id: string;
-      email: string;
-      name: string;
-      role: components['schemas']['StaffRole'];
-      /** @enum {string} */
-      status: 'invited' | 'active' | 'deactivated';
-      /** Format: date-time */
-      lastLoginAt?: string | null;
-    };
-    /** @enum {string} */
-    EventSeverity: 'LOW' | 'MEDIUM' | 'HIGH';
-    /** @description FR-804 and ADR 0005 section 2. Weights are keyed by event type. */
-    RiskSettings: {
-      severityPoints: {
-        LOW: number;
-        MEDIUM: number;
-        HIGH: number;
-      };
-      capPerType: number;
-      bandMinScore: {
-        MEDIUM: number;
-        HIGH: number;
-      };
-      weights: {
-        [key: string]: number;
-      };
-    };
-    OrgSettings: {
-      retentionDays: number;
-      erasure: {
-        holdWhileReviewOrAppealOpen: boolean;
-      };
-      risk: components['schemas']['RiskSettings'];
-      consentDeclineContact: string;
-    };
-    OrgSettingsPatch: {
-      retentionDays?: number;
-      erasure?: {
-        holdWhileReviewOrAppealOpen?: boolean;
-      };
-      risk?: components['schemas']['RiskSettings'];
-      consentDeclineContact?: string;
-    };
-    ConsentText: {
-      id: string;
-      version: string;
-      bodyMd: string;
-      /** Format: date-time */
-      createdAt: string;
-      /** Format: date-time */
-      legalApprovedAt: string | null;
-      legalApprovedBy?: string | null;
-      isCurrent: boolean;
-    };
-    CandidateSummary: {
-      id: string;
-      name: string;
-      email: string;
-      /** Format: date-time */
-      lastSessionAt?: string | null;
-      /** @description WEB-ONLY [BE-06b] */
-      invitationCount?: number;
-      /** @description WEB-ONLY [BE-06b] status of the newest invitation */
-      latestStatus?: components['schemas']['SessionStatus'] | null;
-      erasure: {
+    schemas: {
+        /** @enum {string} */
+        StaffRole: "SUPER_ADMIN" | "RECRUITER" | "AUTHOR" | "REVIEWER";
+        AuthUser: {
+            id: string;
+            email: string;
+            name: string;
+            role: components["schemas"]["StaffRole"];
+            orgName: string;
+            totpEnabled: boolean;
+            twoFactorRecommended: boolean;
+        };
+        AuthSession: {
+            accessToken: string;
+            user: components["schemas"]["AuthUser"];
+        };
+        ChallengeRequest: {
+            challengeToken: string;
+        };
+        LoginResult: {
+            /** @enum {string} */
+            status: "authenticated" | "two_factor_required";
+            session?: components["schemas"]["AuthSession"];
+            challengeToken?: string;
+        };
+        /** @enum {string} */
+        QuestionType: "CODING" | "MCQ" | "SHORT_ANSWER";
+        /** @enum {string} */
+        Difficulty: "EASY" | "MEDIUM" | "HARD";
+        Limits: {
+            cpuMs: number;
+            /** @description Not below cpuMs */
+            wallMs: number;
+            memoryKb: number;
+        };
+        /** @description A test slot. For a reader without question:update a HIDDEN case carries only id, position, isHidden and weight: the input and expectedOutput keys are absent, not null. */
+        TestCase: {
+            id: string;
+            position: number;
+            isHidden: boolean;
+            weight: number;
+            input?: string;
+            expectedOutput?: string;
+        };
+        TestCaseInput: {
+            input: string;
+            expectedOutput: string;
+            /** @default true */
+            isHidden: boolean;
+            /**
+             * @description At most 2 decimals
+             * @default 1
+             */
+            weight: number;
+            /** @description Default after the last slot */
+            position?: number;
+            expectedRevision?: string;
+        };
+        TestCasePatch: {
+            expectedRevision?: string;
+            input?: string;
+            expectedOutput?: string;
+            isHidden?: boolean;
+            weight?: number;
+            position?: number;
+        };
+        McqOption: {
+            id: string;
+            text: string;
+        };
+        /** @description MCQ answer spec (the question type says which shape applies). 2 to 10 options. */
+        McqAnswerSpec: {
+            options: components["schemas"]["McqOption"][];
+            correctOptionIds: string[];
+            multiple: boolean;
+        };
+        /** @description SHORT_ANSWER answer spec (D-23). */
+        ShortAnswerSpec: {
+            canonical: string;
+            acceptedVariants: string[];
+        };
+        AnswerSpec: components["schemas"]["McqAnswerSpec"] | components["schemas"]["ShortAnswerSpec"];
+        QuestionVersionRef: {
+            id: string;
+            version: number;
+            isPublished: boolean;
+            title: string;
+            difficulty: components["schemas"]["Difficulty"];
+            /** Format: date-time */
+            validatedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        QuestionSummary: {
+            id: string;
+            slug: string;
+            type: components["schemas"]["QuestionType"];
+            tags: string[];
+            isArchived: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** @description The published version tests use; null until the first publish */
+            published: components["schemas"]["QuestionVersionRef"] | null;
+            /** @description Highest version number (maybe a draft); for a reader without question:update the highest PUBLISHED version */
+            latest: components["schemas"]["QuestionVersionRef"];
+        };
+        QuestionList: {
+            items: components["schemas"]["QuestionSummary"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
+        ValidationCell: {
+            language: components["schemas"]["Language"];
+            passed: boolean;
+            testsPassed: number;
+            testsTotal: number;
+        };
+        ValidationFailure: {
+            language: components["schemas"]["Language"];
+            testCaseId: string | null;
+            position: number | null;
+            /** @description A string on the API. Known values: FAILED, COMPILE_ERROR, TIME_LIMIT, MEMORY_LIMIT, OUTPUT_LIMIT, RUNTIME_ERROR, INTERNAL_ERROR, MISSING_REFERENCE, LOCAL_STUB (a run on the local execution stub, not real execution). A client must cope with a value it does not know. */
+            verdict: string;
+            /** @description Only for a visible (sample) slot, never a hidden one */
+            actualOutput?: string;
+            diagnostic?: string;
+        };
+        ValidationVariantResult: {
+            /** @description Null for the base content (a version with no active variant) */
+            variantId: string | null;
+            passed: boolean;
+            cells: components["schemas"]["ValidationCell"][];
+            failures: components["schemas"]["ValidationFailure"][];
+        };
+        /** @description Stored in the version's validationReport (question:update readers only). `revision` is the content revision the run was bound to, taken under the question lock at start: publish refuses a report of any other revision. `error` is set when the run could not complete; then passed is false and perVariant is empty. */
+        ValidationReport: {
+            passed: boolean;
+            revision: string;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            finishedAt: string;
+            /** @enum {string} */
+            error?: "EXECUTION_ERROR" | "TIMEOUT";
+            perVariant: components["schemas"]["ValidationVariantResult"][];
+        };
+        StartValidation: {
+            expectedRevision?: string;
+        };
+        ValidationStarted: {
+            jobId: string;
+            /** @enum {string} */
+            status: "RUNNING";
+            /** @description The content revision this run validates */
+            revision: string;
+            version: number;
+            /** Format: date-time */
+            startedAt: string;
+        };
+        ValidationStatus: {
+            /**
+             * @description NONE never run on this content; RUNNING; PASSED or FAILED finished on the current content; STALE the content changed while it ran, the result was discarded (publish stays closed); ERROR the run could not complete (fail closed).
+             * @enum {string}
+             */
+            status: "NONE" | "RUNNING" | "PASSED" | "FAILED" | "STALE" | "ERROR";
+            jobId: string | null;
+            version: number;
+            currentRevision: string;
+            /** @description The revision the run was bound to */
+            revision: string | null;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** Format: date-time */
+            finishedAt: string | null;
+            /**
+             * Format: date-time
+             * @description Set only by a passing run of the current content
+             */
+            validatedAt: string | null;
+            /** @description A ValidationReport when one is stored */
+            report: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** @description The full version a caller with question:update gets */
+        QuestionVersion: components["schemas"]["QuestionVersionRef"] & {
+            statementMd: string;
+            allowedLanguages: components["schemas"]["Language"][];
+            limits: components["schemas"]["Limits"];
+            starterCode: {
+                [key: string]: string;
+            };
+            referenceSolution: {
+                [key: string]: string;
+            };
+            answerSpec: components["schemas"]["AnswerSpec"] | null;
+            validationReport: components["schemas"]["ValidationReport"] | null;
+            /** @description Opaque SHA-256 of the version content, test cases and variants with their overrides (question:update only). Send it back as expectedRevision; it changes with every content, test-case, variant or override change. */
+            revision: string;
+            testCases: components["schemas"]["TestCase"][];
+            /** @description Variants with params and overrides (writers only; a reader never gets this key). */
+            variants: components["schemas"]["Variant"][];
+        };
+        /** @description What a reader without question:update gets of a version: an allowlist. No revision, referenceSolution, answerSpec or validationReport, and hidden test cases without input and expectedOutput. */
+        QuestionVersionRead: {
+            id: string;
+            version: number;
+            isPublished: boolean;
+            title: string;
+            difficulty: components["schemas"]["Difficulty"];
+            /** Format: date-time */
+            validatedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            statementMd: string;
+            allowedLanguages: components["schemas"]["Language"][];
+            limits: components["schemas"]["Limits"];
+            starterCode: {
+                [key: string]: string;
+            };
+            testCases: components["schemas"]["TestCase"][];
+        };
+        /** @description A question with one full version (question:update) */
+        QuestionDetail: components["schemas"]["QuestionSummary"] & {
+            /** @description Oldest first */
+            versions: components["schemas"]["QuestionVersionRef"][];
+            version: components["schemas"]["QuestionVersion"];
+            /** @description true when this PATCH created a new version because the latest was published */
+            createdNewVersion: boolean;
+        };
+        /** @description The detail a reader without question:update gets (an allowlist, DL-32, BE-04a staff-view.ts) */
+        QuestionDetailRedacted: {
+            id: string;
+            slug: string;
+            type: components["schemas"]["QuestionType"];
+            tags: string[];
+            isArchived: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            published: components["schemas"]["QuestionVersionRef"] | null;
+            latest: components["schemas"]["QuestionVersionRef"];
+            versions: components["schemas"]["QuestionVersionRef"][];
+            version: components["schemas"]["QuestionVersionRead"];
+            createdNewVersion: boolean;
+        };
+        CreateQuestion: {
+            type?: components["schemas"]["QuestionType"];
+            /** @description Unique per organization; generated from the title when omitted */
+            slug?: string;
+            title: string;
+            statementMd: string;
+            difficulty: components["schemas"]["Difficulty"];
+            tags?: string[];
+            allowedLanguages?: components["schemas"]["Language"][];
+            limits?: components["schemas"]["Limits"];
+            starterCode?: {
+                [key: string]: string;
+            };
+            referenceSolution?: {
+                [key: string]: string;
+            };
+            answerSpec?: components["schemas"]["AnswerSpec"];
+            testCases?: components["schemas"]["TestCaseInput"][];
+        };
+        /** @description Every field is optional, at least one is needed. Test cases have their own routes. */
+        UpdateQuestion: {
+            expectedRevision?: string;
+            title?: string;
+            statementMd?: string;
+            difficulty?: components["schemas"]["Difficulty"];
+            tags?: string[];
+            allowedLanguages?: components["schemas"]["Language"][];
+            limits?: components["schemas"]["Limits"];
+            starterCode?: {
+                [key: string]: string;
+            };
+            referenceSolution?: {
+                [key: string]: string;
+            };
+            answerSpec?: components["schemas"]["AnswerSpec"];
+        };
+        PublishRequest: {
+            expectedRevision?: string;
+        };
         /**
-         * @description waiting = held while a review or appeal is open (D-19)
+         * @description The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED, IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added here when the web starts branching on them. Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web retries it automatically, bounded). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
          * @enum {string}
          */
-        state: 'none' | 'waiting' | 'queued' | 'erased';
-        /** Format: date-time */
-        requestedAt?: string | null;
-        /** @enum {string|null} */
-        waitingFor?: 'review' | 'appeal' | null;
-      };
-    };
-  };
-  responses: {
-    /** @description The role is not allowed to call this route (FR-103). A guard 403 has no code. */
-    Forbidden: {
-      headers: {
-        [name: string]: unknown;
-      };
-      content: {
-        'application/json': components['schemas']['ProblemDetails'];
-      };
-    };
-    /** @description Lock contention (docs/api-contract.md section 8): 503 with a Retry-After header of 1 to 2 seconds and the problem code BUSY. The action did NOT happen. The web retries it by itself (up to 3 more times, never on credential or re-auth routes). A 503 without code BUSY (for example Redis down) is a different answer and is not retried. */
-    Busy: {
-      headers: {
-        /** @description Seconds to wait before trying again (1 to 2). */
-        'Retry-After'?: number;
-        [name: string]: unknown;
-      };
-      content: {
-        'application/json': components['schemas']['ProblemDetails'] & {
-          /** @enum {string} */
-          code?: 'BUSY';
+        ProblemCode: "REAUTH_FAILED" | "SETTINGS_CONFLICT" | "VARIANT_HAS_AI_REFERENCES" | "BUSY" | "REASON_NOT_ENABLED" | "ANSWER_NOT_MANUAL" | "SESSION_NOT_UNDER_REVIEW" | "VERDICT_ALREADY_SET";
+        /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference rows). The UI branches on status and endpoint, and on that code. */
+        Problem: {
+            type: string;
+            title: string;
+            status: number;
+            detail?: string;
+            instance?: string;
+            traceId?: string;
+            errors?: string[];
+            code?: components["schemas"]["ProblemCode"];
         };
-      };
+        /** @description One test slot's input and expected output for a variant. isHidden and position come from the slot. */
+        VariantOverride: {
+            testCaseId: string;
+            isHidden: boolean;
+            position: number;
+            input: string;
+            expectedOutput: string;
+        };
+        /** @description An explicit variant (ADR 0007). It has NO label or name: the UI names it by its place in the list and its params. renderedStatement is the statement rendered with params, kept for the author. Variants are sorted by id, which is NOT a meaningful order, and a fork gives every variant a new id. */
+        Variant: {
+            id: string;
+            isActive: boolean;
+            params: {
+                [key: string]: string | number | boolean;
+            };
+            renderedStatement: string;
+            testCaseOverrides: components["schemas"]["VariantOverride"][];
+        };
+        /** @description The revision of a version after a writer-only change (never in a recruiter-reachable body). */
+        RevisionResult: {
+            /** @description The new revision, computed inside the same transaction as the change; send it as expectedRevision. */
+            revision: string;
+        };
+        TestCaseMutation: components["schemas"]["TestCase"] & components["schemas"]["RevisionResult"];
+        VariantOverrideMutation: components["schemas"]["VariantOverride"] & components["schemas"]["RevisionResult"];
+        /** @description The edited question plus the revision of the version the edit left (the new version after a fork). */
+        QuestionUpdateResult: components["schemas"]["QuestionDetail"] & components["schemas"]["RevisionResult"];
+        VariantList: {
+            items: components["schemas"]["Variant"][];
+            revision: string;
+        };
+        VariantMutation: {
+            variant: components["schemas"]["Variant"];
+            /** @description The new revision of the version */
+            revision: string;
+        };
+        CreateVariant: {
+            params: {
+                [key: string]: string | number | boolean;
+            };
+            /** @default true */
+            isActive: boolean;
+            expectedRevision?: string;
+        };
+        UpdateVariant: {
+            params?: {
+                [key: string]: string | number | boolean;
+            };
+            isActive?: boolean;
+            expectedRevision?: string;
+        };
+        OverrideInput: {
+            input: string;
+            expectedOutput: string;
+            expectedRevision?: string;
+        };
+        CandidateQuestionPreview: {
+            type: components["schemas"]["QuestionType"];
+            title: string;
+            statementMd: string;
+            languages: string[];
+            limits: components["schemas"]["Limits"];
+            starterCode: {
+                [key: string]: string;
+            };
+            samples: {
+                input: string;
+                expectedOutput: string;
+            }[];
+            mcq?: {
+                multiple: boolean;
+                options: {
+                    id: string;
+                    text: string;
+                }[];
+            };
+        };
+        AiPolicy: {
+            /** @description Assistants required per language to publish; 0 is off. */
+            minAssistants: number;
+            /** @description True when the org has no valid setting and the default applies */
+            isDefault: boolean;
+            /** @description AI-4 refresh interval in days; null until the API implements the setting. */
+            refreshIntervalDays: number | null;
+        };
+        CreateAiReference: {
+            /** @description Assistant product name, for example ChatGPT */
+            assistant: string;
+            modelLabel: string;
+            language: components["schemas"]["Language"];
+            solutionCode: string;
+            promptText?: string;
+            /** @description A variant of this version; absent means the base statement */
+            variantId?: string;
+        };
+        AiReference: {
+            id: string;
+            variantId: string | null;
+            assistant: string;
+            modelLabel: string;
+            language: components["schemas"]["Language"];
+            solutionCode: string;
+            promptText: string | null;
+            /**
+             * Format: date-time
+             * @description Server time of the insert
+             */
+            collectedAt: string;
+            /** @description The user id; the API sends no name */
+            collectedById: string;
+            /** Format: date-time */
+            supersededAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AiReferenceList: {
+            items: components["schemas"]["AiReference"][];
+        };
+        SupersedeAiReference: {
+            replacement?: components["schemas"]["CreateAiReference"];
+        };
+        SupersedeResult: {
+            superseded: components["schemas"]["AiReference"];
+            replacement: components["schemas"]["AiReference"] | null;
+        };
+        PrefillRequest: {
+            language: components["schemas"]["Language"];
+            params: {
+                [key: string]: unknown;
+            };
+            /** @description The template as edited (may be unsaved); the API renders it with params */
+            referenceSolution: string;
+            slots: {
+                testCaseId: string;
+                /** @description The input that applies to this variant (override or default) */
+                input: string;
+            }[];
+        };
+        PrefillResponse: {
+            proposals: {
+                testCaseId: string;
+                expectedOutput?: string;
+                /** @description Why no output could be produced (runtime error, limit) */
+                error?: string;
+            }[];
+        };
+        /**
+         * @description STANDARD records the web session; STRICT adds a second camera. LOCKDOWN is not offered in this build.
+         * @enum {string}
+         */
+        TestProfile: "STANDARD" | "STRICT";
+        /** @description Exactly { tags?, difficulty?, type? }; unknown keys are refused. There is NO count: one question slot picks one question, and N slots with the same rule need N different matching published questions. Tags are lower-cased, 1 to 20, all must match. */
+        RandomRule: {
+            tags?: string[];
+            difficulty?: components["schemas"]["Difficulty"];
+            type?: components["schemas"]["QuestionType"];
+        };
+        /** @description Exactly one of questionVersionId and randomRule. */
+        TestQuestionInput: {
+            /** @description A PUBLISHED version of a non-archived question */
+            questionVersionId?: string;
+            randomRule?: components["schemas"]["RandomRule"];
+            /** @default 100 */
+            points: number;
+            position?: number;
+        };
+        TestSectionInput: {
+            title: string;
+            position?: number;
+            /** @description Section limits together may not exceed durationMinutes (ADR 0002) */
+            timeLimitMin?: number;
+            questions: components["schemas"]["TestQuestionInput"][];
+        };
+        CreateTest: {
+            name: string;
+            description?: string;
+            durationMinutes: number;
+            profile?: components["schemas"]["TestProfile"];
+            /** @description From 0 to the points of all questions together */
+            passScore?: number;
+            sections: components["schemas"]["TestSectionInput"][];
+        };
+        UpdateTest: {
+            name?: string;
+            description?: string;
+            durationMinutes?: number;
+            profile?: components["schemas"]["TestProfile"];
+            passScore?: number;
+            sections?: components["schemas"]["TestSectionInput"][];
+        };
+        TestQuestion: {
+            id: string;
+            position: number;
+            points: number;
+            questionVersionId: string | null;
+            title: string | null;
+            /** @enum {string|null} */
+            difficulty: "EASY" | "MEDIUM" | "HARD" | null;
+            randomRule: {
+                [key: string]: unknown;
+            } | null;
+        };
+        TestSection: {
+            id: string;
+            title: string;
+            position: number;
+            timeLimitMin: number | null;
+            questions: components["schemas"]["TestQuestion"][];
+        };
+        TestSummary: {
+            id: string;
+            name: string;
+            description: string | null;
+            durationMinutes: number;
+            profile: components["schemas"]["TestProfile"];
+            passScore: number | null;
+            createdById: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            sectionCount: number;
+            questionCount: number;
+            /** @description The test has an invitation or a session, so it can no longer be edited. */
+            used: boolean;
+        };
+        TestDetail: components["schemas"]["TestSummary"] & {
+            sections: components["schemas"]["TestSection"][];
+        };
+        TestList: {
+            items: components["schemas"]["TestSummary"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
+        /**
+         * @description The session state machine of ADR 0002 with ERASED (D-54, ADR 0004 section 9): the candidate's data was erased after an erasure request. Terminal; set only by the erasure fence.
+         * @enum {string}
+         */
+        SessionStatus: "INVITED" | "OPENED" | "CONSENTED" | "VERIFIED" | "IN_PROGRESS" | "PAUSED" | "SUBMITTED" | "GRADED" | "UNDER_REVIEW" | "COMPLETED" | "EXPIRED" | "APPEALED" | "DECLINED" | "ERASED";
+        /** @enum {string} */
+        IdentityWaiverReason: "REFUSED_BIOMETRIC_PROCESSING" | "CANNOT_COMPLETE_ID_CHECK" | "OTHER";
+        /** @description ADR 0015, owner decisions C-02 and C-19. reasonCode is required; reasonNote (1 to 500 characters) is required and allowed only with OTHER. Never put health details in it. */
+        IdentityCheckWaiver: {
+            reasonCode: components["schemas"]["IdentityWaiverReason"];
+            reasonNote?: string;
+        };
+        /** @description Per-candidate accommodations (FR-305, ADR 0015). Only on a single invitation. */
+        InvitationAccommodations: {
+            /** @description Scales the total and every section limit by the same percentage */
+            extraTimePct?: number;
+            disabledDetectors?: ("FACE" | "GAZE" | "OBJECT" | "VOICE" | "MULTI_MONITOR" | "DEVTOOLS" | "VIRTUAL_CAMERA" | "EXTENSION")[];
+            allowedAssistiveTools?: string[];
+            notes?: string;
+            identityCheckWaiver?: components["schemas"]["IdentityCheckWaiver"];
+        };
+        InviteCandidate: {
+            email: string;
+            name: string;
+            externalRef?: string;
+        };
+        CreateInvitation: {
+            candidate: components["schemas"]["InviteCandidate"];
+            /** Format: date-time */
+            windowStart: string;
+            /** Format: date-time */
+            windowEnd: string;
+            accommodations?: components["schemas"]["InvitationAccommodations"];
+        };
+        InvitationResult: {
+            id: string;
+            testId: string;
+            candidateId: string;
+            status: components["schemas"]["SessionStatus"];
+            /** Format: date-time */
+            windowStart: string;
+            /** Format: date-time */
+            windowEnd: string;
+        };
+        BulkInvitations: {
+            rows: components["schemas"]["InviteCandidate"][];
+            /** Format: date-time */
+            windowStart: string;
+            /** Format: date-time */
+            windowEnd: string;
+        };
+        BulkInvitationResult: {
+            created: number;
+            /** @description By row index (1 is the first row of THIS request) and reason; no email is echoed */
+            errors: {
+                row: number;
+                message: string;
+            }[];
+        };
+        StatusStep: {
+            status: components["schemas"]["SessionStatus"];
+            /** Format: date-time */
+            at: string;
+        };
+        CandidateInvitation: {
+            id: string;
+            testId: string;
+            testName: string;
+            status: components["schemas"]["SessionStatus"];
+            /** Format: date-time */
+            windowStart: string;
+            /** Format: date-time */
+            windowEnd: string;
+            /** @description The statuses reached so far, oldest first */
+            history: components["schemas"]["StatusStep"][];
+        };
+        ApiError: {
+            code: string;
+            message: string;
+        };
+        ProblemDetails: {
+            type: string;
+            title: string;
+            status: number;
+            detail?: string;
+            instance: string;
+            traceId: string;
+            errors?: string[];
+            code?: components["schemas"]["ProblemCode"];
+        };
+        RecoveryCodes: {
+            recoveryCodes: string[];
+        };
+        /** @enum {string} */
+        Language: "python" | "javascript" | "java";
+        DraftRequest: {
+            /** @enum {string} */
+            kind: "code" | "mcq";
+            language?: components["schemas"]["Language"];
+            code?: string;
+            selectedOptionId?: string | null;
+        };
+        RunRequest: {
+            language: components["schemas"]["Language"];
+            code: string;
+        };
+        SampleTestResult: {
+            id: string;
+            name: string;
+            status: string;
+            input?: string;
+            expectedOutput?: string;
+            actualOutput?: string;
+            durationMs?: number;
+        };
+        RunResult: {
+            /** @enum {string} */
+            outcome: "completed" | "compile_error" | "runtime_error" | "time_limit_exceeded";
+            tests: components["schemas"]["SampleTestResult"][];
+            stdout: string;
+            stderr: string;
+        };
+        SampleTest: {
+            id: string;
+            name: string;
+            input: string;
+            expectedOutput: string;
+        };
+        Question: {
+            id: string;
+            /** @enum {string} */
+            type: "coding" | "mcq";
+            title: string;
+            points: number;
+            statementMarkdown: string;
+            languages?: components["schemas"]["Language"][];
+            /** @description Starter code keyed by language */
+            starterCode?: {
+                [key: string]: string;
+            };
+            sampleTests?: components["schemas"]["SampleTest"][];
+            options?: {
+                id: string;
+                label: string;
+            }[];
+        };
+        CandidateSession: {
+            testTitle: string;
+            /** Format: date-time */
+            testDeadlineAt: string;
+            section: {
+                id: string;
+                position: number;
+                totalSections: number;
+                title: string;
+                /** Format: date-time */
+                deadlineAt: string | null;
+            };
+            /** @description Questions of the open section only */
+            questions: components["schemas"]["Question"][];
+        };
+        StaffUser: {
+            id: string;
+            email: string;
+            name: string;
+            role: components["schemas"]["StaffRole"];
+            /** @enum {string} */
+            status: "invited" | "active" | "deactivated";
+            /** Format: date-time */
+            lastLoginAt?: string | null;
+        };
+        /** @enum {string} */
+        EventSeverity: "LOW" | "MEDIUM" | "HIGH";
+        /** @description FR-804 and ADR 0005 section 2. Weights are keyed by event type. */
+        RiskSettings: {
+            severityPoints: {
+                LOW: number;
+                MEDIUM: number;
+                HIGH: number;
+            };
+            capPerType: number;
+            bandMinScore: {
+                MEDIUM: number;
+                HIGH: number;
+            };
+            weights: {
+                [key: string]: number;
+            };
+        };
+        OrgSettings: {
+            retentionDays: number;
+            erasure: {
+                holdWhileReviewOrAppealOpen: boolean;
+            };
+            risk: components["schemas"]["RiskSettings"];
+            consentDeclineContact: string;
+        };
+        OrgSettingsPatch: {
+            retentionDays?: number;
+            erasure?: {
+                holdWhileReviewOrAppealOpen?: boolean;
+            };
+            risk?: components["schemas"]["RiskSettings"];
+            consentDeclineContact?: string;
+        };
+        ConsentText: {
+            id: string;
+            version: string;
+            bodyMd: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            legalApprovedAt: string | null;
+            legalApprovedBy?: string | null;
+            isCurrent: boolean;
+        };
+        CandidateSummary: {
+            id: string;
+            name: string;
+            email: string;
+            /** Format: date-time */
+            lastSessionAt?: string | null;
+            /** @description WEB-ONLY [BE-06b] */
+            invitationCount?: number;
+            /** @description WEB-ONLY [BE-06b] status of the newest invitation */
+            latestStatus?: components["schemas"]["SessionStatus"] | null;
+            erasure: {
+                /**
+                 * @description waiting = held while a review or appeal is open (D-19)
+                 * @enum {string}
+                 */
+                state: "none" | "waiting" | "queued" | "erased";
+                /** Format: date-time */
+                requestedAt?: string | null;
+                /** @enum {string|null} */
+                waitingFor?: "review" | "appeal" | null;
+            };
+        };
+        ReviewQueue: {
+            items: {
+                sessionId: string;
+                candidateName: string;
+                candidateEmail: string;
+                testTitle: string;
+                status: components["schemas"]["SessionStatus"];
+                /** Format: date-time */
+                submittedAt: string | null;
+                riskScore: number | null;
+                flagCount: number;
+                pendingManualCount: number;
+            }[];
+            nextCursor: string | null;
+        };
+        ReviewRunResult: {
+            /** Format: date-time */
+            at: string;
+            passed: number;
+            total: number;
+            tests: {
+                name: string;
+                /** @description Free string. Stored verdicts are uppercase: PASSED, FAILED, TIME_LIMIT, COMPILE_ERROR, RUNTIME_ERROR, LOCAL_STUB; the API maps a missing one to PASSED, FAILED or UNKNOWN. */
+                status: string;
+            }[];
+        };
+        ReviewAnswer: {
+            sessionQuestionId: string;
+            /** @enum {string} */
+            type: "CODING" | "MCQ" | "SHORT_ANSWER";
+            title: string;
+            /** @description Markdown source */
+            statement: string;
+            points: number;
+            score: number | null;
+            /** @enum {string} */
+            scoring: "AUTO" | "MANUAL" | "MANUAL_PENDING";
+            scoringNote: string | null;
+            /** @description CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored jsonb value (MCQ option ids, or the short-answer text) or null. The web copes with any JSON value. */
+            answer: unknown;
+            runResults?: components["schemas"]["ReviewRunResult"][];
+        };
+        ReviewEvent: {
+            id: string;
+            /** Format: date-time */
+            at: string;
+            /** @description The stored type string; may be unknown to the web */
+            type: string;
+            /** @enum {string} */
+            severity: "LOW" | "MEDIUM" | "HIGH";
+            detail: string | null;
+            flagId: string | null;
+        };
+        ReviewRecording: {
+            /** @description KIND-SEGMENT, e.g. SCREEN-0 */
+            id: string;
+            /** @enum {string} */
+            kind: "SCREEN" | "WEBCAM" | "AUDIO";
+            /** Format: date-time */
+            startedAt: string;
+            durationMs: number;
+        };
+        /** @description The session review row; all three are null until a verdict is set. */
+        ReviewVerdict: {
+            /** @enum {string|null} */
+            verdict: "CLEAN" | "SUSPICIOUS" | "VIOLATION" | null;
+            notes: string | null;
+            /** Format: date-time */
+            completedAt: string | null;
+        };
+        ReviewSession: {
+            session: {
+                id: string;
+                status: components["schemas"]["SessionStatus"];
+                /** Format: date-time */
+                startedAt: string | null;
+                /** Format: date-time */
+                submittedAt: string | null;
+                totalScore: number | null;
+                riskScore: number | null;
+            };
+            candidate: {
+                name: string;
+                email: string;
+            };
+            test: {
+                title: string;
+            };
+            answers: components["schemas"]["ReviewAnswer"][];
+            events: components["schemas"]["ReviewEvent"][];
+            recordings: components["schemas"]["ReviewRecording"][];
+            verdict: components["schemas"]["ReviewVerdict"] | null;
+        };
+        /** @description url is the first part; play parts in seq order. Never cache or store. */
+        ReviewPlayback: {
+            url: string;
+            parts: {
+                url: string;
+                seq: number;
+                durationMs: number;
+            }[];
+            /** Format: date-time */
+            expiresAt: string;
+            contentType: string;
+        };
+        ScoreAnswer: {
+            correct: boolean;
+            note?: string;
+        };
+        ScoredAnswer: {
+            sessionQuestionId: string;
+            correct: boolean;
+            score: number;
+        };
+        SetVerdict: {
+            /** @enum {string} */
+            verdict: "CLEAN" | "SUSPICIOUS" | "VIOLATION";
+            note?: string;
+        };
     };
-    /** @description A fixed 500 with no useful detail, no code and no Retry-After. On a staff write it can mean the action committed and only its audit row failed afterwards: it is NEVER retried automatically; look at the list or the status before trying again. */
-    ServerError: {
-      headers: {
-        [name: string]: unknown;
-      };
-      content: {
-        'application/json': components['schemas']['ProblemDetails'];
-      };
+    responses: {
+        /** @description The role is not allowed to call this route (FR-103). A guard 403 has no code. */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProblemDetails"];
+            };
+        };
+        /** @description Lock contention (docs/api-contract.md section 8): 503 with a Retry-After header of 1 to 2 seconds and the problem code BUSY. The action did NOT happen. The web retries it by itself (up to 3 more times, never on credential or re-auth routes). A 503 without code BUSY (for example Redis down) is a different answer and is not retried. */
+        Busy: {
+            headers: {
+                /** @description Seconds to wait before trying again (1 to 2). */
+                "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProblemDetails"] & {
+                    /** @enum {string} */
+                    code?: "BUSY";
+                };
+            };
+        };
+        /** @description A fixed 500 with no useful detail, no code and no Retry-After. On a staff write it can mean the action committed and only its audit row failed afterwards: it is NEVER retried automatically; look at the list or the status before trying again. */
+        ServerError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProblemDetails"];
+            };
+        };
     };
-  };
-  parameters: {
-    QuestionId: string;
-  };
-  requestBodies: never;
-  headers: never;
-  pathItems: never;
+    parameters: {
+        QuestionId: string;
+    };
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-  getHealth: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description API is up */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            /** @enum {string} */
-            status: 'ok';
-          };
-        };
-      };
-    };
-  };
-  getServerTime: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Current server time */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            /** Format: date-time */
-            serverNow: string;
-          };
-        };
-      };
-    };
-  };
-  getCandidateSession: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Session snapshot */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CandidateSession'];
-        };
-      };
-    };
-  };
-  saveDraft: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: components['parameters']['QuestionId'];
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['DraftRequest'];
-      };
-    };
-    responses: {
-      /** @description Draft stored */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            /** Format: date-time */
-            savedAt: string;
-          };
-        };
-      };
-    };
-  };
-  runSampleTests: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: components['parameters']['QuestionId'];
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['RunRequest'];
-      };
-    };
-    responses: {
-      /** @description Sample test results */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RunResult'];
-        };
-      };
-      /** @description Too many runs */
-      429: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            retryAfterSeconds: number;
-          };
-        };
-      };
-    };
-  };
-  finishSection: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        sectionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Section closed */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            /** Format: date-time */
-            finishedAt: string;
-            nextSectionId?: string | null;
-          };
-        };
-      };
-    };
-  };
-  login: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          email: string;
-          password: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Signed in, or a second step is needed */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['LoginResult'];
-        };
-      };
-      /** @description Sign-in failed. One generic answer for a wrong password, an unknown email and a locked account (15 minutes after 5 failed attempts, FR-101); the API never reveals which. */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  startTwoFactorEnrollment: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['ChallengeRequest'];
-      };
-    };
-    responses: {
-      /** @description Secret and otpauth URI for the QR code */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            manualKey: string;
-            otpauthUri: string;
-          };
-        };
-      };
-      /** @description The challenge is stale or unknown. detail is "Your sign-in has expired. Sign in again." */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  confirmTwoFactorEnrollment: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          challengeToken: string;
-          code: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Enrolled and signed in */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            session: components['schemas']['AuthSession'];
-            recoveryCodes: string[];
-          };
-        };
-      };
-      /** @description Wrong code */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      /** @description Challenge expired, sign in again */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  startTwoFactorSetup: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          currentPassword: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Secret, otpauth URI and QR code (PNG data URL) */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            manualKey: string;
-            otpauthUri: string;
-            qrDataUrl: string;
-          };
-        };
-      };
-      /** @description Missing or invalid currentPassword or totpCode */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Missing or invalid access token */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Two-factor was turned on concurrently */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  confirmTwoFactorSetup: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          currentPassword: string;
-          code: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Two-factor is on */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RecoveryCodes'];
-        };
-      };
-      /** @description Wrong code, or missing or invalid body */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Missing or invalid access token */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Two-factor state changed concurrently */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  disableTwoFactor: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          currentPassword: string;
-          /** @description 6-digit TOTP code only; a recovery code is 400 */
-          totpCode: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Two-factor is off and every refresh token of the user is revoked (sign in again) */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Missing or invalid currentPassword or totpCode */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Missing or invalid access token */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last) */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Two-factor is not on */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Temporary outage (for example the code store); no failure is counted, try again */
-      503: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  regenerateRecoveryCodes: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          currentPassword: string;
-        };
-      };
-    };
-    responses: {
-      /** @description The new codes, shown once */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RecoveryCodes'];
-        };
-      };
-      /** @description Missing or invalid currentPassword or totpCode */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Missing or invalid access token */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
-      403: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-      /** @description Two-factor is not on */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  verifyTwoFactor: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          challengeToken: string;
-          code: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Signed in */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AuthSession'];
-        };
-      };
-      /** @description Wrong code */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      /** @description Challenge expired, sign in again */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  refreshSession: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description New access token */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AuthSession'];
-        };
-      };
-      /** @description No valid refresh cookie */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  logout: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Signed out */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-    };
-  };
-  forgotPassword: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          email: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Accepted, whether or not the account exists */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            message: string;
-          };
-        };
-      };
-    };
-  };
-  resetPassword: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          token: string;
-          newPassword: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Password set, token consumed */
-      204: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content?: never;
-      };
-      /** @description Token invalid, expired or already used (one message for all three) */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
-  listStaffUsers: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Users */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            items: components['schemas']['StaffUser'][];
-          };
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  inviteStaffUser: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          email: string;
-          name: string;
-          role: components['schemas']['StaffRole'];
-        };
-      };
-    };
-    responses: {
-      /** @description Invited */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['StaffUser'];
-        };
-      };
-      /** @description Invalid input */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description A user with this email already exists */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  updateStaffUser: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        userId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          role?: components['schemas']['StaffRole'];
-          active?: boolean;
-        };
-      };
-    };
-    responses: {
-      /** @description Updated */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['StaffUser'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such user in this organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      /** @description Refused, for example deactivating yourself or the last Super Admin */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  getOrgSettings: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Settings, with defaults for missing keys */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['OrgSettings'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  updateOrgSettings: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['OrgSettingsPatch'];
-      };
-    };
-    responses: {
-      /** @description Updated settings */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['OrgSettings'];
-        };
-      };
-      /** @description Invalid input */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  listConsentTexts: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Versions and whether this environment refuses unapproved texts */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            /** @description REQUIRE_LEGAL_APPROVED_CONSENT (true in pilot and production) */
-            legalApprovalRequired: boolean;
-            items: components['schemas']['ConsentText'][];
-          };
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  createConsentText: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          version: string;
-          bodyMd: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ConsentText'];
-        };
-      };
-      /** @description Invalid input */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description This version name already exists */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  setCurrentConsentText: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        consentTextId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Now current */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ConsentText'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description Refused because the text is not approved by Legal and approval is required */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  listCandidates: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Candidates */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            items: components['schemas']['CandidateSummary'][];
-          };
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  requestCandidateErasure: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        candidateId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Accepted; the body says whether it waits */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CandidateSummary'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such candidate in this organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  listQuestions: {
-    parameters: {
-      query?: {
-        page?: number;
-        pageSize?: number;
-        tag?: string;
-        difficulty?: components['schemas']['Difficulty'];
-        type?: components['schemas']['QuestionType'];
-        includeArchived?: boolean;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description One page of questions */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['QuestionList'];
-        };
-      };
-      /** @description Invalid filter, or a page that is too deep */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  createQuestion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateQuestion'];
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['QuestionDetail'];
-        };
-      };
-      /** @description Validation failed (errors[] lists each problem) */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description The slug is taken in this organization */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  getAiPolicy: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The policy */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AiPolicy'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  getQuestion: {
-    parameters: {
-      query?: {
-        version?: number;
-      };
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Question */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json':
-            | components['schemas']['QuestionDetail']
-            | components['schemas']['QuestionDetailRedacted'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question or version for this caller */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
-    };
-  };
-  updateQuestion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['UpdateQuestion'];
-      };
-    };
-    responses: {
-      /** @description Saved */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['QuestionUpdateResult'];
-        };
-      };
-      /** @description Validation failed, or no field sent */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The question is archived, or it changed since it was loaded (expectedRevision) */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  publishQuestion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        'application/json': components['schemas']['PublishRequest'];
-      };
-    };
-    responses: {
-      /** @description Published */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['QuestionDetail'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description No draft to publish, the question is archived, or expectedRevision no longer matches */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The draft is incomplete or not validated; errors[] says what */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  archiveQuestion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Archived */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['QuestionSummary'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  unarchiveQuestion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Restored */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['QuestionSummary'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  addTestCase: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['TestCaseInput'];
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TestCaseMutation'];
-        };
-      };
-      /** @description Validation failed */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question or version in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Not a coding question, or too many test cases */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  removeTestCase: {
-    parameters: {
-      query?: {
-        expectedRevision?: string;
-      };
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        testCaseId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RevisionResult'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or test case in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  updateTestCase: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        testCaseId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['TestCasePatch'];
-      };
-    };
-    responses: {
-      /** @description Changed */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TestCaseMutation'];
-        };
-      };
-      /** @description Validation failed, or no field sent */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or test case in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  listVariants: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Variants and the revision to send back as expectedRevision */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['VariantList'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question or version in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
-    };
-  };
-  createVariant: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateVariant'];
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['VariantMutation'];
-        };
-      };
-      /** @description Validation failed or a placeholder has no param */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question or version in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Not a coding question, or too many variants */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  removeVariant: {
-    parameters: {
-      query?: {
-        expectedRevision?: string;
-      };
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RevisionResult'];
-        };
-      };
-      /** @description Invalid expectedRevision */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or variant in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, expectedRevision is stale, or the variant has AI reference rows (code VARIANT_HAS_AI_REFERENCES: they are never deleted, set the variant inactive instead) */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  updateVariant: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['UpdateVariant'];
-      };
-    };
-    responses: {
-      /** @description Changed */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['VariantMutation'];
-        };
-      };
-      /** @description Validation failed, a placeholder has no param, or no field sent */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or variant in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  previewVariant: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The candidate view */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CandidateQuestionPreview'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or variant in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The variant does not render */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
-    };
-  };
-  setVariantOverride: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-        testCaseId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['OverrideInput'];
-      };
-    };
-    responses: {
-      /** @description The override */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['VariantOverrideMutation'];
-        };
-      };
-      /** @description Validation failed */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version, variant or test slot in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  removeVariantOverride: {
-    parameters: {
-      query?: {
-        expectedRevision?: string;
-      };
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        variantId: string;
-        testCaseId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RevisionResult'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version, variant or override in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  prefillVariantOutputs: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['PrefillRequest'];
-      };
-    };
-    responses: {
-      /** @description One proposal per slot */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['PrefillResponse'];
-        };
-      };
-      /** @description Invalid */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  validateQuestion: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: {
-      content: {
-        'application/json': components['schemas']['StartValidation'];
-      };
-    };
-    responses: {
-      /** @description Job accepted */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ValidationStarted'];
-        };
-      };
-      /** @description Validation failed (a malformed expectedRevision, an unknown field) */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description No draft to validate, the question is archived, a run is already in progress, or the draft changed since expectedRevision */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Not a coding question, or a variant does not render (errors[] says which) */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  getValidation: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The status */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ValidationStatus'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
-    };
-  };
-  listAiReferences: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Rows, newest first */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AiReferenceList'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question or version in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
-    };
-  };
-  addAiReference: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateAiReference'];
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['AiReference'];
-        };
-      };
-      /** @description Validation failed */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or variant in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The question is archived */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Not a coding question, or the language is not an allowed language of the version */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  supersedeAiReference: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        questionId: string;
-        version: number;
-        aiReferenceId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['SupersedeAiReference'];
-      };
-    };
-    responses: {
-      /** @description The retired row and the replacement, if any */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['SupersedeResult'];
-        };
-      };
-      /** @description Validation failed */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such question, version or AI reference solution in your organization */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Already superseded, or the question is archived */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The replacement language is not allowed */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  listTests: {
-    parameters: {
-      query?: {
-        page?: number;
-        pageSize?: number;
-        search?: string;
-        profile?: components['schemas']['TestProfile'];
-        /** @description true only tests that already have invitations, false only tests that have none */
-        used?: boolean;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description One page */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TestList'];
-        };
-      };
-      /** @description Invalid query, or a page deeper than 10 000 rows */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      503: components['responses']['Busy'];
-    };
-  };
-  createTest: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateTest'];
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TestDetail'];
-        };
-      };
-      /** @description Validation failed (LOCKDOWN, section limits above the duration, a bad random rule, positions, an unknown field); errors[] says what */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description A fixed question version does not exist, is a draft, or is not in your organisation (one answer) */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description A fixed version belongs to an archived question, or a random rule matches too few published questions */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  getTest: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The test */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TestDetail'];
-        };
-      };
-      /** @description Not a UUID */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such test in your organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
-    };
-  };
-  updateTest: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['UpdateTest'];
-      };
-    };
-    responses: {
-      /** @description The test after the edit */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TestDetail'];
-        };
-      };
-      /** @description Validation failed, or nothing to change */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such test (or question version) in your organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The test already has an invitation or a session and cannot be edited */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description A fixed version belongs to an archived question, or a random rule is unsatisfiable */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  createInvitation: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['CreateInvitation'];
-      };
-    };
-    responses: {
-      /** @description Created */
-      201: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['InvitationResult'];
-        };
-      };
-      /** @description Validation failed (email, name, window, accommodations; errors[] says which) */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such test in your organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description This candidate already has an open invitation to this test */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED) */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Too many invitations this hour; Retry-After says when */
-      429: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  createInvitationsBulk: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        testId: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['BulkInvitations'];
-      };
-    };
-    responses: {
-      /** @description How many were invited and which rows were not */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['BulkInvitationResult'];
-        };
-      };
-      /** @description Validation failed (too many rows, window, an unknown field) */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such test in your organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description The window ends in the past */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      /** @description Too many invitations this hour; nothing was invited; Retry-After says when */
-      429: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      500: components['responses']['ServerError'];
-      503: components['responses']['Busy'];
-    };
-  };
-  listCandidateInvitations: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        candidateId: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Invitations, newest first */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            items: components['schemas']['CandidateInvitation'][];
-          };
-        };
-      };
-      403: components['responses']['Forbidden'];
-      /** @description No such candidate in your organisation */
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['Problem'];
-        };
-      };
-      503: components['responses']['Busy'];
+    getHealth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description API is up */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        status: "ok";
+                    };
+                };
+            };
+        };
+    };
+    getServerTime: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current server time */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: date-time */
+                        serverNow: string;
+                    };
+                };
+            };
+        };
+    };
+    getCandidateSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateSession"];
+                };
+            };
+        };
+    };
+    saveDraft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: components["parameters"]["QuestionId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Draft stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: date-time */
+                        savedAt: string;
+                    };
+                };
+            };
+        };
+    };
+    runSampleTests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: components["parameters"]["QuestionId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunRequest"];
+            };
+        };
+        responses: {
+            /** @description Sample test results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunResult"];
+                };
+            };
+            /** @description Too many runs */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        retryAfterSeconds: number;
+                    };
+                };
+            };
+        };
+    };
+    finishSection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sectionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Section closed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: date-time */
+                        finishedAt: string;
+                        nextSectionId?: string | null;
+                    };
+                };
+            };
+        };
+    };
+    login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email: string;
+                    password: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Signed in, or a second step is needed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResult"];
+                };
+            };
+            /** @description Sign-in failed. One generic answer for a wrong password, an unknown email and a locked account (15 minutes after 5 failed attempts, FR-101); the API never reveals which. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    startTwoFactorSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    currentPassword: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Secret, otpauth URI and QR code (PNG data URL) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        manualKey: string;
+                        otpauthUri: string;
+                        qrDataUrl: string;
+                    };
+                };
+            };
+            /** @description Missing or invalid currentPassword or totpCode */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Two-factor was turned on concurrently */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    confirmTwoFactorSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    currentPassword: string;
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Two-factor is on */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            /** @description Wrong code, or missing or invalid body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Two-factor state changed concurrently */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    disableTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    currentPassword: string;
+                    /** @description 6-digit TOTP code only; a recovery code is 400 */
+                    totpCode: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Two-factor is off and every refresh token of the user is revoked (sign in again) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid currentPassword or totpCode */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Two-factor is not on */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Temporary outage (for example the code store); no failure is counted, try again */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    regenerateRecoveryCodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    currentPassword: string;
+                };
+            };
+        };
+        responses: {
+            /** @description The new codes, shown once */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCodes"];
+                };
+            };
+            /** @description Missing or invalid currentPassword or totpCode */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Wrong current password or locked account, one identical body with code REAUTH_FAILED. Never a session expiry (that is 401). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Two-factor is not on */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    verifyTwoFactor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    challengeToken: string;
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Signed in */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSession"];
+                };
+            };
+            /** @description Wrong code */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Challenge expired, sign in again */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    refreshSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description New access token */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSession"];
+                };
+            };
+            /** @description No valid refresh cookie */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Signed out */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    forgotPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Accepted, whether or not the account exists */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        message: string;
+                    };
+                };
+            };
+        };
+    };
+    resetPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    token: string;
+                    newPassword: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Password set, token consumed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Token invalid, expired or already used (one message for all three) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    listStaffUsers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Users */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["StaffUser"][];
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    inviteStaffUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    email: string;
+                    name: string;
+                    role: components["schemas"]["StaffRole"];
+                };
+            };
+        };
+        responses: {
+            /** @description Invited */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffUser"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description A user with this email already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    updateStaffUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    role?: components["schemas"]["StaffRole"];
+                    active?: boolean;
+                };
+            };
+        };
+        responses: {
+            /** @description Updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffUser"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such user in this organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Refused, for example deactivating yourself or the last Super Admin */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    getOrgSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Settings, with defaults for missing keys */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSettings"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    updateOrgSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OrgSettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description Updated settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSettings"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listConsentTexts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Versions and whether this environment refuses unapproved texts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description REQUIRE_LEGAL_APPROVED_CONSENT (true in pilot and production) */
+                        legalApprovalRequired: boolean;
+                        items: components["schemas"]["ConsentText"][];
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    createConsentText: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    version: string;
+                    bodyMd: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentText"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description This version name already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    setCurrentConsentText: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                consentTextId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Now current */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentText"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Refused because the text is not approved by Legal and approval is required */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listCandidates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Candidates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["CandidateSummary"][];
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    requestCandidateErasure: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidateId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted; the body says whether it waits */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateSummary"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such candidate in this organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listQuestions: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+                tag?: string;
+                difficulty?: components["schemas"]["Difficulty"];
+                type?: components["schemas"]["QuestionType"];
+                includeArchived?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of questions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionList"];
+                };
+            };
+            /** @description Invalid filter, or a page that is too deep */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    createQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateQuestion"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionDetail"];
+                };
+            };
+            /** @description Validation failed (errors[] lists each problem) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description The slug is taken in this organization */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    getAiPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The policy */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiPolicy"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    getQuestion: {
+        parameters: {
+            query?: {
+                version?: number;
+            };
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Question */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionDetail"] | components["schemas"]["QuestionDetailRedacted"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question or version for this caller */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    updateQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateQuestion"];
+            };
+        };
+        responses: {
+            /** @description Saved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionUpdateResult"];
+                };
+            };
+            /** @description Validation failed, or no field sent */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The question is archived, or it changed since it was loaded (expectedRevision) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    publishQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionDetail"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No draft to publish, the question is archived, or expectedRevision no longer matches */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft is incomplete or not validated; errors[] says what */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    archiveQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Archived */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionSummary"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    unarchiveQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Restored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionSummary"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    addTestCase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestCaseInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestCaseMutation"];
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question or version in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a coding question, or too many test cases */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    removeTestCase: {
+        parameters: {
+            query?: {
+                expectedRevision?: string;
+            };
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                testCaseId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionResult"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or test case in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    updateTestCase: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                testCaseId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestCasePatch"];
+            };
+        };
+        responses: {
+            /** @description Changed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestCaseMutation"];
+                };
+            };
+            /** @description Validation failed, or no field sent */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or test case in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listVariants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Variants and the revision to send back as expectedRevision */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VariantList"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question or version in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    createVariant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateVariant"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VariantMutation"];
+                };
+            };
+            /** @description Validation failed or a placeholder has no param */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question or version in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a coding question, or too many variants */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    removeVariant: {
+        parameters: {
+            query?: {
+                expectedRevision?: string;
+            };
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionResult"];
+                };
+            };
+            /** @description Invalid expectedRevision */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or variant in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, expectedRevision is stale, or the variant has AI reference rows (code VARIANT_HAS_AI_REFERENCES: they are never deleted, set the variant inactive instead) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    updateVariant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateVariant"];
+            };
+        };
+        responses: {
+            /** @description Changed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VariantMutation"];
+                };
+            };
+            /** @description Validation failed, a placeholder has no param, or no field sent */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or variant in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    previewVariant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The candidate view */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidateQuestionPreview"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or variant in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The variant does not render */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    setVariantOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+                testCaseId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OverrideInput"];
+            };
+        };
+        responses: {
+            /** @description The override */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VariantOverrideMutation"];
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version, variant or test slot in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    removeVariantOverride: {
+        parameters: {
+            query?: {
+                expectedRevision?: string;
+            };
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                variantId: string;
+                testCaseId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. Answers the new revision of the version, computed in the same transaction. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionResult"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version, variant or override in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The version is published (immutable), the question is archived, or expectedRevision is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    prefillVariantOutputs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrefillRequest"];
+            };
+        };
+        responses: {
+            /** @description One proposal per slot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrefillResponse"];
+                };
+            };
+            /** @description Invalid */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    validateQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["StartValidation"];
+            };
+        };
+        responses: {
+            /** @description Job accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidationStarted"];
+                };
+            };
+            /** @description Validation failed (a malformed expectedRevision, an unknown field) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No draft to validate, the question is archived, a run is already in progress, or the draft changed since expectedRevision */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a coding question, or a variant does not render (errors[] says which) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    getValidation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidationStatus"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    listAiReferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rows, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiReferenceList"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question or version in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    addAiReference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAiReference"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiReference"];
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or variant in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The question is archived */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a coding question, or the language is not an allowed language of the version */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    supersedeAiReference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: string;
+                version: number;
+                aiReferenceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SupersedeAiReference"];
+            };
+        };
+        responses: {
+            /** @description The retired row and the replacement, if any */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SupersedeResult"];
+                };
+            };
+            /** @description Validation failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such question, version or AI reference solution in your organization */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Already superseded, or the question is archived */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The replacement language is not allowed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listTests: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+                search?: string;
+                profile?: components["schemas"]["TestProfile"];
+                /** @description true only tests that already have invitations, false only tests that have none */
+                used?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestList"];
+                };
+            };
+            /** @description Invalid query, or a page deeper than 10 000 rows */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    createTest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateTest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestDetail"];
+                };
+            };
+            /** @description Validation failed (LOCKDOWN, section limits above the duration, a bad random rule, positions, an unknown field); errors[] says what */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description A fixed question version does not exist, is a draft, or is not in your organisation (one answer) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A fixed version belongs to an archived question, or a random rule matches too few published questions */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    getTest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The test */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestDetail"];
+                };
+            };
+            /** @description Not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such test in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    updateTest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTest"];
+            };
+        };
+        responses: {
+            /** @description The test after the edit */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestDetail"];
+                };
+            };
+            /** @description Validation failed, or nothing to change */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such test (or question version) in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The test already has an invitation or a session and cannot be edited */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A fixed version belongs to an archived question, or a random rule is unsatisfiable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    createInvitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInvitation"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationResult"];
+                };
+            };
+            /** @description Validation failed (email, name, window, accommodations; errors[] says which) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such test in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This candidate already has an open invitation to this test */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many invitations this hour; Retry-After says when */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    createInvitationsBulk: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                testId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkInvitations"];
+            };
+        };
+        responses: {
+            /** @description How many were invited and which rows were not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkInvitationResult"];
+                };
+            };
+            /** @description Validation failed (too many rows, window, an unknown field) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such test in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The window ends in the past */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many invitations this hour; nothing was invited; Retry-After says when */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listCandidateInvitations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidateId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Invitations, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["CandidateInvitation"][];
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such candidate in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    listReviewQueue: {
+        parameters: {
+            query?: {
+                status?: components["schemas"]["SessionStatus"];
+                cursor?: string;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewQueue"];
+                };
+            };
+            /** @description Invalid status, cursor or page size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    getReviewSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The review bundle */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewSession"];
+                };
+            };
+            /** @description Not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such session in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    getReviewPlayback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+                recordingId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The signed URL or ordered parts. Never cache or store it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewPlayback"];
+                };
+            };
+            /** @description Not a UUID, or a recording id that is not KIND-SEGMENT (SCREEN-0) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such session or recording in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Object storage is not configured yet (no code; calm message, no retry loop), or BUSY */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    scoreReviewAnswer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+                sessionQuestionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ScoreAnswer"];
+            };
+        };
+        responses: {
+            /** @description Decision stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScoredAnswer"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such session or answer */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description code ANSWER_NOT_MANUAL, SESSION_NOT_UNDER_REVIEW or VERDICT_ALREADY_SET */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
+    };
+    setReviewVerdict: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetVerdict"];
+            };
+        };
+        responses: {
+            /** @description Verdict stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewVerdict"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description No such session */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Pending manual answers, or a verdict is already set */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            503: components["responses"]["Busy"];
+        };
     };
-  };
 }

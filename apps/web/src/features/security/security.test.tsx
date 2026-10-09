@@ -6,7 +6,6 @@ import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '@/features/auth/auth-provider';
 import { LoginForm } from '@/features/auth/login-form';
-import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
 import { UserMenu } from '@/features/staff/user-menu';
 import { api } from '@/lib/api/client';
 import {
@@ -29,7 +28,7 @@ import { server } from '@/mocks/server';
 import { renderAsStaff, renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
 import { SecurityPage } from './security-page';
-import { isTwoFactorMandatory, reauthBodySchema, setupConfirmBodySchema } from './schemas';
+import { reauthBodySchema, setupConfirmBodySchema } from './schemas';
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 vi.mock('qrcode', () => ({
@@ -47,6 +46,8 @@ beforeEach(() => resetAuthTestState());
 
 const base = `${apiBaseUrl}/v1/auth`;
 const DISABLED_LOGIN = '/admin/login?reason=two-factor-off';
+const ENABLED_LOGIN = '/admin/login?reason=two-factor-on';
+const UNCONFIRMED_LOGIN = '/admin/login?reason=two-factor-unconfirmed';
 
 /** Counts the calls that would sign a user out or restore a session. */
 function watchSessionCalls() {
@@ -100,10 +101,6 @@ describe('web-local schemas (FR-102)', () => {
     expect(setupConfirmBodySchema.safeParse({ currentPassword: 'x', code: '123456' }).success).toBe(
       true,
     );
-    expect(isTwoFactorMandatory('SUPER_ADMIN')).toBe(true);
-    expect(isTwoFactorMandatory('REVIEWER')).toBe(true);
-    expect(isTwoFactorMandatory('RECRUITER')).toBe(false);
-    expect(isTwoFactorMandatory('AUTHOR')).toBe(false);
   });
 });
 
@@ -143,7 +140,7 @@ describe('Security page: wrong password (FR-102, FU-BE-39)', () => {
     const u = await pageAs(MOCK_USERS.recruiter);
     await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
     await u.type(passwordField(), 'half-typed-secret');
-    await u.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+    await u.click(within(dialog()).getByRole('button', { name: 'Skip for now' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
     expect(passwordField()).toHaveValue('');
@@ -176,7 +173,7 @@ describe('Security page: wrong password (FR-102, FU-BE-39)', () => {
 });
 
 describe('Security page: set up, disable, regenerate (FR-102)', () => {
-  it('FR-102: a recruiter sets up 2FA, sees the recovery codes once, and then Disable appears; disabling turns it off again', async () => {
+  it('FR-102: a recruiter sets up 2FA, sees the recovery codes once, and is then signed out to sign in with a code', async () => {
     const u = await pageAs(MOCK_USERS.recruiter);
     expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
     expect(
@@ -201,12 +198,7 @@ describe('Security page: set up, disable, regenerate (FR-102)', () => {
     await u.click(within(dialog()).getByRole('checkbox'));
     await u.click(done);
 
-    expect(await screen.findByRole('button', { name: 'Disable 2FA' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Set up 2FA' })).not.toBeInTheDocument();
-
-    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.recruiter.password);
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(ENABLED_LOGIN));
     expect(getAccessToken()).toBeNull();
   });
 
@@ -220,13 +212,23 @@ describe('Security page: set up, disable, regenerate (FR-102)', () => {
   it.each([
     ['SUPER_ADMIN', MOCK_USERS.admin],
     ['REVIEWER', MOCK_USERS.reviewer],
-  ])('FR-102: Disable 2FA is hidden for %s and the page explains why', async (_role, user) => {
-    await pageAs(user, { twoFactorOn: true });
-    expect(screen.queryByRole('button', { name: 'Disable 2FA' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
-    expect(screen.getByTestId('two-factor-required')).toHaveTextContent(
-      'Two-factor sign-in is required for your role',
-    );
+  ])(
+    'FR-102: Disable 2FA is offered to %s, and turning it off signs out everywhere',
+    async (_role, user) => {
+      const u = await pageAs(user, { twoFactorOn: true });
+      expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Disable 2FA' })).toBeVisible();
+      expect(screen.queryByTestId('two-factor-required')).not.toBeInTheDocument();
+      await openAndSubmit(u, 'Disable 2FA', user.password);
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
+      expect(getAccessToken()).toBeNull();
+    },
+  );
+
+  it('FR-102: the Security page recommends turning 2FA on while it is off, for any role', async () => {
+    await pageAs(MOCK_USERS.reviewer);
+    expect(screen.getByTestId('two-factor-status')).toHaveTextContent('we recommend it');
+    expect(screen.getByRole('button', { name: 'Set up 2FA' })).toBeVisible();
   });
 
   it('FR-102: regenerating shows new codes once and the old codes stop working', async () => {
@@ -365,7 +367,7 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     ).toBe(403);
   });
 
-  it('FR-102: disable as SUPER_ADMIN or REVIEWER with the right password is 403 TWO_FACTOR_REQUIRED_FOR_ROLE; a wrong password is REAUTH_FAILED first', async () => {
+  it('FR-102: disable as SUPER_ADMIN or REVIEWER with the right password and code is 204; a wrong password is REAUTH_FAILED first', async () => {
     for (const user of [MOCK_USERS.admin, MOCK_USERS.reviewer]) {
       resetAuthTestState();
       await pageAs(user, { twoFactorOn: true });
@@ -375,11 +377,7 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
         currentPassword: user.password,
         totpCode: '123456',
       });
-      expect(right.status).toBe(403);
-      expect(await right.json()).toMatchObject({
-        detail: 'Two-factor authentication is required for your role.',
-        code: 'TWO_FACTOR_REQUIRED_FOR_ROLE',
-      });
+      expect(right.status).toBe(204);
       document.body.innerHTML = '';
     }
   });
@@ -391,26 +389,6 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     expect((await post('2fa/recovery-codes/regenerate', pw)).status).toBe(409);
   });
 
-  it('FR-102: the dialog shows a clear role message for 403 TWO_FACTOR_REQUIRED_FOR_ROLE and stays signed in', async () => {
-    const calls = watchSessionCalls();
-    server.use(
-      http.post(`${base}/2fa/disable`, () =>
-        HttpResponse.json(
-          { status: 403, detail: 'x', code: 'TWO_FACTOR_REQUIRED_FOR_ROLE' },
-          { status: 403 },
-        ),
-      ),
-    );
-    const u = await pageAs(MOCK_USERS.author, { twoFactorOn: true });
-    await openAndSubmit(u, 'Disable 2FA', MOCK_USERS.author.password);
-    expect(
-      await within(dialog()).findByText('Two-factor sign-in is required for your role'),
-    ).toBeInTheDocument();
-    expect(within(dialog()).queryByText('Password incorrect')).not.toBeInTheDocument();
-    expect(calls.logout).toBe(0);
-    expect(getAccessToken()).not.toBeNull();
-  });
-
   it('FR-102: a 400 on the password step shows a field message, a 409 a state-conflict message', async () => {
     server.use(
       http.post(`${base}/2fa/setup/start`, () =>
@@ -420,7 +398,7 @@ describe('Security page: PR #26 error contract (FR-102, FU-BE-39)', () => {
     const u = await pageAs(MOCK_USERS.recruiter);
     await openAndSubmit(u, 'Set up 2FA', 'anything');
     expect(await within(dialog()).findByText('Enter your current password.')).toBeInTheDocument();
-    await u.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+    await u.click(within(dialog()).getByRole('button', { name: 'Skip for now' }));
 
     server.use(
       http.post(`${base}/2fa/setup/start`, () =>
@@ -448,7 +426,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
       body: JSON.stringify(body),
     });
 
-  it('FR-102: a successful disable signs out locally with no refresh and no logout call, clears the cache and the marker, and goes to login with the notice', async () => {
+  it('FR-102: a successful disable signs out with no refresh and one logout call, clears the cache and the marker, and goes to login with the notice', async () => {
     const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter, { twoFactorOn: true });
     const refreshBefore = calls.refresh;
@@ -456,7 +434,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith(DISABLED_LOGIN));
     expect(getAccessToken()).toBeNull();
     expect(getSessionUserId()).toBeNull();
-    expect(calls.logout).toBe(0);
+    expect(calls.logout).toBe(1);
     expect(calls.refresh).toBe(refreshBefore);
     // No stuck "could not confirm sign-out" state: nothing is pending, so no retry loop.
     expect(isSignOutPending()).toBe(false);
@@ -545,7 +523,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     ).toBeInTheDocument();
   });
 
-  it('FR-102: a server 400 on the code shows the field message and a 503 says to try again, neither signs out', async () => {
+  it('FR-102: a server 400 on the code shows the field message and a 503 without code BUSY is an unknown outcome, neither signs out', async () => {
     server.use(
       http.post(`${base}/2fa/disable`, () => HttpResponse.json({ status: 400 }, { status: 400 }), {
         once: true,
@@ -564,14 +542,12 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
     await u.type(passwordField(), MOCK_USERS.recruiter.password);
     await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Turn off 2FA' }));
-    expect(
-      await within(dialog()).findByText('Verification is temporarily unavailable'),
-    ).toBeInTheDocument();
+    expect(await within(dialog()).findByText('Something went wrong')).toBeInTheDocument();
     expect(getAccessToken()).not.toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
   });
 
-  it('FR-102: the mock checks in order password, 409 if off, code, role; a replayed code is REAUTH_FAILED', async () => {
+  it('FR-102: the mock checks in order password, 409 if off, code; a replayed code is REAUTH_FAILED', async () => {
     await pageAs(MOCK_USERS.admin, { twoFactorOn: true });
     const pw = MOCK_USERS.admin.password;
     // Wrong password first, even with a valid code.
@@ -582,7 +558,7 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
         }
       ).code,
     ).toBe('REAUTH_FAILED');
-    // Wrong code before the role refusal.
+    // Wrong code is refused.
     expect(
       (
         (await (await disable({ currentPassword: pw, totpCode: '000000' })).json()) as {
@@ -590,14 +566,10 @@ describe('Disable 2FA needs a code and signs out everywhere (FR-102, backend PR 
         }
       ).code,
     ).toBe('REAUTH_FAILED');
-    // Right password and code: now the role refusal.
-    const role = await disable({ currentPassword: pw, totpCode: ' 123456 ' });
-    expect(role.status).toBe(403);
-    expect(((await role.json()) as { code: string }).code).toBe('TWO_FACTOR_REQUIRED_FOR_ROLE');
-    // The same code again is a replay.
-    const replay = await disable({ currentPassword: pw, totpCode: '123456' });
-    expect(replay.status).toBe(403);
-    expect(((await replay.json()) as { code: string }).code).toBe('REAUTH_FAILED');
+    // Right password and code: allowed for every role (2FA is optional).
+    expect((await disable({ currentPassword: pw, totpCode: ' 123456 ' })).status).toBe(204);
+    // 2FA is off now: a second call is a 409.
+    expect((await disable({ currentPassword: pw, totpCode: '123456' })).status).toBe(409);
   });
 
   it('FR-102: wrong codes and wrong passwords share one lockout with login', async () => {
@@ -659,7 +631,7 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
     expect(tokens.length).toBeGreaterThan(0);
     expect(tokens.every((t) => t === null)).toBe(true);
     expect(calls.refresh).toBe(refreshBefore);
-    expect(calls.logout).toBe(0);
+    expect(calls.logout).toBe(1);
     // One staff call per cancelQueries call, each sent without a token.
     expect(usersCalls).toBe(tokens.length);
   });
@@ -694,6 +666,7 @@ describe('Disable sign-out is airtight (FR-102, FR-103, TC-005)', () => {
             role: 'AUTHOR',
             orgName: 'x',
             totpEnabled: false,
+            twoFactorRecommended: true,
           },
         });
         return new HttpResponse(null, { status: 204 });
@@ -952,7 +925,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     expect(unload()).toBe(false);
   });
 
-  it('FR-102: the session user (totpEnabled) is re-read when set-up is acknowledged (Done), not while the codes show', async () => {
+  it('FR-102: Done after set-up signs out with one logout call and no refresh (the server revoked every session); the codes stay up until then', async () => {
     const calls = watchSessionCalls();
     const u = await pageAs(MOCK_USERS.recruiter);
     const before = calls.refresh;
@@ -960,16 +933,78 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
     await within(dialog()).findByTestId('recovery-codes');
-    expect(calls.refresh).toBe(before);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(getAccessToken()).not.toBeNull();
     await u.click(within(dialog()).getByRole('checkbox'));
     await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
-    expect(await screen.findByRole('button', { name: 'Disable 2FA' })).toBeVisible();
-    expect(calls.refresh).toBe(before + 1);
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(ENABLED_LOGIN));
+    expect(getAccessToken()).toBeNull();
+    expect(isSignOutPending()).toBe(false);
+    expect(calls.refresh).toBe(before);
+    expect(calls.logout).toBe(1);
   });
 
-  it('FR-102: a failing refresh while the one-time codes show does not unmount them', async () => {
+  it('FR-102 FR-104: the logout after a confirmed set-up answers 401 (the family is already revoked): counted as confirmed, marker cleared, no retry offered', async () => {
+    let logouts = 0;
+    server.use(
+      http.post(`${base}/logout`, () => {
+        logouts += 1;
+        return HttpResponse.json({ status: 401 }, { status: 401 });
+      }),
+    );
     const u = await pageAs(MOCK_USERS.recruiter);
-    server.use(http.post(`${base}/refresh`, () => new HttpResponse(null, { status: 500 })));
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    await within(dialog()).findByTestId('recovery-codes');
+    await u.click(within(dialog()).getByRole('checkbox'));
+    await u.click(within(dialog()).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(ENABLED_LOGIN));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(logouts).toBe(1);
+    expect(isSignOutPending()).toBe(false);
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it.each([
+    ['500', () => new HttpResponse(null, { status: 500 })],
+    ['a 503 without code BUSY', () => HttpResponse.json({ status: 503 }, { status: 503 })],
+    ['a network error', () => HttpResponse.error()],
+  ])(
+    'FR-102: an unknown outcome of set-up confirm (%s) signs out for real (one logout call) to sign-in with a notice that does not claim 2FA is on',
+    async (_n, answer) => {
+      server.use(http.post(`${base}/2fa/setup/confirm`, answer));
+      const calls = watchSessionCalls();
+      const u = await pageAs(MOCK_USERS.recruiter);
+      await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+      await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+      await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+      await waitFor(() => expect(router.replace).toHaveBeenCalledWith(UNCONFIRMED_LOGIN));
+      expect(getAccessToken()).toBeNull();
+      expect(calls.logout).toBe(1);
+      expect(isSignOutPending()).toBe(false);
+    },
+  );
+
+  it('FR-102 FR-104: if the logout after an unknown set-up outcome also fails, the pending marker stays so a reload cannot restore the session', async () => {
+    server.use(
+      http.post(`${base}/2fa/setup/confirm`, () => new HttpResponse(null, { status: 500 })),
+      http.post(`${base}/logout`, () => new HttpResponse(null, { status: 500 })),
+    );
+    const u = await pageAs(MOCK_USERS.recruiter);
+    await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
+    await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
+    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith(UNCONFIRMED_LOGIN));
+    expect(getAccessToken()).toBeNull();
+    expect(isSignOutPending()).toBe(true);
+  });
+
+  it('FR-102: nothing refreshes while the one-time codes show, so they stay up', async () => {
+    const calls = watchSessionCalls();
+    const u = await pageAs(MOCK_USERS.recruiter);
+    const before = calls.refresh;
     await openAndSubmit(u, 'Set up 2FA', MOCK_USERS.recruiter.password);
     await u.type(await within(dialog()).findByLabelText('6-digit code'), MOCK_TOTP_CODE);
     await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
@@ -977,6 +1012,7 @@ describe('Security page: recovery codes are shown once (FR-102)', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByTestId('recovery-codes')).toBeInTheDocument();
     expect(getAccessToken()).not.toBeNull();
+    expect(calls.refresh).toBe(before);
   });
 
   it('FR-102: regenerating makes no refresh call (totpEnabled does not change)', async () => {
@@ -1093,7 +1129,7 @@ describe('Security page: 401 replay is for the same user only (FR-102, FR-103, T
   });
 });
 
-describe('Security page: entry point, forced enrollment, accessibility', () => {
+describe('Security page: entry point, optional set-up, accessibility', () => {
   it.each(Object.values(MOCK_USERS))(
     'FR-102: the user menu links every staff role ($role) to /admin/security',
     async (user) => {
@@ -1107,33 +1143,14 @@ describe('Security page: entry point, forced enrollment, accessibility', () => {
     },
   );
 
-  it('FR-102: forced enrollment is unchanged and asks for no password', async () => {
-    const bodies: string[] = [];
-    server.events.on('request:start', ({ request }) => {
-      if (new URL(request.url).pathname.includes('/2fa/enroll/')) {
-        void request
-          .clone()
-          .text()
-          .then((t) => bodies.push(t));
-      }
-    });
-    renderWithAuth(
-      <>
-        <LoginForm />
-        <TwoFactorEnroll />
-      </>,
-    );
-    const u = userEvent.setup();
-    await u.type(screen.getAllByLabelText('Work email')[0]!, MOCK_USERS.reviewer.email);
-    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
-    await u.click(screen.getByRole('button', { name: 'Sign in' }));
-    await screen.findByTestId('manual-key');
-    expect(screen.queryByLabelText('Current password')).not.toBeInTheDocument();
-    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    expect(await screen.findByTestId('recovery-codes')).toBeInTheDocument();
-    await waitFor(() => expect(bodies.length).toBeGreaterThanOrEqual(2));
-    expect(bodies.join('')).not.toContain('currentPassword');
+  it('FR-102: the Skip for now button on the set-up screen closes it and returns to the page', async () => {
+    const u = await pageAs(MOCK_USERS.reviewer);
+    await u.click(screen.getByRole('button', { name: 'Set up 2FA' }));
+    expect(within(dialog()).queryByText(/Your role requires/)).not.toBeInTheDocument();
+    await u.click(within(dialog()).getByRole('button', { name: 'Skip for now' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Set up 2FA' })).toBeVisible();
+    expect(getAccessToken()).not.toBeNull();
   });
 
   it('FR-102: axe finds no violations on the page or on the open dialog', async () => {

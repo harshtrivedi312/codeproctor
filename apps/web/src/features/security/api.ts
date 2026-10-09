@@ -1,6 +1,7 @@
 import { api, type Schemas } from '@/lib/api/client';
+import { isBusyResponse } from '@/lib/api/busy';
 import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
-import { REAUTH_FAILED_CODE, ROLE_REQUIRED_CODE } from './schemas';
+import { REAUTH_FAILED_CODE } from './schemas';
 
 /*
  * Calls for the Security page. None of them may sign the user out: a wrong password is HTTP 403
@@ -17,8 +18,6 @@ export type Failure =
   | 'code'
   /** The state changed elsewhere (409), for example 2FA is already on. */
   | 'conflict'
-  /** 403 TWO_FACTOR_REQUIRED_FOR_ROLE: Super Admin and Reviewer cannot turn 2FA off. */
-  | 'role'
   /** Some other 403. */
   | 'forbidden'
   /** 401 even after a refresh. */
@@ -51,21 +50,18 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
       return data === undefined ? { ok: false, failure: 'unknown' } : { ok: true, data };
     }
     if (response.status === 403) {
-      const code = error?.code;
       return {
         ok: false,
-        failure:
-          code === REAUTH_FAILED_CODE
-            ? 'password'
-            : code === ROLE_REQUIRED_CODE
-              ? 'role'
-              : 'forbidden',
+        failure: error?.code === REAUTH_FAILED_CODE ? 'password' : 'forbidden',
       };
     }
     if (response.status === 400) return { ok: false, failure: 'code' };
     if (response.status === 409) return { ok: false, failure: 'conflict' };
     if (response.status === 401) return { ok: false, failure: 'session' };
-    if (response.status === 503) return { ok: false, failure: 'busy' };
+    // Only the BUSY answer means nothing happened; any other 503 is an unknown outcome.
+    if (response.status === 503) {
+      return { ok: false, failure: (await isBusyResponse(response)) ? 'busy' : 'unknown' };
+    }
     return { ok: false, failure: 'unknown' };
   } catch {
     return { ok: false, failure: 'network' };

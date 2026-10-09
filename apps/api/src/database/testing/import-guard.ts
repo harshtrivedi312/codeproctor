@@ -24,8 +24,9 @@ export interface GuardRule {
   readonly allowed: readonly string[];
 }
 
-// from '…' (import and export), import '…', require('…') and import('…'), single or double quotes.
-const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"])([^'"\n]+)\1/g;
+// from '…' (import and export), import '…', require('…') and import('…'), single quotes, double quotes or
+// backticks (a template literal without a `${}` is a plain string: import(`../database/session-locks`)).
+const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"`])([^'"`\n]+)\1/g;
 
 /** Every module specifier in `source`, in any of the import forms. */
 export function specifiersOf(source: string): string[] {
@@ -34,7 +35,8 @@ export function specifiersOf(source: string): string[] {
 
 /**
  * The module a relative specifier points at, as `database/prisma.module`: relative to src, with
- * the `.js` or `.ts` extension removed. Bare specifiers (packages) give `undefined`.
+ * the extension removed, all six of them (`.js`, `.ts`, `.mjs`, `.mts`, `.cjs`, `.cts`). Bare specifiers
+ * (packages) give `undefined`.
  */
 export function resolveSpecifier(fromPath: string, specifier: string): string | undefined {
   if (!specifier.startsWith('.')) return undefined;
@@ -43,7 +45,7 @@ export function resolveSpecifier(fromPath: string, specifier: string): string | 
   return target
     .split(sep)
     .join('/')
-    .replace(/\.(js|ts)$/, '');
+    .replace(/\.[mc]?[jt]s$/, '');
 }
 
 /** True when `specifier` is the guarded package, or a path inside it. */

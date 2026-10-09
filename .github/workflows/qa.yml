@@ -39,9 +39,11 @@ jobs:
     name: P1 gate (unit, e2e, a11y) and coverage per module
     if: github.event_name != 'workflow_dispatch' || inputs.scan == 'none'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # The API refuses to boot without APP_ENV (DL-55). The test harness sets it too; this makes it explicit.
+      APP_ENV: test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

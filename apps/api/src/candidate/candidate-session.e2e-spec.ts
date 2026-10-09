@@ -2773,9 +2773,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         busy(),
       );
       const first = await authed('post', '/heartbeat', tokenOf(inv));
-      // TODO(DL-37): this is 503 with Retry-After once Backend A's ProblemFilter mapping lands; the
-      // thrown error is busy-class (isBusyLockError) and the answer is a 5xx, never 409 or 200.
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await slot('heartbeat', inv.sessionId)).toBe(1);
       spy.mockRestore();
       await authed('post', '/heartbeat', tokenOf(inv)).expect(200);
@@ -2857,8 +2857,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const code = await otpFor(inv);
       const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
       const first = await post('/start', { invitationToken: inv.token, otp: code });
-      // TODO(DL-37): 503 with Retry-After once Backend A's ProblemFilter mapping lands.
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
       const left = await redis.pttl(`otp:${inv.invitationId}`);
       expect(left).toBeGreaterThan(0);
@@ -3266,8 +3267,14 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     await post('/link', { invitationToken: inv.token }).expect(200);
     const text = logged.join('');
     expect(text.length).toBeGreaterThan(0);
+    // Request ids are random UUIDs and can contain the six digits by chance ("...80ca254745eb"),
+    // which is not a leak: they are masked, then the OTP is checked as a plain substring.
+    const scrubbed = text.replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+      '<uuid>',
+    );
+    expect(scrubbed).not.toContain(code);
     for (const secret of [
-      code,
       inv.token,
       sessionToken,
       (key.body as { key: string }).key,

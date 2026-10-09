@@ -5,17 +5,16 @@
 // The PDF lives outside the session prefix (ADR 0013 section 5.7): the consent proof keeps its own
 // clock and is not deleted by an erasure of the session media.
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { Env } from '../config/env';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
+import { consentPdfObjectKey } from '../media/storage-keys';
 import { CandidateMailPort } from './candidate-mail.port';
 import { renderConsentPdf } from './consent-pdf.renderer';
+import { isDemoTextRefused } from './demo-consent';
 import { ObjectStoragePort } from './object-storage.port';
 import { newUlid } from './ulid';
-
-/** Object key of a signed consent PDF (ADR 0013 section 5.7). UUIDs and a ULID only. */
-export function consentPdfKey(orgId: string, sessionId: string, ulid: string): string {
-  return `orgs/${orgId}/consents/${sessionId}/${ulid}.pdf`;
-}
 
 @Injectable()
 export class ConsentPdfService {
@@ -26,6 +25,7 @@ export class ConsentPdfService {
     private readonly orgContext: OrgContextService,
     private readonly storage: ObjectStoragePort,
     private readonly mail: CandidateMailPort,
+    private readonly config: ConfigService<Env, true>,
   ) {}
 
   /** Returns false when there is nothing to do (no signed consent for this session in this org). */
@@ -50,7 +50,7 @@ export class ConsentPdfService {
       const [text, org, session] = await Promise.all([
         this.prisma.client.consentText.findUnique({
           where: { id: consent.consentTextId },
-          select: { version: true, bodyMd: true, legalApprovedAt: true },
+          select: { version: true, bodyMd: true, legalApprovedAt: true, legalApprovedBy: true },
         }),
         this.prisma.client.organization.findUnique({
           where: { id: orgId },
@@ -62,6 +62,12 @@ export class ConsentPdfService {
         }),
       ]);
       if (!text || !org || !session) return false;
+      // A demo text in a shared env is never rendered, stored or emailed (K2/F6). The sweep may
+      // queue the row again; the message is fixed text, no ids and no address.
+      if (isDemoTextRefused(this.config, text)) {
+        this.logger.warn('Consent PDF refused: demo consent text in a shared environment');
+        return false;
+      }
 
       const pdf = await renderConsentPdf({
         orgName: org.name,
@@ -76,7 +82,7 @@ export class ConsentPdfService {
       });
 
       if (consent.pdfKey === null) {
-        const key = consentPdfKey(orgId, sessionId, newUlid(now));
+        const key = consentPdfObjectKey({ orgId, sessionId }, newUlid(now));
         await this.storage.putObject(key, pdf, 'application/pdf');
         const claimed = await this.prisma.client.consent.updateMany({
           where: { id: consent.id, pdfKey: null },

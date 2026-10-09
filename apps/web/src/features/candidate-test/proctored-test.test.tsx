@@ -1,6 +1,6 @@
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
 import { getSessionToken, setSessionToken } from '@/features/candidate-flow/session-store';
@@ -351,6 +351,170 @@ describe('proctored test (ADR 0013, FR-601..FR-603, FR-609, FR-701, TC-030)', ()
       'FULLSCREEN_RESTORED',
     );
   });
+
+  it('FU-FEB-60 FR-505 ADR 0002: a heartbeat that meets "not active" while the candidate submits the last section does not replace the submitted page', async () => {
+    const devices = setupDevices();
+    const session = await startedSession();
+    const user = userEvent.setup();
+    const { onSubmitted } = mount();
+    await passGate(user);
+    // The server closes the last section the moment the finish arrives and answers 202 only after a
+    // while, so several heartbeats (60 ms apart) see 409 SESSION_NOT_ACTIVE in between: the exact
+    // window in which the screen used to show "no longer running" and purge the recording.
+    let finishing = false;
+    let heartbeatsDuringFinish = 0;
+    server.use(
+      // Counts every heartbeat sent while the last finish is pending (the mock only counts the
+      // ones the server accepts), then lets the normal handler answer it.
+      http.post(`${cand}/session/heartbeat`, () => {
+        if (finishing) heartbeatsDuringFinish += 1;
+        return undefined;
+      }),
+      http.post(`${cand}/session/section/finish`, async ({ request }) => {
+        const body = (await request.clone().json()) as { position?: number };
+        if (body.position !== 2) return undefined;
+        finishing = true;
+        testState(session).submitted = true;
+        await delay(400);
+        finishing = false;
+        return HttpResponse.json({ accepted: true }, { status: 202 });
+      }),
+    );
+    for (let i = 0; i < 2; i += 1) {
+      await user.click(screen.getByRole('button', { name: 'Finish section' }));
+      await user.click(
+        within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+      );
+      if (i === 0) {
+        await user.click(
+          await screen.findByRole('button', { name: /continue to the next section/i }),
+        );
+        await screen.findByText(/section 2 of 2/i);
+      }
+    }
+    expect(await screen.findByTestId('test-submitted')).toBeInTheDocument();
+    expect(screen.queryByTestId('test-inactive')).not.toBeInTheDocument();
+    await waitFor(() => expect(onSubmitted).toHaveBeenCalled(), { timeout: 6000 });
+    expect(devices.display.stops).toHaveBeenCalled();
+    // The window really contained heartbeats; otherwise this test would prove nothing.
+    expect(heartbeatsDuringFinish).toBeGreaterThan(0);
+  }, 20_000);
+
+  it('FU-FEB-60 FR-505 ADR 0002: when the last close is still pending, the server ending the session moves to the submitted page without a click and stops the devices', async () => {
+    const devices = setupDevices();
+    const session = await startedSession();
+    const user = userEvent.setup();
+    const { onSubmitted } = mount();
+    await passGate(user);
+    // Section 1 closes at once; the last section's close lands 600 ms after the 202 (the real
+    // close is an async job), so the re-read still shows the section open and the pending panel.
+    for (let i = 0; i < 2; i += 1) {
+      if (i === 1) testState(session).closeDelayMs = 600;
+      await user.click(screen.getByRole('button', { name: 'Finish section' }));
+      await user.click(
+        within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+      );
+      if (i === 0) {
+        await user.click(
+          await screen.findByRole('button', { name: /continue to the next section/i }),
+        );
+        await screen.findByText(/section 2 of 2/i);
+      }
+    }
+    // The pending panel is up first (the close has not landed), then, with no click on "continue",
+    // the next heartbeat after the close sees "not active" and the screen goes to the submitted
+    // page, where the finish runs (devices stop, credentials are cleared).
+    expect(await screen.findByTestId('test-submitted', undefined, { timeout: 6000 })).toBeVisible();
+    expect(screen.queryByTestId('test-inactive')).not.toBeInTheDocument();
+    await waitFor(() => expect(onSubmitted).toHaveBeenCalled(), { timeout: 6000 });
+    expect(devices.display.stops).toHaveBeenCalled();
+  }, 25_000);
+
+  it('FU-FEB-60 ADR 0013 5.3: a "not active" met during a last-section finish that then fails is acted on, not swallowed', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const user = userEvent.setup();
+    mount();
+    await passGate(user);
+    // Section 1 first.
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await user.click(await screen.findByRole('button', { name: /continue to the next section/i }));
+    await screen.findByText(/section 2 of 2/i);
+    // The last finish: while it is pending the session really ends (time ran out, or the proctor
+    // ended it) so heartbeats meet 409; then the finish fails and so does the re-read, so the
+    // candidate did NOT submit. The remembered "not active" must now end the test, not be lost.
+    server.use(
+      http.post(`${cand}/session/section/finish`, async ({ request }) => {
+        const body = (await request.clone().json()) as { position?: number };
+        if (body.position !== 2) return undefined;
+        testState(session).submitted = true;
+        await delay(300);
+        return HttpResponse.json({ code: 'INTERNAL' }, { status: 503 });
+      }),
+      http.get(`${cand}/session`, () => HttpResponse.json({ code: 'INTERNAL' }, { status: 500 })),
+    );
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    expect(
+      await screen.findByTestId('test-inactive', undefined, { timeout: 4000 }),
+    ).toHaveTextContent(/no longer running/i);
+  }, 25_000);
+
+  it('FU-FEB-60 ADR 0013 5.3: an earlier section whose close was pending does not make a failed last-section finish look submitted', async () => {
+    setupDevices();
+    const session = await startedSession();
+    const user = userEvent.setup();
+    const { onSubmitted } = mount();
+    await passGate(user);
+    // Section 1's close is slow, so section 1 is marked "pending" (the real API always answers 202).
+    testState(session).closeDelayMs = 250;
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await user.click(await screen.findByRole('button', { name: /continue to the next section/i }));
+    await waitFor(
+      async () => {
+        const again = screen.queryByRole('button', { name: /continue to the next section/i });
+        if (again) await user.click(again);
+        expect(screen.getByText(/section 2 of 2/i)).toBeInTheDocument();
+      },
+      { timeout: 4000 },
+    );
+    testState(session).closeDelayMs = 0;
+    // The last finish fails and so does the re-read, while the session really ends (heartbeats
+    // meet 409). The earlier section's stale "pending" must not turn that into "submitted".
+    server.use(
+      http.post(`${cand}/session/section/finish`, async ({ request }) => {
+        const body = (await request.clone().json()) as { position?: number };
+        if (body.position !== 2) return undefined;
+        testState(session).submitted = true;
+        await delay(300);
+        return HttpResponse.json({ code: 'INTERNAL' }, { status: 503 });
+      }),
+      http.get(`${cand}/session`, () => HttpResponse.json({ code: 'INTERNAL' }, { status: 500 })),
+    );
+    let sawSubmitted = false;
+    const watch = new MutationObserver(() => {
+      if (screen.queryByTestId('test-submitted')) sawSubmitted = true;
+    });
+    watch.observe(document.body, { childList: true, subtree: true });
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    expect(
+      await screen.findByTestId('test-inactive', undefined, { timeout: 4000 }),
+    ).toHaveTextContent(/no longer running/i);
+    watch.disconnect();
+    expect(sawSubmitted).toBe(false);
+    expect(onSubmitted).not.toHaveBeenCalled();
+  }, 25_000);
 });
 
 /** Asks the SDK to send queued batches now (it flushes on pagehide), then reads what the server got. */
