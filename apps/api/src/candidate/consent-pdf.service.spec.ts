@@ -160,26 +160,41 @@ describe('ConsentPdfService writes only the PDF columns (FU-DB-266, C-30, D-55, 
     return { service, updateMany };
   }
 
-  it('FU-DB-266: every consents write of a full run (PDF stored, copy emailed) is only the allowed columns, and never signedAt, signedName or ageConfirmedAt', async () => {
-    const { service, updateMany } = run({ pdfKey: null, copyEmailedAt: null });
-    await expect(service.generate(ORG, SESSION)).resolves.toBe(true);
-    const calls = updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>;
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    const allowed: readonly string[] = CONSENT_PDF_JOB_WRITE_COLUMNS;
-    for (const [args] of calls) {
-      for (const column of Object.keys(args.data)) expect(allowed).toContain(column);
-      for (const forbidden of ['signedAt', 'signedName', 'ageConfirmedAt', 'consentTextId', 'ip']) {
-        expect(Object.keys(args.data)).not.toContain(forbidden);
+  it.each([
+    [
+      'PDF and copy both missing',
+      { pdfKey: null, copyEmailedAt: null },
+      [['pdfGeneratedAt', 'pdfKey'], ['copyEmailedAt']],
+    ],
+    [
+      'PDF missing, copy already sent',
+      { pdfKey: null, copyEmailedAt: new Date() },
+      [['pdfGeneratedAt', 'pdfKey']],
+    ],
+    ['PDF stored, copy missing', { pdfKey: 'k', copyEmailedAt: null }, [['copyEmailedAt']]],
+    ['both done', { pdfKey: 'k', copyEmailedAt: new Date() }, []],
+  ] as const)(
+    'FU-DB-266: %s writes exactly the expected PDF columns, never signedAt, signedName or ageConfirmedAt',
+    async (_name, state, expected) => {
+      const { service, updateMany } = run({ ...state });
+      await expect(service.generate(ORG, SESSION)).resolves.toBe(true);
+      const calls = updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>;
+      expect(calls.map(([a]) => Object.keys(a.data).sort())).toEqual(expected);
+      const allowed: readonly string[] = CONSENT_PDF_JOB_WRITE_COLUMNS;
+      for (const [args] of calls) {
+        for (const column of Object.keys(args.data)) expect(allowed).toContain(column);
+        for (const forbidden of [
+          'signedAt',
+          'signedName',
+          'ageConfirmedAt',
+          'consentTextId',
+          'ip',
+        ]) {
+          expect(Object.keys(args.data)).not.toContain(forbidden);
+        }
       }
-    }
-  });
-
-  it('FU-DB-266: a run with the PDF already stored writes only the copy-emailed time', async () => {
-    const { service, updateMany } = run({ pdfKey: 'k', copyEmailedAt: null });
-    await service.generate(ORG, SESSION);
-    const calls = updateMany.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>;
-    expect(calls.map(([a]) => Object.keys(a.data))).toEqual([['copyEmailedAt']]);
-  });
+    },
+  );
 
   it('FU-DB-266: the allowed list is exactly the three PDF columns', () => {
     expect([...CONSENT_PDF_JOB_WRITE_COLUMNS].sort()).toEqual(

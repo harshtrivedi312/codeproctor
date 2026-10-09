@@ -7,6 +7,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env';
+import type { Prisma } from '../generated/prisma/client.js';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { consentPdfObjectKey } from '../media/storage-keys';
@@ -24,6 +25,12 @@ import { newUlid } from './ulid';
  * this list by consent-pdf.service.spec.ts; SERVICE scope has no column limits of its own.
  */
 export const CONSENT_PDF_JOB_WRITE_COLUMNS = ['pdfKey', 'pdfGeneratedAt', 'copyEmailedAt'] as const;
+
+/** Compile-time half: a `data` object that names any other consents column does not type-check. */
+type ConsentPdfJobWrite = Pick<
+  Prisma.ConsentUpdateManyMutationInput,
+  (typeof CONSENT_PDF_JOB_WRITE_COLUMNS)[number]
+>;
 
 @Injectable()
 export class ConsentPdfService {
@@ -95,7 +102,7 @@ export class ConsentPdfService {
         await this.storage.putObject(key, pdf, 'application/pdf');
         const claimed = await this.prisma.client.consent.updateMany({
           where: { id: consent.id, pdfKey: null },
-          data: { pdfKey: key, pdfGeneratedAt: now },
+          data: { pdfKey: key, pdfGeneratedAt: now } satisfies ConsentPdfJobWrite,
         });
         // A concurrent run stored its own copy first: remove ours so no orphan remains.
         if (claimed.count === 0) await this.storage.deleteObject(key);
@@ -121,7 +128,7 @@ export class ConsentPdfService {
           });
           await this.prisma.client.consent.updateMany({
             where: { id: consent.id, copyEmailedAt: null },
-            data: { copyEmailedAt: now },
+            data: { copyEmailedAt: now } satisfies ConsentPdfJobWrite,
           });
         } else {
           this.logger.error('Consent copy has no candidate address; not emailed');
