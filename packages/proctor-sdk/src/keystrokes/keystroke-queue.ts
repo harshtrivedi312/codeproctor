@@ -24,13 +24,20 @@ export type PendingEditorEvent = { sessionQuestionId: string; atMs: number } & (
 );
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** 9999-12-31T23:59:59.999Z, the last instant `toISOString` writes as a plain four-digit year. */
+const MAX_ATMS = 253_402_300_799_999;
 const bodyBytes = (s: string): number => new TextEncoder().encode(s).length;
 
-/** Event with its batch-relative time, in the shape of the shared schema. */
+/** Event with its batch-relative time, with explicit fields only (nothing else is ever signed). */
 function withT(e: PendingEditorEvent, startedAtMs: number): Record<string, unknown> {
-  const { sessionQuestionId: _q, atMs, ...rest } = e;
-  void _q;
-  return { ...rest, t: Math.max(0, Math.round(atMs - startedAtMs)) };
+  const t = Math.max(0, Math.round(e.atMs - startedAtMs));
+  if (e.kind === 'RESET') return { kind: 'RESET', t, language: e.language, text: e.text };
+  if (e.kind === 'EDIT') {
+    return { kind: 'EDIT', t, offset: e.offset, deleteLength: e.deleteLength, text: e.text };
+  }
+  return e.selectionLength === undefined
+    ? { kind: 'CURSOR', t, offset: e.offset }
+    : { kind: 'CURSOR', t, offset: e.offset, selectionLength: e.selectionLength };
 }
 
 /**
@@ -83,13 +90,9 @@ export function cutKeystrokeBatch(
   return { body, consumed: count };
 }
 
-export type KeystrokeQueueOptions = Omit<BatchQueueOptions, 'transport'> & {
-  transport: BatchQueueOptions['transport'];
-};
-
 /** The keystroke stream: its own sequence, counter key and IndexedDB keys; same guarantees as events. */
 export class KeystrokeQueue extends BatchQueue<PendingEditorEvent> {
-  constructor(opts: KeystrokeQueueOptions) {
+  constructor(opts: BatchQueueOptions) {
     const spec: BatchQueueSpec<PendingEditorEvent> = {
       keyInfix: 'ks:',
       metaName: 'nextKeystrokeSeq',
@@ -98,18 +101,31 @@ export class KeystrokeQueue extends BatchQueue<PendingEditorEvent> {
       flushAt: MAX_KEYSTROKE_EVENTS_PER_BATCH,
       accept: (item) => {
         const e = item as PendingEditorEvent;
+        if (!e || typeof e !== 'object') return null;
+        if (typeof e.sessionQuestionId !== 'string' || !UUID.test(e.sessionQuestionId)) return null;
+        // A date the batch can carry (toISOString throws outside years 0000-9999 and would stick the stream).
         if (
-          !e ||
-          typeof e !== 'object' ||
-          typeof e.sessionQuestionId !== 'string' ||
-          !UUID.test(e.sessionQuestionId)
-        )
+          typeof e.atMs !== 'number' ||
+          !Number.isFinite(e.atMs) ||
+          e.atMs < 0 ||
+          e.atMs > MAX_ATMS
+        ) {
           return null;
-        if (typeof e.atMs !== 'number' || !Number.isFinite(e.atMs)) return null;
+        }
         const { sessionQuestionId: _q, atMs: _a, ...rest } = e;
         void _q;
         void _a;
-        return keystrokeEventSchema.safeParse({ ...rest, t: 0 }).success ? e : null;
+        const parsed = keystrokeEventSchema.safeParse({ ...rest, t: 0 });
+        if (!parsed.success) return null;
+        // Rebuild from the PARSED result: unknown keys are stripped and nothing the caller smuggled
+        // in (extra properties, overridden kind) can be signed.
+        const { t: _t, ...clean } = parsed.data;
+        void _t;
+        return {
+          ...clean,
+          sessionQuestionId: e.sessionQuestionId,
+          atMs: e.atMs,
+        };
       },
       cut: cutKeystrokeBatch,
       // Consecutive cursor moves of one question within 250 ms: keep only the newest. Edits and
@@ -120,6 +136,6 @@ export class KeystrokeQueue extends BatchQueue<PendingEditorEvent> {
         last.sessionQuestionId === next.sessionQuestionId &&
         next.atMs - last.atMs < 250,
     };
-    super({ flushIntervalMs: 2000, ...opts }, spec);
+    super({ ...opts, flushIntervalMs: opts.flushIntervalMs ?? 2000 }, spec);
   }
 }

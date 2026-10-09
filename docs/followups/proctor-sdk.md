@@ -301,3 +301,11 @@ Open
 - The demo mock shows keystroke batches in the shared accepted/duplicate counts (no separate panel row).
 - Multiple tabs of one session would each write their own keystroke sequence; not handled (same as events).
 - ADR 0013 server counters (`keystrokeSeqStart`) will replace the local counter and backup for a new device; until then the cross-device restart-at-0 caveat of the event queue applies to keystrokes too.
+
+### Keystroke review round 1 (PR fe/sdk-keystrokes)
+Fixed: B1 (finish() closes the queue: nothing is accepted, cut or persisted afterwards, pending items count as lost, a batch mid-signing at close is not stored; `KeystrokeRecorder.close()` is called by `stop()` and `finish()`; the demo removes its listeners; `finish()` also deletes `<sid>:ks:` keys of an earlier load even without a keystroke queue; both queues are finished in parallel), B2 (keepalive decided on UTF-8 bytes with 32 KiB headroom, one retry without keepalive on a TypeError), S1 (U+0000 and lone surrogates are `UNSTORABLE_TEXT` and stop that question until a clean reset; the demo diff never splits a surrogate pair; a refused keystroke batch raises `keystroke-rejected`), S2 (only the schema fields are signed, items are rebuilt from the parsed result), S3 (`INVALID` reason), S4, S5, S6, and the cheap nits (degrade() comment, generic backup doc, no `flushIntervalMs: undefined` override, `atMs` bounded to years 0000-9999, Monaco tie-break by longer deletion, EOL note, imports from batch-queue).
+
+Filed
+- `sweepStaleSessions` runs twice per session start (once per queue); harmless, could be done once by the session.
+- `keystrokes.test.ts` imports the API's `signature.ts` directly (`apps/api/src/proctor-events/signature`): a deliberate coupling to test the real verification path; replace with a shared fixture if the API file moves.
+- A 409 `KEY_EPOCH_STALE` still maps to REJECTED (the batch is dropped) in both transports; ADR 0013 says re-sign and retry. Deferred until ADR 0013 is accepted; the same applies to `SESSION_NOT_ACTIVE`.

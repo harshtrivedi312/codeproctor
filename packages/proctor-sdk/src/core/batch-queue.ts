@@ -57,6 +57,8 @@ export interface BatchQueueOptions {
   staleAfterMs?: number;
   /** Called once when IndexedDB stops working and the queue continues in memory only. */
   onStorageDegraded?: (reason: 'OPEN_FAILED' | 'WRITE_FAILED') => void;
+  /** Called when the server refused a batch for good (4xx): the batch is dropped. Never carries content. */
+  onRejected?: () => void;
   /** Called when IndexedDB works again after a degraded period. */
   onStorageRecovered?: () => void;
   /** Called when the sequence counter could not be read and the queue seeded it high (holes, no collisions). */
@@ -125,6 +127,9 @@ export class BatchQueue<TItem> {
   private chain: Promise<void> = Promise.resolve();
   private started = false;
   private finished = false;
+  /** Set by finish(): nothing is accepted, cut or persisted any more (privacy, FR-702). */
+  private closed = false;
+  private lostAtClose = 0;
   private storageDegraded = false;
   private lastProbe = -Infinity;
   private readonly touch: SessionTouch;
@@ -159,7 +164,6 @@ export class BatchQueue<TItem> {
     return `${this.opts.sessionId}:${this.spec.metaName}`;
   }
 
-  /** Load unsent batches from a previous page load and continue the sequence. */
   private degrade(reason: 'OPEN_FAILED' | 'WRITE_FAILED'): void {
     if (this.storageDegraded) return;
     this.storageDegraded = true;
@@ -169,7 +173,8 @@ export class BatchQueue<TItem> {
 
   /**
    * Backup of the sequence counter outside IndexedDB: `{ seq, seenAt }` in localStorage under
-   * `codeproctor:eventseq:<sessionId>` (a pseudonymous id and an integer, no candidate data). This
+   * `<backupPrefix><sessionId>` (`codeproctor:eventseq:` for events, `codeproctor:keystrokeseq:` for
+   * keystrokes; a pseudonymous id and an integer, no candidate data). This
    * localStorage use is an exception to confirm with the hub. Entries of other sessions older than
    * `staleAfterMs` are removed on start.
    */
@@ -226,6 +231,7 @@ export class BatchQueue<TItem> {
     return Math.min(MAX_SEQ_SEED, SEQ_SEED_FLOOR + secs);
   }
 
+  /** Load unsent batches from a previous page load and continue the sequence. */
   async start(): Promise<void> {
     let maxSaved = 0;
     let stored: number | null = null;
@@ -272,6 +278,7 @@ export class BatchQueue<TItem> {
   }
 
   enqueue(item: unknown): boolean {
+    if (this.closed) return false; // after finish() nothing is kept, not even in memory
     const parsed = this.spec.accept(item);
     if (parsed === null) {
       this.invalid++;
@@ -306,11 +313,16 @@ export class BatchQueue<TItem> {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    while (this.pending.length > 0) {
+    while (this.pending.length > 0 && !this.closed) {
       const seq = this.nextSeq++;
       const { body, consumed } = this.spec.cut(this.pending, seq);
       this.pending.splice(0, Math.max(1, consumed));
       const signature = await signHex(this.opts.key, body);
+      if (this.closed) {
+        // finish() closed the queue while this batch was being signed: nothing may be persisted.
+        this.lostAtClose++;
+        break;
+      }
       const batch: SignedBatch = { seq, body, signature };
       // Persist before sending: if the tab dies mid-request the batch is replayed (idempotent seq).
       const now = Date.now();
@@ -359,7 +371,14 @@ export class BatchQueue<TItem> {
           .delete(STORES.eventBatches, this.batchKey(head.seq))
           .catch(() => undefined);
         if (result === 'OK') this.sent++;
-        else this.rejected++;
+        else {
+          this.rejected++;
+          try {
+            this.opts.onRejected?.();
+          } catch {
+            // a faulty callback must not stall the queue
+          }
+        }
         this.attempt = 0;
       }
     } finally {
@@ -413,9 +432,10 @@ export class BatchQueue<TItem> {
     await this.flush();
     const deadline = Date.now() + drainTimeoutMs;
     let lastKick = -Infinity;
-    while (this.outbox.length > 0 && Date.now() < deadline) {
+    while ((this.outbox.length > 0 || this.pending.length > 0) && Date.now() < deadline) {
       // Normal backoff applies; only nudge a waiting retry at most once a second, so a 5xx or 429
       // outage costs a handful of requests, not hundreds.
+      if (this.pending.length > 0) await this.flush(); // items recorded while we wait
       if (Date.now() - lastKick >= 1000) {
         lastKick = Date.now();
         this.retryNow();
@@ -426,11 +446,18 @@ export class BatchQueue<TItem> {
     // it is not counted as lost.
     const settleBy = Date.now() + 1500;
     while (this.draining && Date.now() < settleBy) await new Promise((r) => setTimeout(r, 25));
+    // Close: nothing is accepted, cut or persisted from here on, so editor text recorded after the
+    // end of the test (the app may keep its reference) can never reach IndexedDB (FR-702).
+    this.closed = true;
     this.finished = true;
-    const lostBatches = this.outbox.length;
-    this.outbox = [];
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    await this.chain; // a cut that was mid-signing sees `closed` and persists nothing
+    const lostBatches = this.outbox.length + this.pending.length + this.lostAtClose;
+    this.outbox = [];
+    this.pending = [];
     this.started = false;
     try {
       // Only this stream's batches: the other queue of the session shares the store prefix.

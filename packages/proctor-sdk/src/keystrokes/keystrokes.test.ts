@@ -19,6 +19,7 @@ import { importSessionKey } from '../core/hmac';
 import { IdbStore } from '../core/idb';
 import { ProctorSession, type ProctorSessionConfig } from '../core/session';
 import { createFetchTransport } from '../core/transport';
+import { diffEdit } from '../demo/mount';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { KeystrokeQueue } from './keystroke-queue';
 import { KeystrokeRecorder, editsFromMonaco, type UnrepresentableReason } from './recorder';
@@ -133,7 +134,9 @@ describe('replay reproduces the final code (TC-062, FR-608)', () => {
         edits = [{ offset: o, length: 1 + rnd(Math.min(3, len - o - 1)), text: '' }];
       } else if (kind === 1) {
         const o = rnd(len + 1);
-        edits = [{ offset: o, length: 0, text: 'x\n é😀'.slice(0, 1 + rnd(5)) }];
+        edits = [
+          { offset: o, length: 0, text: ['x', '\n', ' é', '😀', 'x\n😀é'][rnd(5)] as string },
+        ];
       } else if (kind === 2 && len > 10) {
         // multi-cursor: three disjoint insertions in one event
         multi++;
@@ -621,5 +624,281 @@ describe('ProctorSession wiring (FR-608, FR-702)', () => {
       body: '{"a":1}',
     });
     expect(calls[0]?.sig).toBe('a'.repeat(64));
+  });
+});
+
+describe('nothing is kept after finish() (privacy, FR-702)', () => {
+  it('FR-702: edits recorded during and after finish(), with timers advancing, never reach IndexedDB; pending items count as lost', async () => {
+    const r = await rig({ outcome: 'RETRY' });
+    r.recorder.reset(Q1, 'python', 'SECRET-1');
+    const finishing = r.queue.finish(300);
+    r.clock.t += 10;
+    r.recorder.recordChange({ offset: 8, deleteLength: 0, text: 'SECRET-2' }); // during finish
+    const { lostBatches } = await finishing;
+    r.recorder.recordChange({ offset: 0, deleteLength: 0, text: 'SECRET-3' }); // after finish
+    r.recorder.recordCursor(1);
+    await new Promise((res) => setTimeout(res, 2300)); // past the 2 s flush window
+    expect(lostBatches).toBeGreaterThanOrEqual(1);
+    expect(await r.store.keys('eventBatches', 's:')).toEqual([]);
+    expect(r.queue.stats().pendingItems).toBe(0);
+    expect(
+      r.queue.enqueue({ sessionQuestionId: Q1, atMs: Date.now(), kind: 'CURSOR', offset: 1 }),
+    ).toBe(false);
+  });
+
+  it('FR-702: a batch that is mid-signing when finish() closes the queue is not persisted and counts as lost', async () => {
+    const r = await rig({ outcome: 'RETRY' });
+    const realSign = crypto.subtle.sign.bind(crypto.subtle);
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    let entered!: () => void;
+    const inSign = new Promise<void>((res) => (entered = res));
+    vi.spyOn(crypto.subtle, 'sign').mockImplementation(async (...args) => {
+      entered();
+      await gate;
+      return realSign(...args);
+    });
+    r.recorder.reset(Q1, 'python', 'SECRET');
+    const flushing = r.queue.flush();
+    await inSign;
+    const finishing = r.queue.finish(0);
+    await new Promise((res) => setTimeout(res, 20));
+    release();
+    const { lostBatches } = await finishing;
+    await flushing;
+    expect(lostBatches).toBe(1);
+    expect(await r.store.keys('eventBatches', 's:')).toEqual([]);
+  });
+
+  it('FR-702 NFR-05: session.finish() leaves no code text in IndexedDB even if the app keeps recording through its own reference', async () => {
+    const store = new IdbStore(indexedDB, `ks-priv-${++n}`);
+    const s = new ProctorSession();
+    await s.start({
+      sessionId: 's',
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: {
+        sendBatch: () => Promise.resolve('RETRY'),
+        sendKeystrokeBatch: () => Promise.resolve('RETRY'),
+        heartbeat: () => Promise.resolve(true),
+      },
+      detectors: [],
+      store,
+    });
+    const recorder = s.keystrokes as KeystrokeRecorder; // the app's own reference
+    recorder.reset(Q1, 'python', 'TOPSECRET');
+    const { lostBatches } = await s.finish(200);
+    expect(lostBatches).toBeGreaterThanOrEqual(1);
+    recorder.recordChange({ offset: 9, deleteLength: 0, text: 'AFTERWARDS' });
+    recorder.reset(Q1, 'python', 'AFTERWARDS-2');
+    expect(recorder.stats().recordedEvents).toBe(1); // only the one before finish
+    await new Promise((res) => setTimeout(res, 2300));
+    const left = await Promise.all([
+      store.keys('eventBatches', ''),
+      store.keys('chunks', ''),
+      store.keys('meta', ''),
+    ]);
+    expect(left[0]).toEqual([]);
+    const all = await store.entries('eventBatches', '');
+    expect(JSON.stringify(all)).not.toContain('SECRET');
+  });
+
+  it('FR-702: session.finish() deletes leftover <sid>:ks: batches of an earlier page load even when this load has no keystroke queue', async () => {
+    const store = new IdbStore(indexedDB, `ks-left-${++n}`);
+    await store.put('eventBatches', 's:ks:0000000000', {
+      seq: 0,
+      body: '{"secret":"x"}',
+      signature: 'a',
+    });
+    await store.put('eventBatches', 's:0000000000', { seq: 0, body: '{}', signature: 'a' });
+    const s = new ProctorSession();
+    await s.start({
+      sessionId: 's',
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: { sendBatch: () => Promise.resolve('OK'), heartbeat: () => Promise.resolve(true) },
+      detectors: [],
+      store,
+    });
+    expect(s.keystrokes).toBeNull();
+    await s.finish(200);
+    expect(await store.keys('eventBatches', 's:ks:')).toEqual([]);
+  });
+});
+
+describe('what the recorder signs (S1, S2, S3)', () => {
+  it('NFR-05: extra properties and overridden fields smuggled into a change are never signed', async () => {
+    const r = await rig();
+    r.recorder.reset(Q1, 'python', 'ab');
+    r.recorder.recordChange({
+      offset: 1,
+      deleteLength: 0,
+      text: 'X',
+      kind: 'RESET',
+      sessionQuestionId: Q2,
+      atMs: 5,
+      keyCode: 65,
+      ctrlKey: true,
+    } as never);
+    r.queue.enqueue({
+      sessionQuestionId: Q1,
+      atMs: Date.now(),
+      kind: 'CURSOR',
+      offset: 1,
+      key: 'a',
+      altKey: true,
+    });
+    await r.queue.flush();
+    const events = r.sent.flatMap(
+      (b) => (JSON.parse(b.body) as { events: Record<string, unknown>[] }).events,
+    );
+    expect(events.map((e) => e.kind)).toEqual(['RESET', 'EDIT', 'CURSOR']);
+    const body = r.sent.map((b) => b.body).join('');
+    for (const bad of ['keyCode', 'ctrlKey', 'altKey', '"key"', 'atMs', Q2])
+      expect(body).not.toContain(bad);
+  });
+
+  it('FR-608: U+0000 and lone surrogates are reported as UNSTORABLE_TEXT, that question stops until a clean reset, and nothing unstorable is sent', async () => {
+    const r = await rig();
+    r.recorder.reset(Q1, 'python', 'ok');
+    r.recorder.recordChange({ offset: 2, deleteLength: 0, text: 'a\u0000b' });
+    r.recorder.recordChange({ offset: 2, deleteLength: 0, text: 'fine' }); // skipped: question stopped
+    expect(r.reasons).toEqual(['UNSTORABLE_TEXT', 'TEXT_TOO_LONG']);
+    expect(r.recorder.reset(Q1, 'python', 'lone \uD83D surrogate')).toBe(false);
+    expect(r.reasons.at(-1)).toBe('UNSTORABLE_TEXT');
+    expect(r.recorder.reset(Q1, 'python', 'clean 😀')).toBe(true);
+    r.recorder.recordChange({ offset: 8, deleteLength: 0, text: '!' });
+    await r.queue.flush();
+    const batches = r.sent.map(apiAccepts);
+    expect(replay(batches).get(Q1)).toBe('clean 😀!');
+    expect(r.sent.map((b) => b.body).join('')).not.toMatch(/\\u0000|\\ud83d"/i);
+  });
+
+  it("FR-608: the demo's diff never splits a surrogate pair", () => {
+    const e1 = diffEdit('a😀b', 'a😁b'); // the pair differs only in the low surrogate
+    expect(e1).toEqual({ offset: 1, deleteLength: 2, text: '😁' });
+    const e2 = diffEdit('x', 'x😀');
+    expect(e2).toEqual({ offset: 1, deleteLength: 0, text: '😀' });
+    const e3 = diffEdit('😀', '😁😀'); // inserted pair before an equal pair
+    for (const e of [e1, e2, e3]) {
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          (e as { text: string }).text,
+        ),
+      ).toBe(false);
+    }
+    expect(diffEdit('same', 'same')).toBeNull();
+  });
+
+  it('FR-608: an item the queue refuses is reported (INVALID), not silently skipped', async () => {
+    const r = await rig();
+    r.recorder.reset('not-a-uuid', 'python', 'x');
+    expect(r.reasons).toEqual(['INVALID']);
+  });
+
+  it('FR-608: an out-of-range timestamp is refused instead of making toISOString throw and stick the stream', async () => {
+    const r = await rig();
+    expect(r.queue.enqueue({ sessionQuestionId: Q1, atMs: 9e15, kind: 'CURSOR', offset: 1 })).toBe(
+      false,
+    );
+    expect(r.queue.enqueue({ sessionQuestionId: Q1, atMs: -1, kind: 'CURSOR', offset: 1 })).toBe(
+      false,
+    );
+    r.recorder.reset(Q1, 'python', 'ok');
+    await r.queue.flush();
+    expect(r.sent).toHaveLength(1);
+  });
+
+  it('FR-608: editsFromMonaco breaks offset ties by the longer deletion first', () => {
+    const edits = editsFromMonaco([
+      { rangeOffset: 3, rangeLength: 0, text: 'i' },
+      { rangeOffset: 3, rangeLength: 2, text: 'r' },
+    ]);
+    expect(edits.map((e) => e.deleteLength)).toEqual([2, 0]);
+  });
+
+  it('FR-608: a keystroke batch the server refuses raises a flag (session level), without content', async () => {
+    const s = new ProctorSession();
+    const flags: string[] = [];
+    s.on('capability', (c) => flags.push(`${c.id}:${c.detail ?? ''}`));
+    await s.start({
+      sessionId: 's',
+      hmacKeyBase64: TEST_KEY_B64,
+      root: document.createElement('div'),
+      consent: { recordedAt: '2026-01-01T00:00:00Z' },
+      transport: {
+        sendBatch: () => Promise.resolve('OK'),
+        sendKeystrokeBatch: () => Promise.resolve('REJECTED'),
+        heartbeat: () => Promise.resolve(true),
+      },
+      detectors: [],
+      store: new IdbStore(indexedDB, `ks-rej-${++n}`),
+    });
+    s.keystrokes?.reset(Q1, 'python', 'REJECTME');
+    await s.stop();
+    expect(flags.some((f) => f.startsWith('keystroke-rejected:'))).toBe(true);
+    expect(flags.join('|')).not.toContain('REJECTME');
+  });
+});
+
+describe('keepalive uses bytes, not characters (B2)', () => {
+  it('NFR-08: a multibyte body over the 64 KiB keepalive quota (but under 60 000 characters) is sent without keepalive and succeeds', async () => {
+    const body = '界'.repeat(22_000); // 22 000 characters, 66 000 UTF-8 bytes
+    const calls: { keepalive: boolean | undefined }[] = [];
+    const fetchFn = vi.fn((_u: string, init: RequestInit) => {
+      calls.push({ keepalive: init.keepalive });
+      if (init.keepalive) return Promise.reject(new TypeError('keepalive quota exceeded'));
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const t = createFetchTransport({
+      baseUrl: 'https://api.example/v1',
+      getToken: () => 't',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+    expect(await t.sendKeystrokeBatch({ seq: 0, body, signature: 'a'.repeat(64) })).toBe('OK');
+    expect(calls).toEqual([{ keepalive: false }]);
+  });
+
+  it('NFR-08: small bodies keep keepalive; a keepalive TypeError is retried once without it before giving up', async () => {
+    const calls: boolean[] = [];
+    const fetchFn = vi.fn((_u: string, init: RequestInit) => {
+      calls.push(Boolean(init.keepalive));
+      return init.keepalive
+        ? Promise.reject(new TypeError('quota'))
+        : Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const t = createFetchTransport({
+      baseUrl: 'https://api.example/v1',
+      getToken: () => 't',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+    expect(await t.sendBatch({ seq: 0, body: '{"a":1}', signature: 'a'.repeat(64) })).toBe('OK');
+    expect(calls).toEqual([true, false]);
+    const offline = vi.fn(() => Promise.reject(new TypeError('Failed to fetch')));
+    const t2 = createFetchTransport({
+      baseUrl: 'https://api.example/v1',
+      getToken: () => 't',
+      fetchFn: offline,
+    });
+    expect(await t2.sendBatch({ seq: 1, body: '{}', signature: 'a'.repeat(64) })).toBe('RETRY');
+    expect(offline).toHaveBeenCalledTimes(2); // keepalive, then without
+  });
+
+  it('NFR-08: headroom: a body of 40 000 ASCII bytes already goes without keepalive (shared 64 KiB quota)', async () => {
+    const seen: (boolean | undefined)[] = [];
+    const fetchFn = vi.fn((_u: string, init: RequestInit) => {
+      seen.push(init.keepalive);
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const t = createFetchTransport({
+      baseUrl: 'https://api.example/v1',
+      getToken: () => 't',
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+    await t.sendBatch({ seq: 0, body: 'x'.repeat(40_000), signature: 'a'.repeat(64) });
+    await t.sendBatch({ seq: 1, body: 'x'.repeat(1_000), signature: 'a'.repeat(64) });
+    expect(seen).toEqual([false, true]);
   });
 });

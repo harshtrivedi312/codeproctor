@@ -26,12 +26,25 @@ export interface MonacoContentChange {
  */
 export function editsFromMonaco(changes: readonly MonacoContentChange[]): EditorChange[] {
   return [...changes]
-    .sort((a, b) => b.rangeOffset - a.rangeOffset)
+    .sort((a, b) => b.rangeOffset - a.rangeOffset || b.rangeLength - a.rangeLength)
     .map((c) => ({ offset: c.rangeOffset, deleteLength: c.rangeLength, text: c.text }));
 }
 
+/** U+0000 and unpaired surrogates cannot be stored by the API (JSON/Postgres), so they cannot be sent. */
+function isStorable(text: string): boolean {
+  if (text.includes('\u0000')) return false;
+  return !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
+}
+
 /** What the recorder could not represent. Never carries editor text. */
-export type UnrepresentableReason = 'TEXT_TOO_LONG' | 'OFFSET_TOO_LARGE' | 'NO_QUESTION';
+export type UnrepresentableReason =
+  | 'TEXT_TOO_LONG'
+  | 'OFFSET_TOO_LARGE'
+  | 'NO_QUESTION'
+  /** U+0000 or a lone surrogate: the API cannot store it and would reject the whole batch. */
+  | 'UNSTORABLE_TEXT'
+  /** The queue refused the item (invalid shape or the stream is closed). */
+  | 'INVALID';
 
 export interface KeystrokeRecorderStats {
   recordedEvents: number;
@@ -52,7 +65,8 @@ interface Sink {
  *   editor.onDidChangeCursorSelection((e) => recorder.recordSelection(
  *     model.getOffsetAt(e.selection.getStartPosition()), model.getOffsetAt(e.selection.getEndPosition())));
  *
- * Every change to the editor model must be recorded, in order, or replay diverges. A question
+ * Every change to the editor model must be recorded, in order, or replay diverges. Offsets and the
+ * text given to reset() must use the same line endings (the model's EOL, not the DOM's). A question
  * switch is a new `reset()` with the other `sessionQuestionId` (batches never mix questions).
  *
  * Privacy (NFR-05): only model changes; nothing about keys or modifiers; the text is never logged,
@@ -61,6 +75,7 @@ interface Sink {
 export class KeystrokeRecorder {
   private question: string | null = null;
   private lastMs = 0;
+  private closed = false;
   private recorded = 0;
   private skipped = 0;
   /** Questions whose model outgrew what the schema can represent, until the next valid reset(). */
@@ -85,7 +100,7 @@ export class KeystrokeRecorder {
 
   private push(e: PendingEditorEvent): void {
     if (this.sink.enqueue(e)) this.recorded++;
-    else this.skipped++;
+    else this.skip('INVALID');
   }
 
   /**
@@ -95,10 +110,16 @@ export class KeystrokeRecorder {
    * question is then not recorded until a shorter reset.
    */
   reset(sessionQuestionId: string, language: CodeLanguage, text: string): boolean {
+    if (this.closed) return false;
     this.question = sessionQuestionId;
     if (text.length > MAX_SOURCE_CODE_LENGTH) {
       this.overflowed.add(sessionQuestionId);
       this.skip('TEXT_TOO_LONG');
+      return false;
+    }
+    if (!isStorable(text)) {
+      this.overflowed.add(sessionQuestionId);
+      this.skip('UNSTORABLE_TEXT');
       return false;
     }
     this.overflowed.delete(sessionQuestionId);
@@ -108,6 +129,7 @@ export class KeystrokeRecorder {
 
   /** One change, in the order Monaco applied it. */
   recordChange(change: EditorChange): void {
+    if (this.closed) return;
     const q = this.question;
     if (q === null) return this.skip('NO_QUESTION');
     if (this.overflowed.has(q)) return this.skip('TEXT_TOO_LONG');
@@ -124,7 +146,19 @@ export class KeystrokeRecorder {
         change.text.length > MAX_SOURCE_CODE_LENGTH ? 'TEXT_TOO_LONG' : 'OFFSET_TOO_LARGE',
       );
     }
-    this.push({ sessionQuestionId: q, atMs: this.tick(), kind: 'EDIT', ...change });
+    if (!isStorable(change.text)) {
+      this.overflowed.add(q); // replay would diverge: stop recording until the next reset()
+      return this.skip('UNSTORABLE_TEXT');
+    }
+    // Explicit fields only: nothing else the caller attached is ever signed.
+    this.push({
+      sessionQuestionId: q,
+      atMs: this.tick(),
+      kind: 'EDIT',
+      offset: change.offset,
+      deleteLength: change.deleteLength,
+      text: change.text,
+    });
   }
 
   /** The changes of one Monaco event (use `editsFromMonaco`), all with the same timestamp. */
@@ -134,6 +168,7 @@ export class KeystrokeRecorder {
 
   /** Cursor move or selection (FR-608). Rapid consecutive moves (under 250 ms) are coalesced by the queue. */
   recordCursor(offset: number, selectionLength?: number): void {
+    if (this.closed) return;
     const q = this.question;
     if (q === null || this.overflowed.has(q)) return;
     if (offset < 0 || offset > MAX_SOURCE_CODE_LENGTH) return;
@@ -153,6 +188,15 @@ export class KeystrokeRecorder {
   /** Selection from two model offsets (anchor and active, either order). */
   recordSelection(startOffset: number, endOffset: number): void {
     this.recordCursor(Math.min(startOffset, endOffset), Math.abs(endOffset - startOffset));
+  }
+
+  /**
+   * Stop recording for good (called by the session on stop() and finish()). The app may keep its
+   * reference to the recorder; every method is a no-op afterwards, so editor text recorded after
+   * the end of the test can never reach IndexedDB (FR-702).
+   */
+  close(): void {
+    this.closed = true;
   }
 
   stats(): KeystrokeRecorderStats {

@@ -6,12 +6,12 @@ import type {
 } from '@codeproctor/shared';
 import type { BatchQueueStats } from './batch-queue';
 import { EventQueue, type EventQueueStats, type EventTransport } from './event-queue';
-import type { SendResult, SignedBatch } from './event-queue';
+import type { SendResult, SignedBatch } from './batch-queue';
 import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
 import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
 import { Heartbeat } from './heartbeat';
 import { importSessionKey } from './hmac';
-import { IdbStore } from './idb';
+import { IdbStore, STORES } from './idb';
 import { MetricsCollector, type Metrics } from './metrics';
 import {
   ConsentRequiredError,
@@ -90,6 +90,7 @@ export class ProctorSession {
   private queue: EventQueue | null = null;
   private keystrokeQueue: KeystrokeQueue | null = null;
   private keystrokeRecorder: KeystrokeRecorder | null = null;
+  private store: IdbStore | null = null;
   private heartbeat: Heartbeat | null = null;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
@@ -138,7 +139,7 @@ export class ProctorSession {
     this.config = config;
     const metrics = (this.metrics = new MetricsCollector());
     const key = await importSessionKey(config.hmacKeyBase64);
-    const store = config.store ?? new IdbStore(); // shared by the event and keystroke queues
+    const store = (this.store = config.store ?? new IdbStore()); // shared by the event and keystroke queues
     const queue = (this.queue = new EventQueue({
       sessionId: config.sessionId,
       key,
@@ -188,6 +189,14 @@ export class ProctorSession {
           }),
         onStorageRecovered: () =>
           this.fire('capability', { id: 'keystroke-storage', status: 'SUPPORTED' }),
+        onRejected: () =>
+          // The server refused a keystroke batch for good: say so (no content in the flag).
+          this.fire('capability', {
+            id: 'keystroke-rejected',
+            status: 'UNVERIFIABLE',
+            detail:
+              'The server refused a batch of editor changes; replay of this period is incomplete.',
+          }),
       }));
       await ks.start();
       this.keystrokeRecorder = new KeystrokeRecorder(
@@ -344,6 +353,9 @@ export class ProctorSession {
       }
     }
     this.started = [];
+    // The app may keep its reference to the recorder: nothing recorded from here on may be kept.
+    this.keystrokeRecorder?.close();
+    const sessionId = this.config?.sessionId;
     let lostBatches = 0;
     if (purgeDrainMs === null) {
       await this.queue?.stop();
@@ -361,8 +373,20 @@ export class ProctorSession {
           detail: `${unsent} batches (events and editor changes) are still being sent: stay online.`,
         });
       }
-      lostBatches = (await this.queue?.finish(purgeDrainMs))?.lostBatches ?? 0;
-      lostBatches += (await this.keystrokeQueue?.finish(purgeDrainMs))?.lostBatches ?? 0;
+      const results = await Promise.all([
+        this.queue?.finish(purgeDrainMs),
+        this.keystrokeQueue?.finish(purgeDrainMs),
+      ]);
+      lostBatches = results.reduce((n, r) => n + (r?.lostBatches ?? 0), 0);
+      // Editor code text left by an earlier page load must go too, even if this load created no
+      // keystroke queue (for example the transport cannot send keystroke batches).
+      if (sessionId && this.store) {
+        try {
+          await this.store.deletePrefix(STORES.eventBatches, `${sessionId}:ks:`);
+        } catch {
+          // best effort
+        }
+      }
       if (lostBatches > 0) {
         this.fire('capability', {
           id: 'finish-lost',
@@ -375,6 +399,7 @@ export class ProctorSession {
     this.queue = null;
     this.keystrokeQueue = null;
     this.keystrokeRecorder = null;
+    this.store = null;
     this.config = null;
     return { lostBatches };
   }
