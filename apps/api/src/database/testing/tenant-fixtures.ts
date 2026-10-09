@@ -1,8 +1,9 @@
-// One tenant's rows for the TC-008 tests: exactly one row in each of the 31 models, linked the way
+// One tenant's rows for the TC-008 tests: exactly one row in each of the 32 models, linked the way
 // the schema links them (an org, its staff user, a question with a version, test cases and a
 // variant, a test with a section, a candidate, an invitation, a session with its sections,
 // questions, submission, consent, identity check, media chunk, event batch, event, keystroke
-// batch, review, flag decision and appeal, a webhook endpoint and delivery). Synthetic data only.
+// batch, review, flag decision and appeal, a webhook endpoint and delivery, and the SLOT window of the
+// invitation, ADR 0017 section 4.7). Synthetic data only.
 //
 // `rows` has an entry for every model. The type `Record<ModelName, ...>` means a model added to
 // schema.prisma fails to compile here until its fixture row exists, so the isolation tests cannot
@@ -168,6 +169,19 @@ export async function createTenant(client: PrismaClient, label: string): Promise
       tokenHash: `inv-${label}-${randomUUID()}`,
       windowStart: NOW,
       windowEnd: new Date(NOW.getTime() + 86_400_000),
+    },
+  });
+  // The SLOT window of the invitation (ADR 0017 section 4.7, C-53): the only scheduled_windows row of the
+  // tenant, SCHEDULED, with its end and ceiling after its start.
+  const scheduledWindow = await client.scheduledWindow.create({
+    data: {
+      orgId,
+      kind: 'SLOT',
+      invitationId: invitation.id,
+      startsAt: NOW,
+      endsAt: new Date(NOW.getTime() + 2 * 3_600_000),
+      ceilingAt: new Date(NOW.getTime() + 4 * 3_600_000),
+      status: 'SCHEDULED',
     },
   });
   const session = await client.session.create({
@@ -347,6 +361,7 @@ export async function createTenant(client: PrismaClient, label: string): Promise
       Appeal: byId(appeal.id),
       WebhookEndpoint: byId(endpoint.id),
       WebhookDelivery: byId(delivery.id),
+      ScheduledWindow: byId(scheduledWindow.id),
     },
   };
 }

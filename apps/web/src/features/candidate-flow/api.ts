@@ -6,7 +6,7 @@ import {
   consentDeclinedSchema,
   consentDocumentSchema,
   consentSignedSchema,
-  identityReceivedSchema,
+  identityStatusSchema,
   linkViewSchema,
   mediaConfirmSchema,
   mediaPresignSchema,
@@ -149,18 +149,20 @@ export const candidateApi = {
   submitSystemCheck: (body: SystemCheckBody) =>
     request(systemCheckResultSchema, '/system-check', { body, authed: true }),
 
-  /** PROVISIONAL route (BE-08 pins it; ADR 0013 section 5.6, same shape as evidence presign). */
+  /**
+   * Identity routes (apps/api identity.dto.ts, D-61): presign a single-use upload name, submit the
+   * two names, read the status. /evidence/presign is another route (ADR 0013 5.6, IDENTITY_RECHECK).
+   */
   presignIdentityImage: (purpose: 'ID_IMAGE' | 'SELFIE', bytes: number) =>
-    request(presignSchema, '/evidence/presign', {
+    request(presignSchema, '/identity/presign', {
       body: { purpose, contentType: 'image/jpeg', bytes },
       authed: true,
     }),
-  /** PROVISIONAL route and body (BE-08 pins them). Names only, never object keys from the client. */
-  submitIdentity: (body: {
-    idImageName: string;
-    selfieName: string;
-    liveness: { prompts: string[]; completed: boolean };
-  }) => request(identityReceivedSchema, '/identity', { body, authed: true }),
+  /** Names only, never object keys, both from the SAME attempt. Unknown fields are refused. */
+  submitIdentity: (body: { idImageName: string; selfieName: string; livenessConfirmed: boolean }) =>
+    request(identityStatusSchema, '/identity', { body, authed: true }),
+  getIdentityStatus: () =>
+    request(identityStatusSchema, '/identity', { method: 'GET', authed: true }),
 
   /** ADR 0013 section 5.5. Room scan: stream ROOM_SCAN, state CONSENTED. */
   presignMedia: (body: {

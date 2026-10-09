@@ -275,7 +275,7 @@ describe('EventQueue.finish() drain (S2, NFR-08)', () => {
   it('FR-609: session.finish() warns the UI to stay online before discarding, then reports what was lost', async () => {
     const s = new ProctorSession();
     const caps: string[] = [];
-    s.on('capability', (c) => caps.push(`${c.id}`));
+    s.on('capability', (c) => c.id !== 'keystrokes' && caps.push(`${c.id}`));
     const sendBatch = vi.fn(() => Promise.resolve('RETRY' as const));
     await s.start({
       sessionId: 's',

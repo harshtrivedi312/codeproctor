@@ -910,7 +910,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Final verdict (review_verdict:set). NOT IMPLEMENTED in the API yet; 409 while a manual answer is pending (TC-099, docs/api-contract.md section 7). Body and codes ASSUMED. */
+        /** Final verdict (review_verdict:set). 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). The request body (SetVerdict) is the web's; it is not defined in section 7 yet. */
         post: operations["setReviewVerdict"];
         delete?: never;
         options?: never;
@@ -1210,7 +1210,7 @@ export interface components {
          * @description The staff machine codes that the docs/api-contract.md preamble lists explicitly. Other staff codes of accepted ADRs (ADR 0015: IDENTITY_CHECK_WAIVED, ACCOMMODATION_LOCKED, IDENTITY_NOT_WAIVED, DETECTOR_DISABLED, PRECONDITION_FAILED, PRECONDITION_REQUIRED) are added here when the web starts branching on them. Guard 403s carry none. BUSY is the 503 with Retry-After the problem filter answers on database lock contention (DL-37, D-56); a client should retry it after Retry-After (the web retries it automatically, bounded). Candidate-route codes such as SESSION_NOT_ACTIVE (ADR 0013 section 5.1) are not staff codes and are not listed here.
          * @enum {string}
          */
-        ProblemCode: "REAUTH_FAILED" | "SETTINGS_CONFLICT" | "VARIANT_HAS_AI_REFERENCES" | "BUSY" | "REASON_NOT_ENABLED" | "ANSWER_NOT_MANUAL" | "SESSION_NOT_UNDER_REVIEW" | "VERDICT_ALREADY_SET";
+        ProblemCode: "REAUTH_FAILED" | "SETTINGS_CONFLICT" | "VARIANT_HAS_AI_REFERENCES" | "BUSY" | "REASON_NOT_ENABLED" | "ANSWER_NOT_MANUAL" | "MANUAL_PENDING" | "SESSION_NOT_UNDER_REVIEW" | "VERDICT_ALREADY_SET";
         /** @description RFC 7807 problem body of the question routes. 409 and 422 carry detail and errors[]. `code` is present only where a route defines one: VARIANT_HAS_AI_REFERENCES (409, deleting a variant that has AI reference rows). The UI branches on status and endpoint, and on that code. */
         Problem: {
             type: string;
