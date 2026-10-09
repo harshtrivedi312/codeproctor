@@ -7,6 +7,7 @@
 import { Redis } from 'ioredis';
 import request from 'supertest';
 import { sha256Hex } from '../../src/auth/crypto.util';
+import { awaitSafeWindow } from '../../src/common/testing/window-boundary';
 import { UserRole } from '../../src/generated/prisma/client';
 import { API, boot, createUser, Harness, PASSWORD } from '../support/harness';
 import { actor, call } from '../support/be03-helpers';
@@ -79,6 +80,7 @@ describe('TC-098 TC-006 (FU-BE-64): atomic window counters', () => {
   });
 
   it('TC-006: the per-org invite slot allows exactly the configured number per hour, then 429; the key carries a TTL', async () => {
+    await awaitSafeWindow(); // the counter key carries the clock hour: stay inside one window (FU-BE-274)
     const org = (await h.owner.organization.create({ data: { name: 'QA Org invite limit' } })).id;
     const admin = await actor(h, UserRole.SUPER_ADMIN, org);
     const invite = (i: number): request.Test =>
@@ -97,6 +99,7 @@ describe('TC-098 TC-006 (FU-BE-64): atomic window counters', () => {
   });
 
   it('TC-006: an invite slot key left without a TTL is repaired by the next invite', async () => {
+    await awaitSafeWindow(); // same clock-hour key (FU-BE-274)
     const org = (await h.owner.organization.create({ data: { name: 'QA Org invite repair' } })).id;
     const admin = await actor(h, UserRole.SUPER_ADMIN, org);
     const invite = (i: number): request.Test =>

@@ -1,6 +1,8 @@
 import { validateEnv } from './env';
 
 const valid = {
+  // APP_ENV has no default (DL-55, FU-BE-224): every fixture sets it.
+  APP_ENV: 'development',
   DATABASE_URL: 'postgresql://u:p@127.0.0.1:5432/db',
   REDIS_URL: 'redis://127.0.0.1:6379',
   WEB_ORIGIN: 'http://localhost:3000',
@@ -15,12 +17,16 @@ const judge0 = {
   WEB_ORIGIN: 'https://app.example.com',
   TRUST_PROXY_HOPS: '1',
   JUDGE0_URL: 'https://judge0.example.com',
+  // Object storage (BE-09) is required in pilot and production too.
+  S3_REGION: 'eu-west-2',
+  S3_MEDIA_BUCKET: 'cp-pilot-media',
   JUDGE0_AUTH_TOKEN: 't'.repeat(32),
   JUDGE0_AUTHZ_TOKEN: 'z'.repeat(32),
 };
 const candidate = {
   JWT_CANDIDATE_SECRET: 'c'.repeat(40),
   OTP_PEPPER: 'd'.repeat(40),
+  QUESTION_OPTION_ID_SECRET: 'e'.repeat(40),
 };
 
 describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, ADR 0013 section 2)', () => {
@@ -125,5 +131,19 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
     expect(
       validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '600' }).CANDIDATE_TOKEN_TTL_SECONDS,
     ).toBe(600);
+  });
+  it('NFR-04, CS-4.6: QUESTION_OPTION_ID_SECRET is required in pilot and production and a placeholder is refused in shared environments', () => {
+    const base = { ...valid, ...candidate };
+    expect(() =>
+      validateEnv({ ...base, APP_ENV: 'pilot', QUESTION_OPTION_ID_SECRET: undefined }),
+    ).toThrow(/QUESTION_OPTION_ID_SECRET/);
+    expect(() =>
+      validateEnv({
+        ...base,
+        APP_ENV: 'staging',
+        QUESTION_OPTION_ID_SECRET: 'change-me-' + 'x'.repeat(40),
+      }),
+    ).toThrow(/QUESTION_OPTION_ID_SECRET/);
+    expect(validateEnv({ ...valid }).QUESTION_OPTION_ID_SECRET).toBeUndefined();
   });
 });

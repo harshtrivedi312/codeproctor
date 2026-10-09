@@ -5,20 +5,21 @@ import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, isAuthRequest } from '@/lib/api/client';
 import {
+  LOGOUT_LOCK_WAIT_MS,
   REQUEST_TIMEOUT_MS,
   getSessionUserId,
+  trackLogout,
   invalidateRefreshes,
   refreshSession,
   resetInMemorySignOutFlagForTests,
   settleSession,
 } from '@/lib/auth-session';
 import { getAccessToken } from '@/lib/auth-token';
-import { MOCK_TOTP_CODE, MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
+import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
 import { LoginForm } from './login-form';
-import { TwoFactorEnroll } from './two-factor-enroll';
 import { RequireRole } from './require-role';
 import { SignOutButton } from './sign-out-button';
 import { useAuth } from './auth-provider';
@@ -720,50 +721,6 @@ describe('sign-out that the server did not confirm', () => {
     expect(localStorage.getItem('cp.signOutPending')).toBeNull();
   });
 
-  it('FR-104 TC-005: forced enrollment announces the new sign-in as soon as the codes appear: no tab retries a logout with the new cookie, and the codes stay up', async () => {
-    renderWithAuth(
-      <>
-        <LoginForm />
-        <SignOutButton />
-        <TwoFactorEnroll />
-      </>,
-    );
-    await signInAs(MOCK_USERS.recruiter);
-    let logoutCalls = 0;
-    server.use(
-      http.post('*/v1/auth/logout', () => {
-        logoutCalls++;
-        return HttpResponse.error();
-      }),
-    );
-    const u = userEvent.setup();
-    await u.click(await screen.findByRole('button', { name: 'Sign out' }));
-    await screen.findByText('We could not confirm you were signed out');
-    expect(localStorage.getItem('cp.signOutPending')).toBe('1');
-    expect(logoutCalls).toBe(1);
-
-    router.replace.mockClear();
-    // Now the reviewer signs in and enrolls; the codes screen is up and Continue is not clicked.
-    await u.clear(screen.getByLabelText('Work email'));
-    await u.clear(screen.getByLabelText('Password'));
-    await u.type(screen.getByLabelText('Work email'), MOCK_USERS.reviewer.email);
-    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
-    await u.click(screen.getByRole('button', { name: 'Sign in' }));
-    await u.type(await screen.findByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    expect(await screen.findByTestId('recovery-codes')).toBeInTheDocument();
-
-    // The marker is gone and Retry is gone, before anyone clicked Continue.
-    expect(localStorage.getItem('cp.signOutPending')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Retry sign-out' })).not.toBeInTheDocument();
-    expect(router.replace).not.toHaveBeenCalledWith('/admin');
-    // A tab that opens or reloads now finds no marker and sends no logout.
-    renderWithAuth(<Who />);
-    await act(async () => {});
-    expect(logoutCalls).toBe(1);
-    expect(screen.getByTestId('recovery-codes')).toBeInTheDocument();
-  });
-
   it('FR-101 FR-104: a login right after a reload waits for the logout retry, and the old warning does not come back', async () => {
     await failLogoutAndReload();
     let release: () => void = () => undefined;
@@ -867,17 +824,21 @@ describe('settleSession limit', () => {
     // this test, so the finally block invalidates it: a late abort must not sign out a later test.
     server.use(http.post('*/v1/auth/refresh', () => new Promise(() => undefined)));
     void refreshSession();
+    // And a logout that never settles: the bound covers a queued logout (lock wait + request).
+    let endLogout: () => void = () => undefined;
+    trackLogout(new Promise<void>((resolve) => (endLogout = resolve)));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       let done = false;
       const waiting = settleSession().then(() => (done = true));
-      await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS - 1);
+      await vi.advanceTimersByTimeAsync(LOGOUT_LOCK_WAIT_MS + REQUEST_TIMEOUT_MS - 1);
       expect(done).toBe(false);
       await vi.advanceTimersByTimeAsync(2);
       await waiting;
       expect(done).toBe(true);
     } finally {
       vi.useRealTimers();
+      endLogout(); // do not leave a never-settling logout for the next test
       invalidateRefreshes();
     }
   });

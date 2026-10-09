@@ -19,13 +19,20 @@ jobs:
   verify:
     name: Install, build, lint, typecheck, test
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # The runner is discarded after the job, so the Testcontainers reaper (an image from Docker Hub) is not needed.
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+      # The API refuses to boot without APP_ENV (DL-55). The test harness sets it too; this makes it explicit.
+      APP_ENV: test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history: the migration guard (infra/scripts/verify-migration-guard.mjs) needs a merge
+          # base with origin/main, and a shallow checkout lost it when main moved during a run.
+          fetch-depth: 0
 
       # Node version comes from .nvmrc. Node 24 bundles corepack.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -90,7 +97,7 @@ jobs:
         run: pnpm exec prisma version
 
       - name: Shellcheck the reset and backup scripts
-        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset infra/backup/*.sh
+        run: shellcheck infra/scripts/db-reset infra/scripts/dev-infra-reset infra/scripts/ci-pull-test-images.sh infra/backup/*.sh
 
       - name: Validate the compose file
         run: docker compose -f infra/docker-compose.yml config -q
@@ -115,9 +122,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-16
-          docker pull -q postgres:16
+          # The images the tests start come from credential-free mirrors, by digest (Docker Hub limits unauthenticated pulls).
+          sh infra/scripts/ci-pull-test-images.sh
 
       - name: Test
         env:
           REQUIRE_DB_DRILL: '1'
+          # The apps/api suite runs in one process (--runInBand) and has outgrown Node's default heap
+          # (about 4 GB on this runner: "JavaScript heap out of memory"). 6 GB is a ceiling, not a
+          # reservation; the runner has 16 GB. Scoped to this step so build, lint and typecheck keep the default.
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm test

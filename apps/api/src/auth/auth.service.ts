@@ -28,6 +28,7 @@ import type { RefreshToken, User } from '../generated/prisma/client';
 import { REDIS_CLIENT } from '../infrastructure/infrastructure.module';
 import { ensureConnected } from '../infrastructure/redis-ready';
 import { MailPort } from '../mail/mail.port';
+import type { MailOutcome, TwoFactorNoticeTemplate } from '../mail/mail.port';
 import type { AuthSessionDto, LoginResultDto, TotpEnrollmentDto } from './dto/auth.dto';
 import {
   newOpaqueToken,
@@ -63,9 +64,6 @@ const FORGOT_WINDOW_SECONDS = 60 * 60;
 const NO_USER_ID = '00000000-0000-0000-0000-000000000000';
 /** The org of the nil user: the same statement shape, matching no row. */
 const NO_ORG_ID = '00000000-0000-0000-0000-000000000000';
-
-/** Roles that must use TOTP (FR-102). */
-const TOTP_REQUIRED_ROLES: readonly UserRole[] = [UserRole.SUPER_ADMIN, UserRole.REVIEWER];
 
 /** The org-scoped client or one of its transactions: what the helpers below accept. */
 type Db = Pick<
@@ -237,15 +235,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         body: { status: 'two_factor_required', challengeToken: this.challenge(user) },
       };
     }
-    if (TOTP_REQUIRED_ROLES.includes(user.role)) {
-      await this.refundAttempt(user);
-      return {
-        body: {
-          status: 'two_factor_enrollment_required',
-          challengeToken: this.challenge(user),
-        },
-      };
-    }
+    // FR-102 (owner decision): two-factor is optional for every role, so a correct password with
+    // no TOTP enrolled opens a full session.
     // The INSERT inside startSession is its own committed statement (no transaction here).
     const insert = { done: false };
     try {
@@ -431,46 +422,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     };
   }
 
-  /** Forced enrollment at login: public (the challenge is the credential), so it starts in system scope. */
-  startEnrollment(userId: string, challengePwv: string): Promise<TotpEnrollmentDto> {
-    return this.orgContext.runSystem('AUTH_BOOTSTRAP', async () => {
-      const user = await this.loadActive(userId);
-      return this.asUser(user, () => this.beginEnrollment(user, challengePwv));
-    });
-  }
-
-  private async beginEnrollment(
-    user: UserWithOrg,
-    challengePwv: string,
-  ): Promise<TotpEnrollmentDto> {
-    this.requireChallengePassword(user, challengePwv);
-    if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
-    const startHash = user.passwordHash ?? '';
-    const enrollment = await this.totp.createEnrollment(user.email);
-    // Conditional write (FU-BE-86): the account must still be active, on the password the challenge
-    // was issued under (the pwv was checked against the row read above, and the hash is bound
-    // here), and not enrolled. A reset or deactivation after that read, or an enroll/confirm that
-    // committed after it, changes nothing.
-    const stored = await this.prisma.client.user.updateMany({
-      where: { id: user.id, isActive: true, passwordHash: startHash, totpEnabled: false },
-      data: { totpSecretEnc: enrollment.encrypted },
-    });
-    if (stored.count !== 1) {
-      // Same split as startSetup, with the refusal the challenge routes give (confirm uses it for
-      // the same race): a changed password or a deactivation voids the challenge (401); TOTP
-      // turned on meanwhile is a plain 409.
-      const now = await this.prisma.client.user.findUnique({ where: { id: user.id } });
-      if (!now?.isActive || now.passwordHash !== user.passwordHash) throw this.challengeExpired();
-      throw new ConflictException('Two-factor authentication is already on.');
-    }
-    return {
-      manualKey: enrollment.secret,
-      otpauthUri: enrollment.otpauthUrl,
-      qrDataUrl: enrollment.qrDataUrl,
-    };
-  }
-
-  /** A signed-in user confirms optional TOTP (FR-102): recovery codes only, no new session. */
+  /** A signed-in user confirms optional TOTP (FR-102): recovery codes only, no new session; signs the user out everywhere. */
   async confirmEnrollment(
     userId: string,
     password: string,
@@ -479,65 +431,30 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   ): Promise<{ recoveryCodes: string[] }> {
     const verified = await this.requireCurrentPassword(userId, password, ctx);
     // TOTP is switched on only while the verified password hash is still the stored one (FU-BE-39).
-    return this.doConfirmEnrollment(
-      userId,
-      code,
-      ctx,
-      false,
-      undefined,
-      verified.passwordHash ?? '',
-    );
-  }
-
-  /**
-   * Forced enrollment at login: the challenge holder is also given a session. The challenge is
-   * claimed first, so it can be spent only once.
-   */
-  confirmEnrollmentWithChallenge(
-    userId: string,
-    code: string,
-    ctx: RequestContext,
-    challenge: { jti: string; pwv: string },
-  ): Promise<{ session: SessionOutcome; recoveryCodes: string[] }> {
-    return this.orgContext.runSystem('AUTH_BOOTSTRAP', () =>
-      this.withChallengeUse(challenge.jti, async () => {
-        const done = await this.doConfirmEnrollment(userId, code, ctx, true, challenge.pwv);
-        if (!done.session) throw new Error('Enrollment finished without a session');
-        return { session: done.session, recoveryCodes: done.recoveryCodes };
-      }),
-    );
+    return this.doConfirmEnrollment(userId, code, ctx, verified.passwordHash ?? '');
   }
 
   /**
    * First valid code switches TOTP on and issues the recovery codes, once. Enabling TOTP, the
-   * recovery hashes, the audit row and the session are one transaction (FR-102).
+   * recovery hashes and the audit row are one transaction (FR-102).
    */
   private async doConfirmEnrollment(
     userId: string,
     code: string,
     ctx: RequestContext,
-    openSession: boolean,
-    challengePwv?: string,
-    boundPasswordHash?: string,
-  ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
+    boundPasswordHash: string,
+  ): Promise<{ recoveryCodes: string[] }> {
     const user = await this.loadActive(userId);
-    return this.asUser(user, () =>
-      this.confirmKnownUser(user, code, ctx, openSession, challengePwv, boundPasswordHash),
-    );
+    return this.asUser(user, () => this.confirmKnownUser(user, code, ctx, boundPasswordHash));
   }
 
   private async confirmKnownUser(
     user: UserWithOrg,
     code: string,
     ctx: RequestContext,
-    openSession: boolean,
-    challengePwv?: string,
-    boundPasswordHash?: string,
-  ): Promise<{ session?: SessionOutcome; recoveryCodes: string[] }> {
-    if (challengePwv !== undefined) this.requireChallengePassword(user, challengePwv);
-    if (boundPasswordHash !== undefined && user.passwordHash !== boundPasswordHash) {
-      throw reauthFailed();
-    }
+    boundPasswordHash: string,
+  ): Promise<{ recoveryCodes: string[] }> {
+    if (user.passwordHash !== boundPasswordHash) throw reauthFailed();
     if (user.totpEnabled) throw new ConflictException('Two-factor authentication is already on.');
     // A locked account looks exactly like a wrong code (FU-BE-22, FU-BE-34).
     if ((await this.reserveAttempt(user, ctx)) !== 'granted') throw this.invalidCode();
@@ -552,7 +469,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     const codes = Array.from({ length: RECOVERY_CODE_COUNT }, newRecoveryCode);
     const phase: TxPhase = { started: false, finished: false };
     try {
-      const session = await this.prisma.client.$transaction(async (tx) => {
+      await this.prisma.client.$transaction(async (tx) => {
         phase.started = true;
         phase.finished = false; // a re-run of the callback must not keep a stale flag
         const enabled = await tx.user.updateMany({
@@ -561,44 +478,41 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
             id: user.id,
             totpEnabled: false,
             totpSecretEnc: checkedSecret,
-            ...(boundPasswordHash === undefined ? {} : { passwordHash: boundPasswordHash }),
+            passwordHash: boundPasswordHash,
           },
           data: { totpEnabled: true, recoveryCodeHashes: codes.map((c) => sha256Hex(c)) },
         });
         if (enabled.count === 0) {
-          if (boundPasswordHash !== undefined) {
-            const now = await tx.user.findUnique({ where: { id: user.id } });
-            if (now?.passwordHash !== boundPasswordHash) throw new PasswordChangedSignal();
-          }
+          const now = await tx.user.findUnique({ where: { id: user.id } });
+          if (now?.passwordHash !== boundPasswordHash) throw new PasswordChangedSignal();
           throw new AlreadyEnrolledSignal();
         }
-        await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, {}, tx);
-        let opened: SessionOutcome | undefined;
-        if (!openSession) {
-          await this.clearFailures(user, tx);
-        } else {
-          // The row was loaded before the update above, so report the state just written.
-          opened = await this.startSession({ ...user, totpEnabled: true }, tx);
-        }
+        // FR-102, FR-107, ADR 0011: a session opened before 2FA was on, e.g. by someone holding
+        // a stolen password, must not outlive this moment. Same order as disableTwoFactor: the
+        // users row is locked by the UPDATE above, then refresh_tokens; every family of the user
+        // is revoked, the caller's included (an access token carries no family id).
+        const revoked = await tx.refreshToken.updateMany({
+          where: { userId: user.id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+        await this.validity.invalidateIssuedTokens(user.id);
+        await this.audit(user, 'AUTH_TOTP_ENABLED', ctx, { sessionsRevoked: revoked.count }, tx);
+        await this.clearFailures(user, tx);
         phase.finished = true;
-        return opened;
       });
-      return { session, recoveryCodes: codes };
     } catch (e) {
       // FU-BE-208: ONE classification. A clean rollback releases the mark (the 503 invites a
       // retry with the same code). After the callback returned, anything that is not a rollback
-      // may have committed: the mark stays and the challenge stays spent (OutcomeUnknownError is
-      // not retryable, so withChallengeUse keeps its key), and the client learns nothing about
-      // whether 2FA is on, no recovery codes and no session.
-      const clean = isCleanRollback(phase, e);
+      // may have committed: the mark stays (OutcomeUnknownError is not retryable), and the client
+      // learns nothing about whether 2FA is on and gets no recovery codes.
+      const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
       const unknownOutcome = phase.started && phase.finished && !clean;
       if (clean) await releaseMark(mark);
       // FU-BE-220: a reservation is given back only when nothing could have committed. After an
       // unknown outcome the counter keeps it (fails closed: at most one extra counted attempt).
       if (unknownOutcome) {
-        throw new OutcomeUnknownError(
-          openSession ? 'auth.2fa.enroll.confirm' : 'auth.2fa.setup.confirm',
-        );
+        throw new OutcomeUnknownError('auth.2fa.setup.confirm');
       }
       // The code was right and the transaction rolled back or never ran: not a failed guess.
       await this.refundAttempt(user).catch(() => undefined);
@@ -606,10 +520,13 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         throw new ConflictException('Two-factor authentication could not be turned on. Try again.');
       }
       if (e instanceof PasswordChangedSignal) {
-        throw boundPasswordHash === undefined ? this.challengeExpired() : reauthFailed();
+        throw reauthFailed();
       }
       throw e;
     }
+    // D-76: the transaction resolved, so the commit is certain. Outside the try on purpose.
+    await this.notifyTwoFactorChange(user, user.id, 'two-factor-enabled', ctx);
+    return { recoveryCodes: codes };
   }
 
   /**
@@ -689,6 +606,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // Removing the code and opening the session are one transaction, so a password change that
       // refuses the session also puts the code back.
       return await this.prisma.client.$transaction(async (tx) => {
+        phase.finished = false; // a re-run of the callback must not keep a stale flag
         // The check and the removal are one statement, so two concurrent uses cannot both win.
         const used = await this.raw(
           'consume one recovery code atomically: check and removal in one UPDATE (FR-102)',
@@ -705,11 +623,19 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         return opened;
       });
     } catch (e) {
+      // FU-BE-219 / FU-BE-220: the recovery transaction failed after its callback returned with
+      // anything that is not a rollback code (P2028 or P1017 at COMMIT, a connection error): the
+      // code may be spent and the refresh family created, the token never delivered. Fixed 500,
+      // no release of the challenge (not retryable), no refund, nothing about the code revealed.
+      const clean = isCleanRollback(phase, e);
+      if (phase.finished && !clean) {
+        throw new OutcomeUnknownError('auth.2fa.verify.recovery');
+      }
       // FU-BE-208: only a statement-level lock error before the INSERT returned is certainly clean.
       if (
         !wrongCode &&
         !insert.done &&
-        isCleanRollback(phase, e) &&
+        clean &&
         // Defensive: the signal is only thrown after the INSERT returned (insert.done), so this
         // never matters today; it keeps a refused session from ever releasing the mark.
         !(e instanceof PasswordChangedSignal)
@@ -731,7 +657,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         // recovery transaction failed at COMMIT with anything but a rollback code).
         !insert.done &&
         lockContentionCode(e) !== undefined &&
-        isCleanRollback(phase, e) &&
+        clean &&
         !(isObject(e) && this.refundedErrors.has(e))
       ) {
         await this.refundAttempt(user).catch(() => undefined);
@@ -760,7 +686,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * (shared reserve and lockout, 403 REAUTH_FAILED), then 409 when 2FA is off, then the TOTP code
    * on its own reservation (same lockout, replay-protected; a wrong or replayed code is the same
    * 403 REAUTH_FAILED body as a wrong password; a Redis outage is a 503 with the reservation
-   * given back), and only then the role refusal. Every refusal on this route (wrong password,
+   * given back). Every refusal on this route (wrong password,
    * wrong or replayed code, locked account, password changed meanwhile) carries one fixed detail,
    * 'The password or code is incorrect.' (FU-BE-58), so nothing says which factor was wrong and
    * the user is not sent to retype a correct password. A code that already signed the user in
@@ -768,7 +694,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * password passed skips verifyTotp and registerFailure (only someone who already proved the
    * password can reach it). The 409 before the code check tells someone who
    * already holds the password only that 2FA is off, which the signed-in user can see anyway.
-   * Roles that must use 2FA are refused (FR-102). One transaction clears secret, flag and
+   * Every role may turn 2FA off (FR-102: optional for all roles). One transaction clears secret, flag and
    * recovery hashes (users row first), then revokes every refresh-token family of the user,
    * including the caller's own (users before refresh_tokens, the lock order every other path
    * uses), and audits. A refresh or a 2FA login racing this either waits on the users row lock
@@ -792,7 +718,6 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     }
     // Both factors passed: the reservation is not a failed guess.
     await this.refundAttempt(user).catch(() => undefined);
-    if (TOTP_REQUIRED_ROLES.includes(user.role)) throw this.twoFactorRequiredForRole();
     const phase: TxPhase = { started: false, finished: false };
     try {
       await this.prisma.client.$transaction(async (tx) => {
@@ -804,11 +729,10 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
             passwordHash: user.passwordHash ?? '',
             totpEnabled: true,
             totpSecretEnc: secret,
-            role: { notIn: [...TOTP_REQUIRED_ROLES] },
           },
           data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
         });
-        if (updated.count !== 1) await this.explainRefusedChange(tx, user, true, disableRefused);
+        if (updated.count !== 1) await this.explainRefusedChange(tx, user, disableRefused);
         const revoked = await tx.refreshToken.updateMany({
           where: { userId: user.id, revokedAt: null },
           data: { revokedAt: new Date() },
@@ -827,9 +751,106 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // have committed. The mark stays, no refund (the reservation was given back before the
       // transaction only because both factors had already verified).
       if (phase.started && phase.finished && !clean) {
+        // D-76: a silent turn-off would hide a takeover, so settle the outcome with a locking
+        // re-read (api-contract section 8) and mail only if the change definitely landed.
+        if (await this.disableDefinitelyCommitted(user.id, user.orgId)) {
+          await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
+        }
         throw new OutcomeUnknownError('auth.2fa.disable');
       }
       throw e;
+    }
+    // D-76: the transaction resolved, so the commit landed.
+    await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
+  }
+
+  /**
+   * D-76: FOR UPDATE re-read after an unknown commit outcome, shared by disable and reset. The
+   * read waits for a commit still in flight, but for 2 s at most (SET LOCAL lock_timeout, as
+   * session-state.service.ts does), so a hung transaction cannot hold the request. Returns null
+   * on any error or timeout (no mail: the accepted gap). `proof` runs in the same transaction; if
+   * it fails, its result is null and the flag from the locked read is still returned.
+   */
+  private async lockedReread(
+    userId: string,
+    orgId: string,
+    proof?: (tx: Db) => Promise<boolean>,
+  ): Promise<{ totpEnabled: boolean; proof: boolean | null } | null> {
+    let out: { totpEnabled: boolean; proof: boolean | null } | null = null;
+    try {
+      await this.prisma.client.$transaction(async (tx) => {
+        await this.raw(
+          'SET LOCAL lock_timeout so the re-read cannot hang the request',
+          () => tx.$executeRaw`SET LOCAL lock_timeout = '2000ms'`,
+        );
+        const rows = await this.raw('locking re-read of the 2FA flag after an unknown commit', () =>
+          tx.$queryRaw<{ totp_enabled: boolean }[]>(Prisma.sql`
+            SELECT totp_enabled FROM users WHERE id = ${userId}::uuid AND org_id = ${orgId}::uuid FOR UPDATE`),
+        );
+        const flag = rows[0]?.totp_enabled;
+        if (rows.length !== 1 || flag === undefined) return;
+        out = { totpEnabled: flag, proof: null };
+        if (proof) {
+          try {
+            // The proof lookup is bounded too; a timeout leaves it unreadable (fallback rule).
+            await this.raw(
+              'SET LOCAL statement_timeout so the audit lookup stays small and bounded',
+              () => tx.$executeRaw`SET LOCAL statement_timeout = '2000ms'`,
+            );
+            out = { totpEnabled: flag, proof: await proof(tx) };
+          } catch {
+            out = { totpEnabled: flag, proof: null };
+          }
+        }
+      });
+    } catch {
+      // A timeout or any error before the flag was read leaves null; after it, the read stands.
+    }
+    return out;
+  }
+
+  /** True only when the locked re-read shows 2FA off; any error or doubt is false (no mail). */
+  private async disableDefinitelyCommitted(userId: string, orgId: string): Promise<boolean> {
+    const read = await this.lockedReread(userId, orgId);
+    return read?.totpEnabled === false;
+  }
+
+  /**
+   * D-76: queues the account-holder mail after the change committed, then records the outcome in
+   * a separate audit row (no address). Never throws and never changes the response: the action
+   * does not depend on delivery. 'queued' means the queue accepted the job, not that it arrived.
+   */
+  private async notifyTwoFactorChange(
+    holder: Pick<User, 'id' | 'orgId' | 'email'>,
+    actorId: string,
+    template: TwoFactorNoticeTemplate,
+    ctx: RequestContext,
+  ): Promise<void> {
+    let outcome: MailOutcome;
+    try {
+      outcome = await this.mail.sendTwoFactorNotice(holder.email, template, new Date());
+      if (outcome === 'failed') this.logger.error(`2FA notice not queued (refused, ${template})`);
+    } catch (e) {
+      outcome = 'failed';
+      this.logger.error(`2FA notice not queued (${safeErrorName(e)}, ${template})`);
+    }
+    try {
+      await this.prisma.client.auditLog.create({
+        data: {
+          orgId: holder.orgId,
+          actorId,
+          action: 'AUTH_2FA_NOTICE',
+          entityType: 'user',
+          entityId: holder.id,
+          ip: ctx.ip ?? null,
+          metadata: { template, outcome },
+        },
+      });
+    } catch (e) {
+      // Name and audit action only; raises the same alertable line as the audit carve-out.
+      this.logger.error(
+        `Audit write after commit failed (${safeErrorName(e)}) for AUTH_2FA_NOTICE`,
+      );
     }
   }
 
@@ -847,7 +868,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         where: { id: user.id, passwordHash: user.passwordHash ?? '', totpEnabled: true },
         data: { recoveryCodeHashes: codes.map((c) => sha256Hex(c)) },
       });
-      if (updated.count !== 1) await this.explainRefusedChange(tx, user, false);
+      if (updated.count !== 1) await this.explainRefusedChange(tx, user);
       await this.audit(user, 'AUTH_RECOVERY_CODES_REGENERATED', ctx, {}, tx);
     });
     return { recoveryCodes: codes };
@@ -857,22 +878,11 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   private async explainRefusedChange(
     tx: Db,
     user: User,
-    fromDisable: boolean,
     refuse: () => CodedForbiddenException = reauthFailed,
   ): Promise<never> {
     const now = await tx.user.findUnique({ where: { id: user.id } });
     if (now?.passwordHash !== user.passwordHash) throw refuse();
-    // The enforced-role refusal only applies to disable; a regenerate race is a plain 409.
-    if (fromDisable && now && TOTP_REQUIRED_ROLES.includes(now.role))
-      throw this.twoFactorRequiredForRole();
     throw new ConflictException('Two-factor authentication changed. Try again.');
-  }
-
-  private twoFactorRequiredForRole(): CodedForbiddenException {
-    return new CodedForbiddenException(
-      'Two-factor authentication is required for your role.',
-      'TWO_FACTOR_REQUIRED_FOR_ROLE',
-    );
   }
 
   /**
@@ -886,8 +896,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * refresh_tokens, same order as a password reset. A session being opened from the old second
    * factor is refused by startSession's bound secret. Access tokens already issued end at once
    * through the Redis tokens-valid-after marker (the password version does not change); the refresh
-   * families are all revoked, so none renews. A role that requires 2FA is
-   * sent through forced enrollment at the next login (FR-102).
+   * families are all revoked, so none renews. The target signs in with a
+   * password alone at the next login; two-factor is optional for every role (FR-102).
    */
   async resetTwoFactorOf(
     actor: { id: string; orgId: string },
@@ -902,61 +912,125 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       throw new BadRequestException('Use your own security settings to change your 2FA.');
     }
     const verified = await this.requireCurrentPassword(actor.id, adminPassword, ctx);
-    await this.prisma.client.$transaction(async (tx) => {
-      // The admin's password hash, role and active flag are re-checked here with a plain read (the
-      // admin row is deliberately not locked: locking it would allow an A<->B deadlock between
-      // two admins resetting each other). It runs before the lock, so a changed admin gets
-      // REAUTH_FAILED whether or not the target exists.
-      const stillAdmin = await tx.user.count({
-        where: {
-          id: actor.id,
-          orgId: actor.orgId,
-          passwordHash: verified.passwordHash ?? '',
-          role: UserRole.SUPER_ADMIN,
-          isActive: true,
-        },
-      });
-      if (stillAdmin !== 1) throw reauthFailed();
-      const locked = await this.raw(
-        'row lock on the target user, FOR NO KEY UPDATE, same org only',
-        () =>
-          tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+    // D-76: the target as read inside the transaction; the mail goes to this address only.
+    const notify: { holder: Pick<User, 'id' | 'orgId' | 'email'> | null } = { holder: null };
+    // Names this request's audit row, so an unknown commit outcome can be settled (D-76).
+    const requestRef = randomUUID();
+    // Lower bound for the audit lookup (index range stays tiny), with room for clock skew.
+    const startedAt = new Date(Date.now() - 5_000);
+    const phase: TxPhase = { started: false, finished: false };
+    try {
+      await this.prisma.client.$transaction(async (tx) => {
+        phase.started = true;
+        phase.finished = false;
+        notify.holder = null; // a re-run of the callback must not keep a stale value
+        // The admin's password hash, role and active flag are re-checked here with a plain read (the
+        // admin row is deliberately not locked: locking it would allow an A<->B deadlock between
+        // two admins resetting each other). It runs before the lock, so a changed admin gets
+        // REAUTH_FAILED whether or not the target exists.
+        const stillAdmin = await tx.user.count({
+          where: {
+            id: actor.id,
+            orgId: actor.orgId,
+            passwordHash: verified.passwordHash ?? '',
+            role: UserRole.SUPER_ADMIN,
+            isActive: true,
+          },
+        });
+        if (stillAdmin !== 1) throw reauthFailed();
+        const locked = await this.raw(
+          'row lock on the target user, FOR NO KEY UPDATE, same org only',
+          () =>
+            tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT id FROM users
           WHERE id = ${targetId}::uuid AND org_id = ${actor.orgId}::uuid
           FOR NO KEY UPDATE`),
-      );
-      if (locked.length !== 1) throw new NotFoundException('User not found.');
-      // Also enforced after the lock, on the id as the database sees it.
-      if (locked[0]?.id === actorId) {
-        throw new BadRequestException('Use your own security settings to change your 2FA.');
-      }
-      const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
-      await tx.user.update({
-        where: { id: targetId },
-        data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
-      });
-      const revoked = await tx.refreshToken.updateMany({
-        where: { userId: targetId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
-      await this.validity.invalidateIssuedTokens(targetId);
-      await tx.auditLog.create({
-        data: {
-          orgId: actor.orgId,
-          actorId: actor.id,
-          action: 'AUTH_2FA_RESET_BY_ADMIN',
-          entityType: 'user',
-          entityId: targetId,
-          ip: ctx.ip ?? null,
-          metadata: {
-            previouslyEnabled: target.totpEnabled,
-            targetRole: target.role,
-            sessionsRevoked: revoked.count,
+        );
+        if (locked.length !== 1) throw new NotFoundException('User not found.');
+        // Also enforced after the lock, on the id as the database sees it.
+        if (locked[0]?.id === actorId) {
+          throw new BadRequestException('Use your own security settings to change your 2FA.');
+        }
+        const target = await tx.user.findUniqueOrThrow({ where: { id: targetId } });
+        await tx.user.update({
+          where: { id: targetId },
+          data: { totpEnabled: false, totpSecretEnc: null, recoveryCodeHashes: [] },
+        });
+        const revoked = await tx.refreshToken.updateMany({
+          where: { userId: targetId, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        // Access tokens issued so far end too (Redis marker; a Redis outage rolls this back, 503).
+        await this.validity.invalidateIssuedTokens(targetId);
+        await tx.auditLog.create({
+          data: {
+            orgId: actor.orgId,
+            actorId: actor.id,
+            action: 'AUTH_2FA_RESET_BY_ADMIN',
+            entityType: 'user',
+            entityId: targetId,
+            ip: ctx.ip ?? null,
+            metadata: {
+              previouslyEnabled: target.totpEnabled,
+              targetRole: target.role,
+              sessionsRevoked: revoked.count,
+              requestRef,
+            },
           },
-        },
+        });
+        // Nothing changes for an account without 2FA, and a deactivated account gets nothing.
+        if (target.totpEnabled && target.isActive) {
+          notify.holder = { id: target.id, orgId: target.orgId, email: target.email };
+        }
+        phase.finished = true;
       });
+    } catch (e) {
+      // The response stays what it is (503 BUSY for a commit-time failure). Only the mail is
+      // settled here: after the callback returned, a commit-time P2028 or P1017 may have landed
+      // and a retry would be a no-op reset that never mails the holder (D-76).
+      const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
+      if (!clean && phase.started && phase.finished && notify.holder) {
+        await this.mailIfResetLanded(notify.holder, actor.id, requestRef, startedAt, ctx);
+      }
+      throw e;
+    }
+    // Only after the transaction resolved (a commit-time failure threw above: no mail).
+    if (notify.holder) {
+      await this.notifyTwoFactorChange(notify.holder, actor.id, 'two-factor-reset', ctx);
+    }
+  }
+
+  /**
+   * Unknown commit outcome of a reset whose target had 2FA on: mail only if the locked re-read
+   * proves THIS request's reset landed (its AUTH_2FA_RESET_BY_ADMIN row exists); if the audit
+   * lookup cannot be read, fall back to 2FA being off now (it was on before the transaction).
+   * The fallback can mail in the rare case that the account's 2FA was turned off by someone else
+   * meanwhile (a concurrent self-disable or a concurrent reset) while this reset rolled back: the
+   * holder then gets a notice for a change they may have made themselves. Accepted: the notice
+   * never withholds a real turn-off, and it names no actor.
+   */
+  private async mailIfResetLanded(
+    holder: Pick<User, 'id' | 'orgId' | 'email'>,
+    actorId: string,
+    requestRef: string,
+    startedAt: Date,
+    ctx: RequestContext,
+  ): Promise<void> {
+    const read = await this.lockedReread(holder.id, holder.orgId, async (tx) => {
+      const row = await tx.auditLog.findFirst({
+        where: {
+          action: 'AUTH_2FA_RESET_BY_ADMIN',
+          entityId: holder.id,
+          createdAt: { gte: startedAt },
+          metadata: { path: ['requestRef'], equals: requestRef },
+        },
+        select: { id: true },
+      });
+      return row !== null;
     });
+    if (!read) return;
+    const landed = read.proof ?? !read.totpEnabled;
+    if (landed) await this.notifyTwoFactorChange(holder, actorId, 'two-factor-reset', ctx);
   }
 
   // ---- FR-104: refresh and logout -----------------------------------------------------------
@@ -1007,12 +1081,6 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     }
     if (!user.isActive) {
       await this.revokeFamilyBounded(existing.familyId, 'inactive');
-      throw new UnauthorizedException('Authentication required.');
-    }
-    // Defence in depth: a role that requires 2FA never gets a token from a family that was not
-    // opened through 2FA (a promotion racing a password sign-in). Same 401, family revoked.
-    if (TOTP_REQUIRED_ROLES.includes(user.role) && !user.totpEnabled) {
-      await this.revokeFamilyBounded(existing.familyId, 'totp');
       throw new UnauthorizedException('Authentication required.');
     }
 
@@ -1487,7 +1555,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
   }
 
   /**
-   * revokeFamily for the refresh paths (reuse, inactive user, role needing 2FA, changed password).
+   * revokeFamily for the refresh paths (reuse, inactive user, changed password).
    * It runs outside the rotation transaction, so contention before commit is a clean failure and
    * is retried a bounded number of times. Every error is retried except OrgScopeError (a
    * programming error that cannot succeed on a retry); the choice is fail-closed on purpose,
@@ -1498,7 +1566,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    */
   private async revokeFamilyBounded(
     familyId: string,
-    path: 'reuse' | 'inactive' | 'totp' | 'password',
+    path: 'reuse' | 'inactive' | 'password',
   ): Promise<{ ok: true; count: number } | { ok: false }> {
     let last: unknown;
     for (let attempt = 1; attempt <= REVOKE_ATTEMPTS; attempt += 1) {
@@ -1573,14 +1641,16 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     // and inserts nothing; a reset arriving later waits for this commit, so its revoke-all sees
     // the token. A family can never outlive a reset (FR-104, FR-107).
     // `?? ''` is deliberate: an empty hash can never equal a stored hash, so it inserts nothing.
-    // The role read at sign-in is bound too: a promotion to a 2FA-required role in between inserts
-    // nothing, so no family exists that skipped 2FA (the guard refuses the old-role access token,
-    // but a refresh would re-read the new role).
+    // The role read at sign-in is bound too: a role change in between inserts nothing, so no
+    // family exists for a role the user no longer has (the guard refuses the old-role access
+    // token, but a refresh would re-read the new role).
     // A 2FA completion also binds the TOTP secret it checked: an admin reset of the user's 2FA
     // that lands in between clears it, so no session is opened from the old second factor.
     const totpBound =
       boundTotpSecret === undefined
-        ? Prisma.empty
+        ? // Password-only path: a user whose own setup/confirm committed meanwhile gets no session
+          // without the code (FU-BE-255); the insert matches nothing, as for a changed password.
+          Prisma.sql`AND NOT u.totp_enabled`
         : Prisma.sql`AND u.totp_enabled AND u.totp_secret_enc = ${boundTotpSecret}`;
     const inserted = await this.raw(
       'open a refresh family: INSERT ... SELECT ... FOR SHARE of the user row (FR-104, FR-107)',
@@ -1613,6 +1683,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         role: user.role,
         orgName: user.org.name,
         totpEnabled: user.totpEnabled,
+        // FR-102: two-factor is optional for every role; the web nudges whoever has it off.
+        twoFactorRecommended: !user.totpEnabled,
       },
     };
   }

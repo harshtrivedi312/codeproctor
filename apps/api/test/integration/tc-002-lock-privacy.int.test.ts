@@ -104,23 +104,6 @@ describe('TC-002 (FR-101, FU-BE-22): lock state is not exposed by auth responses
       200,
     );
 
-    const fresh = await createUser(h, { role: UserRole.REVIEWER });
-    const enrol = record('login enrol', await login(h, fresh.email), 200);
-    const challengeToken = (enrol.body as Body).challengeToken;
-    const started = record(
-      '2fa enroll start',
-      await post('/auth/2fa/enroll/start').send({ challengeToken }),
-      200,
-    );
-    record(
-      '2fa enroll confirm',
-      await post('/auth/2fa/enroll/confirm').send({
-        challengeToken,
-        code: authenticator.generate((started.body as Body).manualKey),
-      }),
-      200,
-    );
-
     const locked = await createUser(h);
     for (let i = 0; i < 5; i++) {
       record('login failing', await login(h, locked.email, `bad-${i}`), 401);

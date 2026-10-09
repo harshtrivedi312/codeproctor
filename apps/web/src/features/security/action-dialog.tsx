@@ -8,12 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/features/auth/auth-provider';
-import {
-  captureSessionStamp,
-  getGeneration,
-  getSessionUserId,
-  refreshForReplay,
-} from '@/lib/auth-session';
+import { captureSessionStamp, getGeneration, getSessionUserId } from '@/lib/auth-session';
 import { RecoveryCodesPanel } from '@/features/auth/recovery-codes-panel';
 import {
   confirmSetup,
@@ -39,7 +34,7 @@ const COPY: Record<SecurityAction, { title: string; description: string; submit:
   setup: {
     title: 'Set up two-factor sign-in',
     description:
-      'Enter your current password to continue. We ask again so that nobody else can change your sign-in on a computer you left unlocked.',
+      'This is optional, and we recommend it. Enter your current password to continue. We ask again so that nobody else can change your sign-in on a computer you left unlocked.',
     submit: 'Continue',
   },
   disable: {
@@ -64,10 +59,6 @@ const FAILURE_HINT: Record<
     title: 'Verification is temporarily unavailable',
     hint: 'The service is busy. Nothing was changed. Wait a few seconds, then submit again.',
   },
-  role: {
-    title: 'Two-factor sign-in is required for your role',
-    hint: 'Super Admins and Reviewers cannot turn it off. If you lost your phone, use a recovery code or ask a Super Admin.',
-  },
   conflict: {
     title: 'This changed in the meantime',
     hint: 'Two-factor sign-in was already turned on or off somewhere else. Close this window and reload the page to see the current state.',
@@ -83,6 +74,10 @@ const FAILURE_HINT: Record<
   network: {
     title: 'We could not reach the server',
     hint: 'Check your connection and try again.',
+  },
+  outcomeUnknown: {
+    title: 'We could not confirm the result',
+    hint: 'Nothing was retried for you. Check the current state before trying again.',
   },
   unknown: {
     title: 'Something went wrong',
@@ -135,6 +130,16 @@ export function ActionDialog({
     }
     if (action === 'disable') {
       const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
+      if (!out.ok && out.failure === 'outcomeUnknown') {
+        // The fixed 500 (contract section 8): a landed commit revokes this session, a lost one
+        // leaves the cookie valid. Sign out for real (logout call) to the unconfirmed notice.
+        if (stamp.userId !== getSessionUserId()) {
+          onClose();
+          return 'ok';
+        }
+        await signOutRevoked('unconfirmed');
+        return 'ok';
+      }
       if (!out.ok) return fail(out.failure);
       // Another tab signed in as someone else (or this tab already signed out) while the call
       // was in flight: that session is not ours to end. Just close.
@@ -142,8 +147,9 @@ export function ActionDialog({
         onClose();
         return 'ok';
       }
-      // The server revoked every session of this user, this one included: no refresh, no logout.
-      await signOutRevoked();
+      // The server revoked every session of this user, this one included: sign out normally (the
+      // logout call normally answers 401, which counts as confirmed), no refresh.
+      await signOutRevoked('off');
       return 'ok';
     }
     const out = await regenerateRecoveryCodes(values.currentPassword);
@@ -154,12 +160,17 @@ export function ActionDialog({
   }
 
   /**
-   * Set-up turned 2FA on: re-read the session user (it carries `totpEnabled`) through the shared
-   * silent-refresh guard. Only runs after the recovery codes were acknowledged (Done): a failing
-   * refresh signs the user out and would unmount the one-time codes. Never runs for another user.
+   * Set-up turned 2FA on, and the server revoked every refresh family of this user, this one
+   * included. After the recovery codes were acknowledged (Done), forget the session here and go to
+   * sign-in through the normal sign-out (one logout call, normally 401 = confirmed), no refresh. Never for another user's session.
    */
-  function refreshStatus(): void {
-    void refreshForReplay(stamp);
+  async function finishSetup(): Promise<void> {
+    // Only another person's session is not ours to end; the same user in a newer generation is.
+    if (stamp.userId !== getSessionUserId()) {
+      onDone('enabled');
+      return;
+    }
+    await signOutRevoked('on');
   }
 
   function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {
@@ -185,6 +196,22 @@ export function ActionDialog({
       return 'failed';
     }
     if (out.failure === 'code') return 'wrongCode';
+    if (
+      out.failure === 'network' ||
+      out.failure === 'unknown' ||
+      out.failure === 'outcomeUnknown'
+    ) {
+      // The outcome is unknown: 2FA may be on and every session revoked, or nothing happened and
+      // the cookie is still valid. Sign out for real (logout call, pending marker if it fails).
+      setPassword('');
+      if (stamp.userId === getSessionUserId()) {
+        await signOutRevoked('unconfirmed');
+        return 'failed';
+      }
+      // Another person's session now: do not end it. Hint to reload and check the current state.
+      setFailure('conflict');
+      return 'failed';
+    }
     setFailure(out.failure);
     return 'failed';
   }
@@ -217,6 +244,7 @@ export function ActionDialog({
               failure={failure}
               onSubmit={onPassword}
               onCancel={onClose}
+              cancelLabel={action === 'setup' ? 'Skip for now' : 'Cancel'}
             />
           </>
         ) : null}
@@ -233,6 +261,7 @@ export function ActionDialog({
               failure={failure}
               onSubmit={onCode}
               onCancel={onClose}
+              cancelLabel={action === 'setup' ? 'Skip for now' : 'Cancel'}
             />
           </>
         ) : null}
@@ -250,8 +279,8 @@ export function ActionDialog({
               email={user?.email ?? ''}
               codes={stage.codes}
               onDone={() => {
-                if (action === 'setup') refreshStatus();
-                onDone(action === 'setup' ? 'enabled' : 'regenerated');
+                if (action === 'setup') void finishSetup();
+                else onDone('regenerated');
               }}
             />
           </>
@@ -279,6 +308,7 @@ function PasswordStep({
   failure,
   onSubmit,
   onCancel,
+  cancelLabel = 'Cancel',
 }: {
   submitLabel: string;
   destructive: boolean;
@@ -288,6 +318,7 @@ function PasswordStep({
   failure: Failure | null;
   onSubmit: (values: PasswordFormValues) => Promise<'wrong' | 'invalid' | 'failed' | 'ok'>;
   onCancel: () => void;
+  cancelLabel?: string;
 }): React.JSX.Element {
   const {
     register,
@@ -359,7 +390,7 @@ function PasswordStep({
       ) : null}
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button
           type="submit"
@@ -383,12 +414,14 @@ function ConfirmStep({
   failure,
   onSubmit,
   onCancel,
+  cancelLabel = 'Cancel',
 }: {
   manualKey: string;
   qr: string;
   failure: Failure | null;
   onSubmit: (values: CodeFormValues) => Promise<'ok' | 'wrongCode' | 'failed'>;
   onCancel: () => void;
+  cancelLabel?: string;
 }): React.JSX.Element {
   const [wrongCode, setWrongCode] = React.useState(false);
   const {
@@ -441,7 +474,7 @@ function ConfirmStep({
       </Field>
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button type="submit" disabled={isSubmitting}>
           {isSubmitting ? 'Checking…' : 'Confirm and turn on'}

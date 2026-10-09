@@ -52,8 +52,8 @@
 //     `orderBy` on a relation and `_count` follow foreign keys blindly, so any foreign key that
 //     crosses orgs leaks: `sessionReview.findUnique({ include: { reviewer: true } })` returns the
 //     reviewer user row of another org, password hash included, if reviewer_id points there.
-// (d) Rule (i) covers 26 foreign keys, not only the staff references and
-//     test_questions.question_version_id (RULE_I_REFERENCES in org-scope-relations.ts, 26 keys: 13
+// (d) Rule (i) covers 27 foreign keys, not only the staff references and
+//     test_questions.question_version_id (RULE_I_REFERENCES in org-scope-relations.ts, 27 keys: 14
 //     staff and 13 cross-chain). The main cross-chain ones: session_questions
 //     to test_questions, question_versions and question_variants; session_sections to
 //     test_sections; consents to consent_texts; keystroke_batches to session_questions;
@@ -67,7 +67,9 @@ import type { ScopeSource } from './org-context';
 import { applyOrgScope, assertSystemScopeWrite, isScopedOperation } from './org-scope-args';
 import { scrubPrismaError } from './error-scrub';
 import { ORG_SCOPE } from './org-scope-map';
+import { assertOmitValues } from './omit-args';
 import { assertPlainArgs } from './plain-args';
+import { assertNoRawUnderScheduleCapacity, assertScheduleCapacityScope } from './schedule-capacity';
 import type { ModelName, OrgScopeRule } from './org-scope-map';
 import {
   applySessionScope,
@@ -198,10 +200,14 @@ export function orgScopeExtension(
           );
         }
 
-        // Arguments must be plain (B1 of the #185 review): Prisma reads inherited keys that the checks
-        // below do not see, so a foreign prototype or an inherited key is refused before anything else
-        // reads the arguments, in EVERY scope, system and staff included (plain-args.ts).
+        // Arguments must be plain (B1 of the #185 review; FU-DB-281): Prisma reads inherited keys, and on an
+        // object it passes by reference a non-enumerable key or a getter, that the checks below do not see, so a
+        // foreign prototype, an inherited, symbol or non-enumerable key, an accessor and a Proxy are refused before
+        // anything else reads the arguments, in EVERY scope, system and staff included (plain-args.ts).
         if (model !== undefined) assertPlainArgs(model, operation, args);
+        // `omit` takes only `true`, in every scope: Prisma turns any other value into a selection of that key,
+        // a relation or `_count` included, which would bypass the relation checks below (omit-args.ts).
+        if (model !== undefined) assertOmitValues(model, operation, args);
 
         // Raw queries and any other operation that is not tied to a model.
         if (model === undefined) {
@@ -210,6 +216,9 @@ export function orgScopeExtension(
             throw new RawQueryNotAllowedError(operation, true);
           }
           if (store?.rawSqlReason === undefined) throw new RawQueryNotAllowedError(operation);
+          // ADR 0017 section 4.7 (C-53; S1 of the #261 review): no raw SQL under the schedule read.
+          if (store.scope?.kind === 'system')
+            assertNoRawUnderScheduleCapacity(store.scope.reason, operation);
           return execute(query, args);
         }
 
@@ -233,6 +242,11 @@ export function orgScopeExtension(
         // CS-4.3 deny by default comes first, before the `unscoped` early return: a model that is
         // global on purpose is still not reachable by a candidate unless the allowlist names it.
         if (isCandidate) assertCandidateModelAllowed(model, operation, store?.grant);
+        // ADR 0017 section 4.7 (C-53): the scheduled_windows rules of system scope come before the
+        // `unscoped` early return too, so SCHEDULE_CAPACITY can read no unscoped model either (nit 2 of
+        // the #261 review), and no system query reaches scheduled_windows through a relation (B1).
+        if (scope?.kind === 'system')
+          assertScheduleCapacityScope(model, operation, scope.reason, args);
         if (rule.kind === 'unscoped') {
           if (isCandidate) {
             // On the allowlist and global: no row filter exists for it yet, so it fails closed.
@@ -245,6 +259,7 @@ export function orgScopeExtension(
 
         if (scope === undefined) throw new OrgContextMissingError(`${model}.${operation}`);
         if (scope.kind === 'system') {
+          // (The scheduled_windows rules of system scope ran above, before the `unscoped` return.)
           // System scope is unfiltered, but an unknown operation, a nested relation write, an orgId
           // in an update and a change of a path model's first-hop scope key are refused here too
           // (a row is never moved to another org).

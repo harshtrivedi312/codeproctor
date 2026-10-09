@@ -16,6 +16,7 @@ import { PrismaClient, UserRole } from '../generated/prisma/client';
 import type { MailPort } from '../mail/mail.port';
 import { applyEnv, applyMigrations, startInfra, TestInfra } from '../test/containers';
 import type { TokenService } from '../common/auth/token.service';
+import { awaitSafeWindow } from '../common/testing/window-boundary';
 
 const API = '/api/v1';
 const PASSWORD = 'Correct-Horse-9';
@@ -1032,6 +1033,11 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
   // ---- S2: invite rate limit ---------------------------------------------------------------------------
 
   describe('FR-103, S2: per-organization invite limit', () => {
+    // The limit is a fixed hourly window keyed by the clock hour: never straddle a boundary.
+    beforeEach(async () => {
+      await awaitSafeWindow();
+    }, 60_000);
+
     it('FR-103: the 3rd invite in an hour is 429 when the limit is 2, and a refused invite creates no user', async () => {
       const org = (await owner.organization.create({ data: { name: 'Invite Limit Org' } })).id;
       const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
@@ -1097,6 +1103,39 @@ describe('Staff user management, RBAC and audit (FR-101, FR-103, FR-105, TC-002,
         const res = await send(1).expect(503);
         expect(res.headers['retry-after']).toMatch(/^[1-9]\d*$/);
         // Limit is 1: the retry only succeeds because the failed attempt gave its slot back.
+        await send(1).expect(201);
+        await send(2).expect(429);
+      } finally {
+        busy.mockRestore();
+        Reflect.set(svc, 'inviteLimit', before);
+      }
+    });
+
+    it('DL-42, FU-BE-197, FR-103: an invite whose transaction cannot get a pool connection is 503 BUSY and gives its slot back', async () => {
+      const org = (await owner.organization.create({ data: { name: 'Invite Pool Refund' } })).id;
+      const admin = await make(UserRole.SUPER_ADMIN, { orgId: org });
+      const { UsersService } =
+        jest.requireActual<typeof import('./users.service')>('./users.service');
+      const svc = app.get(UsersService);
+      const before = Reflect.get(svc, 'inviteLimit') as number;
+      Reflect.set(svc, 'inviteLimit', 1);
+      const busy = jest
+        .spyOn(svc as unknown as { requireSameAdmin: () => Promise<void> }, 'requireSameAdmin')
+        .mockRejectedValueOnce(new Error('timeout exceeded when trying to connect'));
+      try {
+        const send = (n: number): request.Test =>
+          http()
+            .post(`${API}/admin/users`)
+            .set(admin.auth)
+            .send({
+              currentPassword: PASSWORD,
+              email: `poolrefund${n}@example.com`,
+              name: 'R',
+              role: 'AUTHOR',
+            });
+        const res = await send(1).expect(503);
+        expect(res.headers['retry-after']).toBe('2');
+        expect((res.body as { code?: string }).code).toBe('BUSY');
         await send(1).expect(201);
         await send(2).expect(429);
       } finally {

@@ -118,6 +118,59 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     });
   });
 
+  it('FR-502 DL-58: the real run response with LOCAL_STUB verdicts shows the stub notice, not a pass or a fail', async () => {
+    await startedSession();
+    server.use(
+      http.post(`${cand}/answers/:id/run`, () =>
+        HttpResponse.json({
+          serverTime: new Date().toISOString(),
+          passed: 0,
+          total: 1,
+          results: [
+            {
+              index: 1,
+              verdict: 'LOCAL_STUB',
+              passed: false,
+              stub: true,
+              timeMs: null,
+              memoryKb: null,
+              message: 'local stub, not real execution',
+            },
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    expect(await screen.findByTestId('run-stub-notice')).toHaveTextContent(
+      /local stub, not real execution/i,
+    );
+    expect(screen.queryByText(/sample tests passed/i)).not.toBeInTheDocument();
+  });
+
+  it('FR-502: the real run response (per-sample verdicts) is shown as sample tests', async () => {
+    await startedSession();
+    server.use(
+      http.post(`${cand}/answers/:id/run`, () =>
+        HttpResponse.json({
+          serverTime: new Date().toISOString(),
+          passed: 1,
+          total: 2,
+          results: [
+            { index: 1, verdict: 'PASSED', passed: true, timeMs: 10, memoryKb: 100, stdout: '3' },
+            { index: 2, verdict: 'FAILED', passed: false, timeMs: 11, memoryKb: 100, stdout: '5' },
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    expect(await screen.findByText(/1 of 2 sample tests passed/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('run-stub-notice')).not.toBeInTheDocument();
+  });
+
   it('FR-502: a second Run inside 5 seconds is refused with the wait, and the button counts down', async () => {
     await startedSession();
     const user = userEvent.setup();

@@ -3,6 +3,7 @@ import {
   MAX_CHUNKS_PER_SESSION,
   MAX_EVIDENCE_ISSUED,
   MAX_MISSING_SHOWN,
+  MAX_PRESIGNS_PER_STREAM,
   existingSession,
   MAX_SESSIONS,
   batch,
@@ -176,7 +177,10 @@ describe('mock media endpoints (FR-701, FR-702, TC-063)', () => {
   it('FR-701: presign, PUT, confirm marks the chunk confirmed with its size', () => {
     const st = fresh();
     const p = mediaPresign(st, 's1', chunk());
-    expect(p.body).toMatchObject({ method: 'PUT', headers: { 'Content-Type': 'video/webm' } });
+    expect(p.body).toMatchObject({
+      method: 'PUT',
+      headers: { 'Content-Type': 'video/webm', 'If-None-Match': '*' },
+    });
     expect((p.body as { url: string }).url).toContain(
       'orgs/demo/sessions/s1/media/WEBCAM/000000/00000004.webm',
     );
@@ -248,6 +252,51 @@ describe('mock media endpoints (FR-701, FR-702, TC-063)', () => {
     const r = mediaPresign(st, 's1', chunk({ segment: 1, seq: 0 }));
     expect([r.status, code(r)]).toEqual([409, 'SEQ_CONFLICT']);
     expect(mediaPresign(st, 's1', chunk({ segment: 1, seq: 1 })).status).toBe(200);
+  });
+
+  it('FR-702: every presign request counts against the quota (a repeat too); a confirmed chunk answers alreadyUploaded for free; the quota answer carries Retry-After', () => {
+    const st = fresh();
+    for (let i = 0; i < MAX_PRESIGNS_PER_STREAM; i++) {
+      expect(mediaPresign(st, 's1', chunk({ seq: i % 3, segment: 0 })).status).toBe(200); // repeats count
+    }
+    const over = mediaPresign(st, 's1', chunk({ seq: 0 }));
+    expect([over.status, code(over), over.headers?.['Retry-After']]).toEqual([
+      429,
+      'PRESIGN_QUOTA_EXCEEDED',
+      '30',
+    ]);
+    // another stream has its own quota
+    expect(
+      mediaPresign(st, 's1', chunk({ stream: 'AUDIO', contentType: 'audio/webm' })).status,
+    ).toBe(200);
+    // a confirmed chunk is free even when the quota is used up
+    const st2 = fresh();
+    mediaPresign(st2, 's1', chunk());
+    put(st2, 's1', 10);
+    confirm(st2);
+    st2.presigns['WEBCAM'] = MAX_PRESIGNS_PER_STREAM;
+    expect(mediaPresign(st2, 's1', chunk()).body).toEqual({ alreadyUploaded: true });
+  });
+
+  it('FR-702: a second conditional PUT of the same object answers 412 and keeps the first object', () => {
+    const st = fresh();
+    mediaPresign(st, 's1', chunk());
+    const sid = 's1';
+    const path = chunkObjectPath(sid, 'WEBCAM', 0, 4);
+    expect(mediaPut(st, sid, path, 10, 'video/webm', '*').status).toBe(200);
+    expect(mediaPut(st, sid, path, 99, 'video/webm', '*').status).toBe(412);
+    expect(confirm(st).status).toBe(200); // the first object (10 bytes) is the one confirmed
+    // after UPLOAD_MISMATCH the server deleted the object, so a conditional PUT works again
+    const st2 = fresh();
+    mediaPresign(st2, 's1', chunk());
+    mediaPut(st2, sid, path, 11, 'video/webm', '*');
+    expect(code(confirm(st2))).toBe('UPLOAD_MISMATCH');
+    expect(mediaPut(st2, sid, path, 10, 'video/webm', '*').status).toBe(200);
+  });
+
+  it('FR-701: segment numbers above 9999 are refused (media.constants)', () => {
+    expect(mediaPresign(fresh(), 's1', chunk({ segment: 10_000 })).status).toBe(400);
+    expect(mediaPresign(fresh(), 's1', chunk({ segment: 9_999 })).status).toBe(200);
   });
 
   it('FR-702: a retried presign upserts the same chunk', () => {

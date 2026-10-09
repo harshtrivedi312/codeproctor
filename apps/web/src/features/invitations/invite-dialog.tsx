@@ -43,14 +43,10 @@ import {
   inviteSchema,
   toAccommodations,
   toIso,
+  toLocalInput,
+  windowAtSubmit,
   type InviteFormValues,
 } from './schemas';
-
-/** A `datetime-local` value (the browser's local time) for a date. */
-const local = (d: Date): string => {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-};
 
 function defaults(testId: string): InviteFormValues {
   const start = new Date();
@@ -61,8 +57,8 @@ function defaults(testId: string): InviteFormValues {
     mode: 'one',
     name: '',
     email: '',
-    windowStart: local(start),
-    windowEnd: local(end),
+    windowStart: toLocalInput(start),
+    windowEnd: toLocalInput(end),
     extraTime: '',
     disabledDetectors: [],
     toolsText: '',
@@ -117,7 +113,12 @@ function InviteBody({
     resolver: zodResolver(schema),
     mode: 'onSubmit',
   });
-  const { errors, isSubmitting } = form.formState;
+  const { errors, isSubmitting, dirtyFields } = form.formState;
+  const initialWindow = React.useRef({
+    windowStart: form.getValues('windowStart'),
+    windowEnd: form.getValues('windowEnd'),
+  });
+  const [clampNote, setClampNote] = React.useState<string | null>(null);
   const mode = useWatch({ control: form.control, name: 'mode' });
   const waiver = useWatch({ control: form.control, name: 'waiver' });
   const reason = useWatch({ control: form.control, name: 'waiverReason' });
@@ -262,11 +263,31 @@ function InviteBody({
       <form
         onSubmit={(e) => {
           e.stopPropagation();
+          // The window is worked out now, not when the dialog opened (the API refuses a start
+          // more than 5 minutes in the past, FR-303).
+          const next = windowAtSubmit(
+            form.getValues(),
+            { start: Boolean(dirtyFields.windowStart), end: Boolean(dirtyFields.windowEnd) },
+            initialWindow.current,
+            new Date(),
+          );
+          form.setValue('windowStart', next.windowStart);
+          form.setValue('windowEnd', next.windowEnd);
+          setClampNote(
+            next.clamped
+              ? 'The opening time you chose has passed, so the window now opens right away. Change it and send again if you want a later start.'
+              : null,
+          );
           void form.handleSubmit(onValid)(e);
         }}
         noValidate
         className="mt-4 space-y-4"
       >
+        {clampNote ? (
+          <Alert tone="info" role="status">
+            {clampNote}
+          </Alert>
+        ) : null}
         {problem ? (
           <Alert tone="error" role="alert" title="That did not work">
             {problem}

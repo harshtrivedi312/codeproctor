@@ -2773,9 +2773,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
         busy(),
       );
       const first = await authed('post', '/heartbeat', tokenOf(inv));
-      // TODO(DL-37): this is 503 with Retry-After once Backend A's ProblemFilter mapping lands; the
-      // thrown error is busy-class (isBusyLockError) and the answer is a 5xx, never 409 or 200.
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await slot('heartbeat', inv.sessionId)).toBe(1);
       spy.mockRestore();
       await authed('post', '/heartbeat', tokenOf(inv)).expect(200);
@@ -2857,8 +2857,9 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       const code = await otpFor(inv);
       const spy = jest.spyOn(states, 'transition').mockRejectedValueOnce(busy());
       const first = await post('/start', { invitationToken: inv.token, otp: code });
-      // TODO(DL-37): 503 with Retry-After once Backend A's ProblemFilter mapping lands.
-      expect(first.status).toBeGreaterThanOrEqual(500);
+      expect(first.status).toBe(503);
+      expect(first.headers['retry-after']).toBe('2');
+      expect((first.body as { code?: string }).code).toBe('BUSY');
       expect(await redis.exists(`otp:${inv.invitationId}`)).toBe(1);
       const left = await redis.pttl(`otp:${inv.invitationId}`);
       expect(left).toBeGreaterThan(0);
@@ -3266,8 +3267,14 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     await post('/link', { invitationToken: inv.token }).expect(200);
     const text = logged.join('');
     expect(text.length).toBeGreaterThan(0);
+    // Request ids are random UUIDs and can contain the six digits by chance ("...80ca254745eb"),
+    // which is not a leak: they are masked, then the OTP is checked as a plain substring.
+    const scrubbed = text.replace(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+      '<uuid>',
+    );
+    expect(scrubbed).not.toContain(code);
     for (const secret of [
-      code,
       inv.token,
       sessionToken,
       (key.body as { key: string }).key,
@@ -3276,5 +3283,191 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
     ]) {
       expect(text).not.toContain(secret);
     }
+  });
+
+  describe('system check (ADR 0013 section 5.4; FR-402, FR-605, FR-610, TC-056)', () => {
+    const tokenFor = (inv: InvitationFixture): string =>
+      tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
+    const good = {
+      browser: { brand: 'Google Chrome', majorVersion: 124 },
+      network: { downlinkKbps: 20000, rttMs: 40 },
+      devices: { camera: true, microphone: true, screenShare: 'MONITOR' },
+      findings: [],
+      capabilities: [{ id: 'multi-screen', status: 'SUPPORTED' }],
+    };
+    const check = (inv: InvitationFixture, body: object = good, headers: object = {}) =>
+      authed('post', '/system-check', tokenFor(inv), body).set(headers as Record<string, string>);
+    const deviceInfo = async (inv: InvitationFixture): Promise<Record<string, unknown>> =>
+      (await sessionRow(inv.sessionId)).deviceInfo as Record<string, unknown>;
+
+    it('FR-402, TC-056: a clean check passes, is stored with the SERVER time, merges capabilities and queues verify-session', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const before = Date.now();
+      const res = await check(inv, {
+        ...good,
+        // A client clock far in the past or future is ignored: only the server time is stored.
+        capabilities: [{ id: 'multi-screen', status: 'SUPPORTED', detail: 'ok' }],
+      }).expect(200);
+      expect(res.body).toEqual({ passed: true, blocking: [] });
+      const info = await deviceInfo(inv);
+      const stored = info.systemCheck as { passed: boolean; checkedAt: string; blocking: string[] };
+      expect(stored.passed).toBe(true);
+      expect(stored.blocking).toEqual([]);
+      expect(Date.parse(stored.checkedAt)).toBeGreaterThanOrEqual(before - 1000);
+      expect((info.capabilities as Array<{ id: string; updatedAt: string }>)[0]).toMatchObject({
+        id: 'multi-screen',
+      });
+      expect(Number(await redis.get(`vs:${inv.sessionId}`))).toBeGreaterThanOrEqual(1);
+    });
+
+    it('FR-605, FR-402: MULTI_MONITOR, an unsupported browser, a window share and a missing device block; nothing is queued', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const res = await check(inv, {
+        browser: { brand: 'Firefox', majorVersion: 130 },
+        devices: { camera: false, microphone: true, screenShare: 'OTHER' },
+        findings: [
+          {
+            type: 'MULTI_MONITOR',
+            occurredAt: new Date().toISOString(),
+            payload: { api: 'SCREEN_IS_EXTENDED', screenCount: 2 },
+          },
+        ],
+        capabilities: [],
+      }).expect(200);
+      expect(res.body).toEqual({
+        passed: false,
+        blocking: [
+          'MULTI_MONITOR',
+          'BROWSER_UNSUPPORTED',
+          'SCREEN_SHARE_NOT_MONITOR',
+          'DEVICE_MISSING',
+        ],
+      });
+      expect((await deviceInfo(inv)).systemCheck).toMatchObject({ passed: false });
+      expect(await redis.get(`vs:${inv.sessionId}`)).toBeNull();
+    });
+
+    it('FR-610, ADR 0013 section 3: a VIRTUAL_CAMERA finding is logged as an unsigned CLIENT row with its time clamped, and does not block; a repeat adds no second row', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const body = {
+        ...good,
+        findings: [
+          {
+            type: 'VIRTUAL_CAMERA',
+            occurredAt: '2001-01-01T00:00:00.000Z',
+            payload: { deviceLabel: 'OBS Virtual Camera' },
+          },
+        ],
+      };
+      const res = await check(inv, body).expect(200);
+      expect(res.body).toEqual({ passed: true, blocking: [] });
+      await check(inv, body).expect(200);
+      const rows = await owner.proctorEvent.findMany({ where: { sessionId: inv.sessionId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        type: 'VIRTUAL_CAMERA',
+        source: 'CLIENT',
+        batchSeq: null,
+        severity: 'HIGH',
+      });
+      // The client's 2001 timestamp is clamped into [consent signed_at or now, now].
+      expect(rows[0]?.occurredAt.getTime()).toBeGreaterThan(Date.parse('2020-01-01'));
+    });
+
+    it('ADR 0013 section 3: a Sec-CH-UA brand that does not match the reported browser is recorded as advisory and never blocks', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const res = await check(inv, good, {
+        'Sec-CH-UA': '"Not-A.Brand";v="99", "Brave";v="124"',
+      }).expect(200);
+      expect(res.body).toEqual({ passed: true, blocking: [] });
+      expect((await deviceInfo(inv)).systemCheck).toMatchObject({ uaMismatch: true });
+      const same = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await check(same, good, {
+        'Sec-CH-UA': '"Chromium";v="124", "Google Chrome";v="124"',
+      }).expect(200);
+      expect((await deviceInfo(same)).systemCheck).toMatchObject({ uaMismatch: false });
+    });
+
+    it('FR-106, TC-056: only CONSENTED and VERIFIED sessions may check (409 SESSION_NOT_ACTIVE otherwise)', async () => {
+      for (const status of ['OPENED', 'IN_PROGRESS', 'SUBMITTED'] as SessionStatus[]) {
+        const inv = await invite({ status, session: { authEpoch: 1 } });
+        const res = await check(inv).expect(409);
+        expect(res.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE' });
+      }
+      const verified = await invite({ status: 'VERIFIED', session: { authEpoch: 1 } });
+      await check(verified).expect(200);
+    });
+
+    it('FR-402: a malformed body (unknown key, bad payload, too many findings) is a 400 with a fixed message and writes nothing', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const bads: object[] = [
+        { ...good, extra: 1 },
+        { ...good, browser: { brand: '', majorVersion: 1 } },
+        {
+          ...good,
+          findings: [{ type: 'VIRTUAL_CAMERA', occurredAt: new Date().toISOString(), payload: {} }],
+        },
+        {
+          ...good,
+          findings: [{ type: 'NO_FACE', occurredAt: new Date().toISOString(), payload: {} }],
+        },
+        { ...good, capabilities: [{ id: 'Bad Id', status: 'SUPPORTED' }] },
+      ];
+      for (const bad of bads) {
+        const res = await check(inv, bad).expect(400);
+        expect(JSON.stringify(res.body)).not.toContain('Bad Id');
+      }
+      expect((await deviceInfo(inv)).systemCheck).toBeUndefined();
+    });
+
+    it('ADR 0010, TC-056: the stored finding payload is the parsed shared schema (unknown keys dropped), and a padded or reordered repeat is not recorded again', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const finding = (payload: object) => ({
+        type: 'MULTI_MONITOR',
+        occurredAt: new Date().toISOString(),
+        payload,
+      });
+      await check(inv, {
+        ...good,
+        findings: [
+          finding({ api: 'SCREEN_IS_EXTENDED', screenCount: 2, junk: { big: 'x'.repeat(500) } }),
+        ],
+      }).expect(200);
+      await check(inv, {
+        ...good,
+        findings: [finding({ screenCount: 2, other: 1, api: 'SCREEN_IS_EXTENDED' })],
+      }).expect(200);
+      const rows = await owner.proctorEvent.findMany({ where: { sessionId: inv.sessionId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.payload).toEqual({ api: 'SCREEN_IS_EXTENDED', screenCount: 2 });
+    });
+
+    it('FR-402: a NUL character, a duplicate capability id and a 33rd capability are 400s, not 500s', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await check(inv, { ...good, browser: { brand: 'Chrome\u0000', majorVersion: 124 } }).expect(
+        400,
+      );
+      await check(inv, {
+        ...good,
+        capabilities: [
+          { id: 'fullscreen', status: 'SUPPORTED' },
+          { id: 'fullscreen', status: 'DENIED' },
+        ],
+      }).expect(400);
+    });
+
+    it('FR-609: the route is limited per session (10 a minute)', async () => {
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      for (let i = 0; i < 10; i++) await check(inv).expect(200);
+      await check(inv).expect(429);
+    });
+
+    it("FR-106: no token is 401 and a candidate of another session cannot write this one (the session is the token's)", async () => {
+      await request(server()).post(`${API}/system-check`).send(good).expect(401);
+      const a = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      const b = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await check(a).expect(200);
+      expect((await deviceInfo(b)).systemCheck).toBeUndefined();
+    });
   });
 });

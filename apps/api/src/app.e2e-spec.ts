@@ -177,11 +177,15 @@ describe('API foundation in production (NFR-04)', () => {
       JUDGE0_AUTHZ_TOKEN: 'b'.repeat(32),
       JWT_CANDIDATE_SECRET: 'x'.repeat(48),
       OTP_PEPPER: 'y'.repeat(48),
+      QUESTION_OPTION_ID_SECRET: 'z'.repeat(48),
       SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 9).toString('base64'),
       REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
       // Pilot and production require SES (C-31); nothing is sent in this suite.
       EMAIL_PROVIDER: 'ses',
       SES_FROM_ADDRESS: 'no-reply@test.invalid',
+      // Object storage (BE-09) is required in production too.
+      S3_REGION: 'eu-west-2',
+      S3_MEDIA_BUCKET: 'cp-test-media',
     });
     app = await createApp();
   });

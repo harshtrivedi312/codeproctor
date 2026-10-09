@@ -8,7 +8,7 @@
 // Prints per-table counts and the staff emails, never the password.
 import { resolve } from 'node:path';
 import { createPrismaClient } from '../apps/api/src/database/create-prisma-client';
-import { applySeed, countRows } from './seed/apply';
+import { applyApprovedDemoConsent, applySeed, countRows } from './seed/apply';
 import {
   SeedRefusal,
   assertResolvedHostIsLocal,
@@ -56,9 +56,17 @@ async function main(): Promise<void> {
     );
     const before = await countRows(client);
     await applySeed(client, plan, hashPassword);
+    // D-69: the dev-only approved demo consent text, and repointing the org to it. APP_ENV is already
+    // required to be "development" above; applyApprovedDemoConsent checks it again before it writes.
+    const demoConsent = await applyApprovedDemoConsent(client, process.env);
     const after = await countRows(client);
     printCounts(before, after);
     console.log('');
+    console.log(
+      demoConsent.madeCurrent
+        ? 'Approved demo consent text "0.2-local-demo" is now the current consent text (development only).'
+        : 'Approved demo consent text "0.2-local-demo" is in place (development only).',
+    );
     console.log('Staff accounts (development password, not printed here):');
     for (const user of plan.content.staff) console.log(`  ${user.role.padEnd(11)} ${user.email}`);
   } finally {

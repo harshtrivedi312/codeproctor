@@ -21,6 +21,7 @@ import { PrismaService } from '../database/prisma.service';
 import { CandidateScope } from './candidate-scope';
 import { SessionStateService } from '../session/session-state.service';
 import { SessionStateConflictError } from '../session/session-state.errors';
+import { isDemoTextRefused } from './demo-consent';
 import { declineContactOf } from './candidate-auth.service';
 import type { RequestInfo } from './candidate-auth.service';
 import type { CandidateContext } from './candidate.types';
@@ -78,6 +79,32 @@ export class ConsentService {
     return this.config.get('REQUIRE_LEGAL_APPROVED_CONSENT', { infer: true });
   }
 
+  /**
+   * A demo text in a shared environment is never served or accepted, signed or not (K2/F6): the
+   * same fixed answer as an unapproved text, with no hint of why.
+   */
+  private refuseDemoInSharedEnv(text: { version: string; legalApprovedBy: string | null }): void {
+    if (isDemoTextRefused(this.config, text)) {
+      this.logger.warn('Demo consent text refused in a shared environment');
+      throw coded(
+        HttpStatus.CONFLICT,
+        'The consent document has not been approved yet.',
+        'CONSENT_NOT_APPROVED',
+      );
+    }
+  }
+
+  /** When the session's consent was signed (the floor of an unsigned system-check finding's time). */
+  async signedAtOf(ctx: CandidateContext): Promise<Date | null> {
+    const row = await this.scope.asOrg(ctx, () =>
+      this.prisma.client.consent.findUnique({
+        where: { sessionId: ctx.sessionId },
+        select: { signedAt: true },
+      }),
+    );
+    return row?.signedAt ?? null;
+  }
+
   private async currentTextId(orgId: string): Promise<string | null> {
     const org = await this.prisma.client.organization.findUnique({
       where: { id: orgId },
@@ -111,7 +138,13 @@ export class ConsentService {
     const text = await this.scope.asOrg(ctx, () =>
       this.prisma.client.consentText.findUnique({
         where: { id: textId },
-        select: { id: true, version: true, bodyMd: true, legalApprovedAt: true },
+        select: {
+          id: true,
+          version: true,
+          bodyMd: true,
+          legalApprovedAt: true,
+          legalApprovedBy: true,
+        },
       }),
     );
     if (text === null) {
@@ -121,6 +154,7 @@ export class ConsentService {
         'CONSENT_NOT_CONFIGURED',
       );
     }
+    this.refuseDemoInSharedEnv(text);
     const approved = text.legalApprovedAt !== null;
     // A text already signed was served under the same rule; only an unsigned view is gated.
     if (existing?.signedAt == null && this.requireApproval() && !approved) {
@@ -189,7 +223,7 @@ export class ConsentService {
     }
     const text = await this.prisma.client.consentText.findUnique({
       where: { id: currentId },
-      select: { id: true, legalApprovedAt: true },
+      select: { id: true, version: true, legalApprovedAt: true, legalApprovedBy: true },
     });
     if (text === null) {
       throw coded(
@@ -198,6 +232,7 @@ export class ConsentService {
         'CONSENT_NOT_CONFIGURED',
       );
     }
+    this.refuseDemoInSharedEnv(text);
     if (this.requireApproval() && text.legalApprovedAt === null) {
       throw coded(
         HttpStatus.CONFLICT,

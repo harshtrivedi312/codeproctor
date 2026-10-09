@@ -209,6 +209,18 @@ export const mockCandidateExists = (id: string): boolean =>
   state.candidates.some((c) => c.id === id);
 export const mockCandidateIds = (): string[] => state.candidates.map((c) => c.id);
 
+/** Tests: what a landed staff invite leaves behind (the user row), for the unknown-outcome 500 fault. */
+export function addMockInvitedUser(email: string, name: string, role: Role): void {
+  state.users.push({
+    id: `user-${state.users.length + 1}-${Date.now()}`,
+    email: email.trim().toLowerCase(),
+    name,
+    role,
+    status: 'invited',
+    lastLoginAt: null,
+  });
+}
+
 /** Resets the in-memory mock (tests call this before each test). */
 export function resetMockAdminState(options: { legalApprovalRequired?: boolean } = {}): void {
   state = seed();

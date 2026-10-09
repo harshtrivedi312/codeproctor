@@ -39,9 +39,13 @@ jobs:
     name: P1 gate (unit, e2e, a11y) and coverage per module
     if: github.event_name != 'workflow_dispatch' || inputs.scan == 'none'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # The runner is discarded after the job, so the Testcontainers reaper (an image from Docker Hub) is not needed.
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
+      # The API refuses to boot without APP_ENV (DL-55). The test harness sets it too; this makes it explicit.
+      APP_ENV: test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,15 +120,27 @@ jobs:
 
       # Testcontainers starts throwaway Postgres 16 and Redis from the runner's own Docker; no
       # secret and no shared database is involved (apps/api/test/support/harness.ts).
+      # Testcontainers finds postgres and redis locally: they come from credential-free mirrors by digest
+      # (Docker Hub limits unauthenticated pulls and was failing runs). No Docker Hub token is used.
+      - name: Pull the test images from public mirrors
+        if: ${{ !cancelled() }}
+        run: sh infra/scripts/ci-pull-test-images.sh
+
       - name: API integration tests (Testcontainers)
         if: ${{ !cancelled() }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js -c test/jest.integration.config.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-int.json
 
       # The apps/api unit config also holds TC-008 (org isolation, src/database/tc-008-org-isolation.spec.ts).
       # Its JSON goes to the gate so TC-008 is read like any other P1 case.
       - name: API unit and org-isolation tests (TC-008)
         if: ${{ !cancelled() }}
-        run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --forceExit --json --outputFile=../../packages/qa/test-results/api-unit.json
+        env:
+          # One process for the whole suite: it outgrew the default heap (about 4 GB). --logHeapUsage prints the
+          # heap after each test file, so a leak shows as a curve that keeps rising, not as a plateau.
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm --filter @codeproctor/api exec node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --logHeapUsage --forceExit --json --outputFile=../../packages/qa/test-results/api-unit.json
 
       - name: Install the Playwright browser
         if: ${{ !cancelled() }}

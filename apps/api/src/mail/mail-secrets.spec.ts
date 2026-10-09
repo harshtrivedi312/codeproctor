@@ -1,9 +1,12 @@
+import { DirectMailSender } from './direct-mail.sender';
 import { InProcessEmailQueue } from './in-process-email-queue';
 import type { QueueLogger } from './in-process-email-queue';
 import { MailProcessor } from './mail-processor';
 import { MAX_ATTACHMENT_BYTES, MailError, MailTransport, ObjectReader } from './mail-transport';
 import type { OutgoingMail } from './mail-transport';
+import type { EmailJob } from './mail-templates';
 import { QueuedMailPort } from './queued-mail.port';
+import { SmtpDevMailTransport } from './smtp-dev-mail.transport';
 
 // Unique planted values: none of them may show up in any log line, thrown error or in-memory
 // record after a send, whether it succeeds or finally fails (CLAUDE.md, ADR 0003 section 6, C-31).
@@ -198,5 +201,48 @@ describe('C-31 planted secrets stay out of logs, errors and records', () => {
     );
     await p.handle({ template: 'consent-copy', to: TO, params: { pdfKey: KEY } });
     expect(asked).toBe(MAX_ATTACHMENT_BYTES);
+  });
+
+  it('C-31: the direct candidate templates (otp, otp-lockout, consent-copy) leak nothing on a failed send', async () => {
+    const real = new SmtpDevMailTransport({ host: '127.0.0.1', port: 1, fromAddress: 'a@b.c' });
+    const sender = new DirectMailSender(real);
+    const jobs: EmailJob[] = [
+      { template: 'otp', to: TO, params: { otp: OTP, minutes: 10 } },
+      {
+        template: 'otp-lockout',
+        to: TO,
+        params: { candidateEmail: TO, candidateName: 'PLANTEDNAME', minutes: 30 },
+      },
+      { template: 'consent-copy', to: TO, params: { documentVersion: 'v1' } },
+    ];
+    const out: string[] = [];
+    const spies = [
+      jest
+        .spyOn(process.stdout, 'write')
+        .mockImplementation((c: unknown) => (out.push(String(c)), true)),
+      jest
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((c: unknown) => (out.push(String(c)), true)),
+    ];
+    const caught: unknown[] = [];
+    try {
+      for (const job of jobs) {
+        try {
+          await sender.send(job, { filename: 'c.pdf', content: Buffer.from('%PDF-planted') });
+        } catch (e) {
+          caught.push(e);
+        }
+      }
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
+    expect(caught).toHaveLength(3);
+    for (const e of caught) {
+      expect(e).toBeInstanceOf(MailError);
+      expectClean(String(e) + JSON.stringify(e) + String((e as Error).stack));
+      expect(String(e)).not.toContain('PLANTEDNAME');
+      expect(String(e)).not.toContain('PLANTEDTEST');
+    }
+    expectClean(out.join(''));
   });
 });

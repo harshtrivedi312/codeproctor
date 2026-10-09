@@ -1,6 +1,7 @@
 import { api, type Schemas } from '@/lib/api/client';
+import { isBusyResponse } from '@/lib/api/busy';
 import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
-import { REAUTH_FAILED_CODE, ROLE_REQUIRED_CODE } from './schemas';
+import { REAUTH_FAILED_CODE } from './schemas';
 
 /*
  * Calls for the Security page. None of them may sign the user out: a wrong password is HTTP 403
@@ -17,14 +18,17 @@ export type Failure =
   | 'code'
   /** The state changed elsewhere (409), for example 2FA is already on. */
   | 'conflict'
-  /** 403 TWO_FACTOR_REQUIRED_FOR_ROLE: Super Admin and Reviewer cannot turn 2FA off. */
-  | 'role'
   /** Some other 403. */
   | 'forbidden'
   /** 401 even after a refresh. */
   | 'session'
   /** 503: try again in a moment (nothing was counted). */
   | 'busy'
+  /**
+   * The fixed 500 of the unknown-outcome routes (contract section 8, FU-BE-208): the commit may or
+   * may not have landed. Never retried; each caller recovers in its own way.
+   */
+  | 'outcomeUnknown'
   | 'network'
   | 'unknown';
 
@@ -36,7 +40,12 @@ interface Result<T> {
   response: Response;
 }
 
-async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcome<T>> {
+async function run<T>(
+  send: () => Promise<Result<T>>,
+  empty?: T,
+  /** True on the routes whose 500 means "outcome unknown" (setup/confirm, disable). */
+  outcomeUnknownOn500 = false,
+): Promise<Outcome<T>> {
   try {
     const stamp = captureSessionStamp();
     let result = await send();
@@ -51,21 +60,21 @@ async function run<T>(send: () => Promise<Result<T>>, empty?: T): Promise<Outcom
       return data === undefined ? { ok: false, failure: 'unknown' } : { ok: true, data };
     }
     if (response.status === 403) {
-      const code = error?.code;
       return {
         ok: false,
-        failure:
-          code === REAUTH_FAILED_CODE
-            ? 'password'
-            : code === ROLE_REQUIRED_CODE
-              ? 'role'
-              : 'forbidden',
+        failure: error?.code === REAUTH_FAILED_CODE ? 'password' : 'forbidden',
       };
     }
     if (response.status === 400) return { ok: false, failure: 'code' };
     if (response.status === 409) return { ok: false, failure: 'conflict' };
     if (response.status === 401) return { ok: false, failure: 'session' };
-    if (response.status === 503) return { ok: false, failure: 'busy' };
+    // Only the BUSY answer means nothing happened; any other 503 is an unknown outcome.
+    if (response.status === 503) {
+      return { ok: false, failure: (await isBusyResponse(response)) ? 'busy' : 'unknown' };
+    }
+    if (response.status === 500 && outcomeUnknownOn500) {
+      return { ok: false, failure: 'outcomeUnknown' };
+    }
     return { ok: false, failure: 'unknown' };
   } catch {
     return { ok: false, failure: 'network' };
@@ -83,17 +92,23 @@ export const startSetup = (currentPassword: string) =>
   run<SetupStart>(() => api.POST('/v1/auth/2fa/setup/start', { body: { currentPassword } }));
 
 export const confirmSetup = (currentPassword: string, code: string) =>
-  run<Schemas['RecoveryCodes']>(() =>
-    api.POST('/v1/auth/2fa/setup/confirm', { body: { currentPassword, code } }),
+  run<Schemas['RecoveryCodes']>(
+    () => api.POST('/v1/auth/2fa/setup/confirm', { body: { currentPassword, code } }),
+    undefined,
+    true,
   );
 
 export const disableTwoFactor = (currentPassword: string, totpCode: string) =>
-  run<true>(async () => {
-    const { error, response } = await api.POST('/v1/auth/2fa/disable', {
-      body: { currentPassword, totpCode: totpCode.trim() },
-    });
-    return { data: undefined, error, response };
-  }, true);
+  run<true>(
+    async () => {
+      const { error, response } = await api.POST('/v1/auth/2fa/disable', {
+        body: { currentPassword, totpCode: totpCode.trim() },
+      });
+      return { data: undefined, error, response };
+    },
+    true,
+    true,
+  );
 
 export const regenerateRecoveryCodes = (currentPassword: string) =>
   run<Schemas['RecoveryCodes']>(() =>

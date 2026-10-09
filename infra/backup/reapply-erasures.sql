@@ -1,13 +1,17 @@
--- Re-applies erasures after a restore (ADR 0004 R-7 and 9.7, DB-07). restore.sh runs this in one
+-- Re-applies erasures after a restore (ADR 0004 R-7 and 10.6, DB-07). restore.sh runs this in one
 -- psql session after it created the temp table
 --   _reapply_erasures (candidate_id uuid, erased_at timestamptz)
 -- from the erasure list kept outside the backup. Idempotent, except that sessions.auth_epoch only ever increases.
 --
 -- It mirrors the database part of erasure (docs/database.md "Erasure on request", C-17). Objects
 -- are not touched: those deleted at erasure time stay deleted. The consent record is KEPT (C-17).
--- docs/followups/database.md FU-DBB-01: keep this in step with DB-06's erasure service. Known gaps
--- until then: it ignores the review/appeal hold, anonymises at once instead of at day 28, and sets no
--- ERASED status (the value does not exist yet).
+-- Follows ADR 0004 10.6 (accepted, D-83) and the erasure service (FU-DBB-01, FU-DBB-23): the list does not
+-- record the stage, so every listed candidate gets the full fence (every session ERASED, open appeals
+-- CLOSED_ERASED, epoch bumped), the accommodations reduced as the service does (ADR 0015 section 7), and the
+-- candidate row anonymised at once. The request is recorded (erasure_requested_at) so the erasure sweep still
+-- finishes the purge. Not built (FU-DBB-32): active legal holds and the review/appeal hold window of 10.6
+-- (a), (b) are not applied. Known limit (FU-DBB-31b): no completion notice is sent (the candidate row is
+-- already anonymised and the list records no notice), and a restore wipes the ERASURE_* audit rows.
 \set ON_ERROR_STOP on
 BEGIN;
 
@@ -39,10 +43,13 @@ WHERE session_question_id IN (
 UPDATE session_reviews SET notes = NULL
 WHERE session_id IN (SELECT id FROM _reapply_sessions) AND notes IS NOT NULL;
 
-UPDATE appeals SET resolution_note = NULL, reason = 'Erased'
+UPDATE appeals
+SET resolution_note = NULL,
+    reason = 'Erased',
+    status = CASE WHEN status = 'OPEN' THEN 'CLOSED_ERASED'::appeal_status ELSE status END
 WHERE session_review_id IN (
         SELECT id FROM session_reviews WHERE session_id IN (SELECT id FROM _reapply_sessions))
-  AND (resolution_note IS NOT NULL OR reason <> 'Erased');
+  AND (resolution_note IS NOT NULL OR reason <> 'Erased' OR status = 'OPEN');
 
 -- Session credentials (ADR 0004 9.7 fence): a restore brings back the old epoch and HMAC key. Every
 -- OTP success raises auth_epoch (ADR 0002, ADR 0013), so a token issued after the backup carries an
@@ -52,6 +59,7 @@ WHERE session_review_id IN (
 -- the bump is kept here deliberately so this file is safe to run on its own.
 UPDATE sessions
 SET device_info = '{}',
+    status = 'ERASED',
     auth_epoch = auth_epoch + 1000000,
     hmac_key_enc = NULL,
     report_key = NULL,
@@ -60,6 +68,32 @@ SET device_info = '{}',
       JOIN invitations i ON i.candidate_id = e.candidate_id
       WHERE i.id = sessions.invitation_id))
 WHERE id IN (SELECT id FROM _reapply_sessions);
+
+-- Record the request, so the erasure service finds the candidate on its next sweep (the purge, the
+-- completion row and the list completion).
+UPDATE candidates c
+SET erasure_requested_at = e.erased_at
+FROM _reapply_erasures e
+WHERE c.id = e.candidate_id AND c.erasure_requested_at IS NULL;
+
+-- Accommodations (ADR 0015 section 7, mirrors reduceAccommodations in apps/api/src/retention): keep which
+-- settings were used and the fact of a waiver; drop the free-text notes and the waiver's reason.
+CREATE TEMP TABLE _reapply_accommodations ON COMMIT DROP AS
+SELECT i.id,
+       (SELECT coalesce(jsonb_object_agg(t.k, t.v), '{}'::jsonb)
+          FROM jsonb_each(i.accommodations) AS t(k, v)
+         WHERE t.k IN ('extraTimePct', 'disabledDetectors', 'allowedAssistiveTools'))
+       || CASE WHEN jsonb_typeof(i.accommodations -> 'identityCheckWaiver') = 'object'
+                 OR i.accommodations -> 'identityCheckWaived' = 'true'::jsonb
+               THEN '{"identityCheckWaived": true}'::jsonb ELSE '{}'::jsonb END AS reduced
+FROM invitations i
+JOIN _reapply_erasures e ON e.candidate_id = i.candidate_id
+WHERE jsonb_typeof(i.accommodations) = 'object';
+
+UPDATE invitations i
+SET accommodations = a.reduced
+FROM _reapply_accommodations a
+WHERE i.id = a.id AND i.accommodations <> a.reduced;
 
 UPDATE candidates c
 SET email = 'erased+' || c.id || '@invalid',

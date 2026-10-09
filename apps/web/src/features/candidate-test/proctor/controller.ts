@@ -2,6 +2,7 @@ import type { ClientProctorEvent, ProctorDetector } from '@codeproctor/shared';
 import {
   IdbStore,
   ProctorSession,
+  type KeystrokeRecorder,
   RecordingPipeline,
   STORES,
   createDefaultMonitors,
@@ -31,8 +32,8 @@ import { PROCTOR_PAUSE, proctorKeySchema, type HeartbeatState, type ProctorKey }
  * purges the signed batches and the recording chunks from the browser and releases every device
  * (ADR 0013 section 2, Purge). Other endings keep the outbox for the next page load.
  *
- * Not done yet (docs/followups/frontend.md): keystroke batches (FR-608: the SDK has no keystroke
- * queue), the ML detectors (FR-606, FR-607: WebAssembly is not allowed by the CSP in this
+ * Keystroke batches (FR-608) go through the same session: `keystrokes()` is the recorder the answer
+ * editor feeds. Not done yet (docs/followups/frontend.md): the ML detectors (FR-606, FR-607: WebAssembly is not allowed by the CSP in this
  * document; they are reported as unavailable, not silently absent), key persistence and re-signing
  * after an epoch change (the SDK has no setKey hooks), and the side camera stream.
  */
@@ -48,6 +49,12 @@ export interface ProctorUiState {
   shared: boolean;
   /** Why the test cannot go on: the session is over, or a new code is needed. */
   endedBecause: null | 'not-active' | 'reauth' | 'key';
+  /**
+   * The server said "not active" while the candidate's own last-section submit was under way: the
+   * session is submitted. Nothing was purged or ended; the test screen moves to its submitted page,
+   * which then calls finish().
+   */
+  serverClosed: boolean;
   /** A blocked action to tell the candidate about (paste, drop, shortcut), cleared by the UI. */
   notice: null | { kind: NoticeKind; at: number };
   /** Recording that did not start (camera or microphone denied, recording not supported). */
@@ -63,12 +70,13 @@ export const initialProctorState: ProctorUiState = {
   online: true,
   shared: false,
   endedBecause: null,
+  serverClosed: false,
   notice: null,
   unavailable: [],
 };
 
 /** The SDK's own counter backup in localStorage (a batch number, no candidate data). */
-const SEQ_BACKUP_PREFIX = 'codeproctor:eventseq:';
+const SEQ_BACKUP_PREFIXES = ['codeproctor:eventseq:', 'codeproctor:keystrokeseq:'] as const;
 
 /**
  * The SDK's own storage. When IndexedDB does not exist at all (some privacy modes), the SDK's
@@ -104,6 +112,13 @@ export async function seedCounters(
       const key = `${sessionId}:nextEventSeq`;
       const local = (await store.get<number>(STORES.meta, key)) ?? 0;
       await store.put(STORES.meta, key, Math.max(local, counters.eventSeqStart));
+    }
+    if (counters.keystrokeSeqStart !== undefined) {
+      // The keystroke stream has its own sequence (FR-608): without this a resume on another device
+      // restarts at 0 and the server answers SEQ_CONFLICT for the first batches, RESET included.
+      const key = `${sessionId}:nextKeystrokeSeq`;
+      const local = (await store.get<number>(STORES.meta, key)) ?? 0;
+      await store.put(STORES.meta, key, Math.max(local, counters.keystrokeSeqStart));
     }
     for (const stream of MEDIA_STREAMS) {
       const c = counters.media?.[stream];
@@ -223,6 +238,10 @@ export class ProctorController {
   private dropping = false;
   private stopped = false;
   private finishing = false;
+  /** The candidate's own last-section finish is in flight or accepted: "not active" is the normal end. */
+  private submitting = false;
+  /** A "not active" met while submitting; acted on as soon as the submit settles without a submit. */
+  private notActiveWhileSubmitting = false;
   private torn = false;
 
   constructor(private readonly o: ProctorControllerOptions) {}
@@ -239,14 +258,50 @@ export class ProctorController {
     for (const l of this.listeners) l(this.state);
   }
 
+  /**
+   * The SDK's keystroke recorder for the answer editor (FR-608, TC-062): null until the proctor
+   * session has started, and null when the transport cannot send keystroke batches. It is closed by
+   * the session on stop() and finish(), so nothing is recorded after the test ends (FR-702).
+   */
+  keystrokes(): KeystrokeRecorder | null {
+    return this.session.keystrokes;
+  }
+
   /** Clears the "blocked action" notice once the UI has shown it. */
   clearNotice(): void {
     this.set({ notice: null });
   }
 
+  /**
+   * Called by the test screen around the candidate's own last-section finish (on before the request,
+   * off again if the finish did not go through, or when another section opens). While it is on, the
+   * server's "not active" (the session is SUBMITTED once the close lands) is the normal end of the
+   * candidate's own submit, not a reason to purge and show "no longer running": it is remembered
+   * (state.serverClosed) and the test screen moves to its submitted page, which calls finish().
+   * Turning it off acts on a remembered "not active" at once, so a real time-out or proctor end
+   * is never swallowed for good.
+   */
+  setSubmitting(on: boolean): void {
+    this.submitting = on;
+    if (!on && this.notActiveWhileSubmitting) {
+      this.notActiveWhileSubmitting = false;
+      // end() only acts if the test is still running. If finish() already started (the submitted
+      // page is up) the page must not be withdrawn, so serverClosed stays as it is.
+      if (this.finishing || this.stopped || this.state.endedBecause) return;
+      this.set({ serverClosed: false });
+      this.end('not-active', true);
+    }
+  }
+
   private end(because: NonNullable<ProctorUiState['endedBecause']>, purge: boolean): void {
     // While finishing (or already stopped) the server's "not active" is the normal end.
     if (this.state.endedBecause || this.stopped || this.finishing) return;
+    // The same holds from the moment the candidate submits their last section: remember it.
+    if (this.submitting && because === 'not-active') {
+      this.notActiveWhileSubmitting = true;
+      this.set({ serverClosed: true });
+      return;
+    }
     this.set({ phase: 'ended', endedBecause: because });
     void this.teardown({ purge });
   }
@@ -320,7 +375,9 @@ export class ProctorController {
     });
     this.session.on('connection', (c) => {
       // A failed heartbeat only means "offline" if the session is still alive.
-      if (!this.state.endedBecause) this.set({ online: c.online });
+      // (Also not while a submit is under way: a "not active" heartbeat is not "offline".)
+      if (!this.state.endedBecause && !this.notActiveWhileSubmitting)
+        this.set({ online: c.online });
     });
     this.session.on('capability', (f) => this.noteCapability(f.id, f.status));
     this.session.on('event', (e) => this.onEvent(e));
@@ -376,6 +433,7 @@ export class ProctorController {
   private health(): HeartbeatHealth {
     const rec = this.pipeline?.health();
     const queue = this.session.getQueueStats();
+    const ks = this.session.getKeystrokeStats();
     return {
       ...(rec
         ? {
@@ -396,8 +454,10 @@ export class ProctorController {
         ? {
             queue: {
               pendingEventBatches: queue.unsentBatches,
-              pendingKeystrokeBatches: 0,
-              rejectedBatches: queue.rejectedBatches,
+              pendingKeystrokeBatches: ks?.unsentBatches ?? 0,
+              // Batches the server refused or the SDK could not send, events and keystrokes: a
+              // sequence gap shows the hole, this says how many were dropped (FR-608, ADR 0013 5.8).
+              rejectedBatches: queue.rejectedBatches + (ks?.rejectedBatches ?? 0),
             },
           }
         : {}),
@@ -461,7 +521,9 @@ export class ProctorController {
    * its upload queue and segment counter) for it. Stopping the recorder flushes a last chunk into
    * the SDK's storage. When the data is being purged or the test finished, that would leave a clip
    * on disk after the purge, so finish the pipeline with no drain and purge the store again. When
-   * the page is only being left, the chunk is kept for the next load.
+   * the page is only being left, an older SDK keeps that chunk for the next load; a newer one
+   * (SDK #366) refuses devices once it is closing and never starts the recorder. Either is fine:
+   * nothing here depends on a late recorder after stop().
    */
   private async dropLate(stream: (typeof MEDIA_STREAMS)[number]): Promise<void> {
     if (!this.pipeline) return;
@@ -470,7 +532,8 @@ export class ProctorController {
       await this.discardLate();
       return;
     }
-    // Finishing normally, or only leaving the page: stop the recorder so its last chunk is flushed.
+    // Finishing normally, or only leaving the page: stop the recorder (if the SDK started one) so
+    // its last chunk is flushed.
     await this.pipeline.stopStream(stream).catch(() => undefined);
     if (this.finishing) {
       // That chunk joins the real drain of the final evidence (the screen, webcam and audio chunks
@@ -575,10 +638,12 @@ export class ProctorController {
     if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
   }
 
-  /** The SDK keeps a batch counter per session in localStorage; it goes when the test ends. */
+  /** The SDK keeps a batch counter per stream and session in localStorage; they go when the test ends. */
   private removeSeqBackup(): void {
     try {
-      globalThis.localStorage?.removeItem(`${SEQ_BACKUP_PREFIX}${this.o.sessionId}`);
+      for (const prefix of SEQ_BACKUP_PREFIXES) {
+        globalThis.localStorage?.removeItem(`${prefix}${this.o.sessionId}`);
+      }
     } catch {
       // storage disabled
     }

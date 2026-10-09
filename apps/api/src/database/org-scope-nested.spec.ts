@@ -65,8 +65,8 @@ const WRITE_OPERATIONS: Array<[string, (data: Args) => Args]> = [
 describe('nested relation writes are denied by default (NFR-04, FR-103; ADR 0006 section 8)', () => {
   const relations = relationKeys().map((key) => key.split('.') as [ModelName, string]);
 
-  it('TC-008 the relation table covers all 118 relation fields of the schema, both sides of 59 foreign keys', () => {
-    expect(relations).toHaveLength(118);
+  it('TC-008 the relation table covers all 124 relation fields of the schema, both sides of 62 foreign keys', () => {
+    expect(relations).toHaveLength(124);
   });
 
   it.each(NESTED_OPERATIONS)(

@@ -64,6 +64,8 @@ export const BE03_READY: boolean = BE03_DEFAULT || process.env.BE03_READY === '1
 export const BE04_READY: boolean = BE04_DEFAULT;
 export const BE06_READY: boolean = BE06_DEFAULT;
 export const BE13_READY: boolean = BE13_DEFAULT || process.env.BE13_READY === '1';
+// The 'review-flag' row has no route on main (FU-BE-235): it needs its own switch, not BE13_READY.
+export const BE13_FLAG_READY: boolean = process.env.BE13_FLAG_READY === '1';
 
 export { PRINCIPALS, USER_ROLES };
 export type { Permission, Principal };
@@ -142,6 +144,19 @@ export const COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   // Org settings (FU-BE-133): role matrix, isolation, step-up (PATCH needs currentPassword) and audit in apps/api/src/org-settings/org-settings.e2e-spec.ts.
   'GET /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
   'PATCH /admin/org-settings': 'apps/api/src/org-settings/org-settings.e2e-spec.ts',
+  // Invitations (FR-303, BE-06 slice 6c): role matrix, isolation, audit and races in apps/api/src/invitations/invitations.e2e-spec.ts.
+  'POST /tests/:id/invitations': 'apps/api/src/invitations/invitations.e2e-spec.ts',
+  // Reviewer read API (REVIEWER and SUPER_ADMIN): role matrix, cross-org 404, audit in apps/api/src/review/review.e2e-spec.ts. BE13_DEFAULT stays false.
+  'GET /review/queue': 'apps/api/src/review/review.e2e-spec.ts',
+  'GET /review/sessions/:id': 'apps/api/src/review/review.e2e-spec.ts',
+  'GET /review/sessions/:id/recordings/:recordingId/playback':
+    'apps/api/src/review/review.e2e-spec.ts',
+  // Reviewer decisions (BE-13, Backend A PR #358): role matrix (REVIEWER and SUPER_ADMIN), cross-org 404, the audit row written in the
+  // decision's own transaction (not @Audited) and the fixtures (an UNDER_REVIEW session with no MANUAL_PENDING answer for the verdict) live in
+  // apps/api/src/review/review-decisions.e2e-spec.ts.
+  'PATCH /review/sessions/:sessionId/answers/:sessionQuestionId':
+    'apps/api/src/review/review-decisions.e2e-spec.ts',
+  'POST /review/sessions/:id/verdict': 'apps/api/src/review/review-decisions.e2e-spec.ts',
 };
 
 /** What a route needs before a call: a path with real ids and a body, built per call. */
@@ -1466,14 +1481,18 @@ export const BE03_ROUTES: Be03Route[] = [
     },
   },
   // Review routes: BE-13, from docs/fsd.md section 4. Kept here so TC-004 (reviewer opens a review)
-  // and TC-006 use one list. Switched on by BE13_READY.
+  // and TC-006 use one list. Switched on by BE13_READY. The verdict and answer-score routes are built
+  // (PR #358) and covered in review-decisions.e2e-spec.ts (COVERED_ELSEWHERE). 'review-flag' has NO
+  // backend route on main (FU-BE-235), so it stays off even when BE13_READY is on (BE13_FLAG_READY=1 only
+  // for a trial run).
   {
     id: 'review-queue',
     step: 'BE-13',
     method: 'GET',
     template: '/review/queue',
     permission: 'review_queue:read',
-    audit: null, // ASSUMED: the queue lists sessions but opens none
+    audit: { action: 'REVIEW_QUEUE_VIEWED', entityType: 'session' }, // built: apps/api/src/review
+    interceptor: true,
     mutating: false,
     ok: [200],
     prepare: () =>
@@ -1490,7 +1509,8 @@ export const BE03_ROUTES: Be03Route[] = [
     template: '/review/sessions/:id',
     permission: 'review_session:read',
     // TC-006 expected result: a row with actor, entity, IP when a reviewer opens a review. FR-105.
-    audit: { action: 'REVIEW_SESSION_VIEWED', entityType: 'session' }, // ASSUMED action name
+    audit: { action: 'REVIEW_SESSION_VIEWED', entityType: 'session' }, // built: apps/api/src/review
+    interceptor: true,
     mutating: false, // a read, but audited: the audit test treats `audit !== null` as the rule
     ok: [200],
     prepare: async (h, orgId) => {
@@ -1522,27 +1542,6 @@ export const BE03_ROUTES: Be03Route[] = [
         secrets: [],
         unchanged: async () =>
           (await h.owner.flagDecision.count({ where: { eventId: BigInt(f.eventId) } })) === 0,
-      };
-    },
-  },
-  {
-    id: 'review-verdict',
-    step: 'BE-13',
-    method: 'POST',
-    template: '/review/sessions/:id/verdict',
-    permission: 'review_verdict:set',
-    audit: { action: 'REVIEW_VERDICT_SET', entityType: 'session' }, // ASSUMED
-    mutating: true,
-    ok: [200, 201],
-    prepare: async (h, orgId) => {
-      const f = await sessionFixture(h, orgId);
-      return {
-        path: `/review/sessions/${f.sessionId}/verdict`,
-        body: { verdict: 'CLEAN', note: 'QA note' }, // ASSUMED body
-        entityId: f.sessionId,
-        secrets: [],
-        unchanged: async () =>
-          (await h.owner.sessionReview.count({ where: { sessionId: f.sessionId } })) === 0,
       };
     },
   },
@@ -1597,8 +1596,18 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/consent/sign', permission: 'candidate_consent:sign' },
   { key: 'POST /candidate/session/consent/decline', permission: 'candidate_consent:decline' },
   { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+  // Render projection (Backend B): the running test's layout and one question of the open section.
+  { key: 'GET /candidate/session/test', permission: 'candidate_session:read' },
+  { key: 'GET /candidate/questions/:questionId', permission: 'candidate_session:read' },
+  // BE-08 accommodations projection (Backend A, PR #339): read-only, reuses the session read permission.
+  { key: 'GET /candidate/session/accommodations', permission: 'candidate_session:read' },
+  // FR-406 practice question (Backend A, PR #342): fixed content, nothing stored; run reuses the answer-run permission.
+  { key: 'GET /candidate/session/practice', permission: 'candidate_session:read' },
+  { key: 'POST /candidate/session/practice/run', permission: 'candidate_answer:run' },
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
+  // System check (Backend B, PR #340): reuses the heartbeat permission (FU-BEB-152).
+  { key: 'POST /candidate/session/system-check', permission: 'candidate_session:heartbeat' },
   { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
   // BE-09 media (Backend B, PR #119): confirm reuses the presign permission.
   { key: 'POST /candidate/session/media/presign', permission: 'candidate_media:presign' },
@@ -1608,6 +1617,9 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/identity/presign', permission: 'candidate_identity:upload' },
   { key: 'POST /candidate/session/identity', permission: 'candidate_identity:upload' },
   { key: 'GET /candidate/session/identity', permission: 'candidate_identity:upload' },
+  // BE-10 proctor event ingestion (Integrity A, PR #301): signed batches, ADR 0013 section 2.
+  { key: 'POST /candidate/session/events', permission: 'candidate_events:write' },
+  { key: 'POST /candidate/session/keystrokes', permission: 'candidate_keystrokes:write' },
   // BE-11 answers and finish (Backend B, PR #187, gated): keys and permissions as registered on that branch.
   { key: 'POST /candidate/answers/:questionId/run', permission: 'candidate_answer:run' },
   { key: 'POST /candidate/answers/:questionId/submit', permission: 'candidate_answer:submit' },
@@ -1687,4 +1699,4 @@ export function candidateRegistryProblems(input: {
 }
 
 export const routesFor = (step: Be03Route['step']): Be03Route[] =>
-  BE03_ROUTES.filter((r) => r.step === step);
+  BE03_ROUTES.filter((r) => r.step === step && (r.id !== 'review-flag' || BE13_FLAG_READY));

@@ -9,8 +9,10 @@
 // organizations.current_consent_text_id and questions.current_version_id.
 // The five identity ids are never set.
 import type { PrismaClient } from '../../apps/api/src/generated/prisma/client';
+import { DEMO_APPROVED_CONSENT_VERSION, buildApprovedDemoConsentText } from './demo-consent';
 import { eventKey } from './delivery';
-import { DEMO_PASSWORD } from './guard';
+import { DEMO_PASSWORD, requireDevelopment } from './guard';
+import type { SeedEnv } from './guard';
 import { ID } from './ids';
 import type { PasswordHasher } from './passwords';
 import type { SeedPlan } from './plan';
@@ -307,4 +309,53 @@ export async function applySeed(
   }
 
   return inserted;
+}
+
+/** What applyApprovedDemoConsent did, for the seed's printed summary and the tests. */
+export interface ApprovedDemoConsentResult {
+  /** 1 when the row was inserted this run, 0 when it already existed (idempotent). */
+  readonly inserted: number;
+  /** True when this run repointed the organisation's current consent text to the demo row. */
+  readonly madeCurrent: boolean;
+}
+
+/**
+ * Writes the dev-only approved demo consent text (D-69) and makes it the organisation's current text, so
+ * the candidate flow can be shown end to end. REFUSES unless APP_ENV is exactly "development": the whole
+ * seed already requires that (prisma/seed.ts, guard.ts), and this is a second, independent check right at
+ * the approved-row write, so it still holds if the outer guard is ever loosened. Idempotent: the row is an
+ * upsert on (orgId, version) and the repoint only moves the org off the placeholder (or an unset) text, so
+ * a re-run of `pnpm db:seed` with no reset adds it once and then changes nothing. Separate from applySeed
+ * so the core seed, and its "a second run inserts nothing" test, never depend on APP_ENV.
+ */
+export async function applyApprovedDemoConsent(
+  client: PrismaClient,
+  env: SeedEnv,
+): Promise<ApprovedDemoConsentResult> {
+  requireDevelopment(env);
+  const row = buildApprovedDemoConsentText();
+  const before = await client.consentText.count({
+    where: { orgId: row.orgId, version: DEMO_APPROVED_CONSENT_VERSION },
+  });
+  // update: {} keeps the re-run idempotent (the version is the natural key). So an edit to the body, title
+  // or approval marker only reaches an already-seeded local DB when DEMO_APPROVED_CONSENT_VERSION is bumped.
+  await client.consentText.upsert({
+    where: { orgId_version: { orgId: row.orgId, version: DEMO_APPROVED_CONSENT_VERSION } },
+    create: row,
+    update: {},
+  });
+  // Point the org at the demo text, but only when it points at the placeholder, nothing, or a prior demo
+  // text this bump supersedes (M1): never move it off a text someone set deliberately. A no-op once it
+  // already points at the current demo row.
+  const { count } = await client.organization.updateMany({
+    where: {
+      id: ID.org,
+      OR: [
+        { currentConsentTextId: { in: [ID.consentText, ...ID.supersededDemoConsentTexts] } },
+        { currentConsentTextId: null },
+      ],
+    },
+    data: { currentConsentTextId: ID.approvedConsentText },
+  });
+  return { inserted: before === 0 ? 1 : 0, madeCurrent: count > 0 };
 }
