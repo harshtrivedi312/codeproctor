@@ -77,7 +77,8 @@ function answers(pendingShort: boolean): Answer[] {
       score: 20,
       scoring: 'AUTO',
       scoringNote: null,
-      answer: { selectedOptionIds: ['o-2'] },
+      // The API stores { optionIds } (grading/answer-shapes.ts).
+      answer: { optionIds: ['o-2'] },
     },
     {
       sessionQuestionId: 'sq-3',
@@ -88,7 +89,7 @@ function answers(pendingShort: boolean): Answer[] {
       score: pendingShort ? null : 30,
       scoring: pendingShort ? 'MANUAL_PENDING' : 'AUTO',
       scoringNote: null,
-      answer: 'Calling it many times has the same effect on the server as calling it once.',
+      answer: { text: 'Calling it many times has the same effect on the server as calling it once.' },
     },
   ];
 }

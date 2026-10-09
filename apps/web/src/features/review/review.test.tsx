@@ -189,11 +189,78 @@ describe('FR-902 review session', () => {
     expect(alert).not.toHaveTextContent(/short answers still need scoring/);
   });
 
-  it('FR-902 C-28: scoring controls and the verdict form are hidden unless the session is under review with no verdict', async () => {
+  it('FR-902 C-28: scoring controls and the verdict form are hidden once a verdict is set or the session is past review', async () => {
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/rs-5`, () =>
+        HttpResponse.json({
+          ...bundleNoPending(),
+          session: { ...bundleNoPending().session, status: 'COMPLETED' },
+        }),
+      ),
+    );
     renderAsStaff(<ReviewSessionPage sessionId="rs-5" />, U);
-    await screen.findByRole('heading', { name: 'Aisha Khan' });
+    await screen.findByRole('heading', { name: 'Marco Silva' });
     expect(screen.queryByRole('button', { name: 'Set verdict' })).not.toBeInTheDocument();
     expect(screen.getByText(/only while the session is under review/)).toBeInTheDocument();
+  });
+
+  it('FR-902: a GRADED session shows the verdict form (the API moves it to under review; a 409 reloads)', async () => {
+    renderAsStaff(<ReviewSessionPage sessionId="rs-5" />, U);
+    await screen.findByRole('heading', { name: 'Aisha Khan' });
+    expect(screen.getByRole('button', { name: 'Set verdict' })).toBeEnabled();
+  });
+
+  it('FR-901: the real answer shapes { optionIds } and { text } are shown as options and text, not JSON', async () => {
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    expect(screen.getByText('o-2')).toBeInTheDocument();
+    expect(screen.getByText(/Calling it many times/)).not.toHaveTextContent('{"text"');
+    expect(screen.queryByText(/"optionIds"/)).not.toBeInTheDocument();
+  });
+
+  it('FR-902 D-23: a stub-graded coding answer can be scored by hand even though its scoring is AUTO', async () => {
+    const b = {
+      ...bundleNoPending(),
+      answers: [
+        {
+          sessionQuestionId: 'sq-9',
+          type: 'CODING',
+          title: 'Stubbed',
+          statement: 's',
+          points: 10,
+          score: 10,
+          scoring: 'AUTO',
+          scoringNote: null,
+          answer: { language: 'python', code: 'print(1)' },
+          runResults: [
+            {
+              at: '2026-10-05T09:00:00.000Z',
+              passed: 1,
+              total: 1,
+              tests: [{ name: 't1', status: 'LOCAL_STUB' }],
+            },
+          ],
+        },
+      ],
+    };
+    server.use(http.get(`${apiBaseUrl}/v1/review/sessions/rs-2`, () => HttpResponse.json(b)));
+    renderAsStaff(<ReviewSessionPage sessionId="rs-2" />, U);
+    await screen.findByRole('heading', { name: 'Marco Silva' });
+    expect(screen.getAllByRole('button', { name: /^Correct/ })).toHaveLength(1);
+    expect(screen.getByText(/ran on the local stub/)).toBeInTheDocument();
+  });
+
+  it('FR-902: a scoring 404 explains that the answer is gone', async () => {
+    const u = userEvent.setup();
+    server.use(
+      http.patch(`${apiBaseUrl}/v1/review/sessions/:s/answers/:q`, () =>
+        HttpResponse.json({ status: 404, title: 'Not Found', detail: 'x' }, { status: 404 }),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /^Incorrect/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer exists/);
   });
 
   it('FR-701: Play downloads every part in seq order into one Blob and plays it from an object URL', async () => {

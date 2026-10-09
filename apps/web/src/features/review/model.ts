@@ -100,8 +100,14 @@ export function answerBody(answer: ReviewAnswer): AnswerBody {
   if (Array.isArray(a)) return { kind: 'options', ids: a.map((x) => String(x)) };
   if (typeof a === 'object') {
     const o = a as Record<string, unknown>;
-    if (Array.isArray(o['selectedOptionIds'])) {
-      return { kind: 'options', ids: o['selectedOptionIds'].map((x) => String(x)) };
+    // The API stores { optionIds } for MCQ and { text } for SHORT_ANSWER (grading/answer-shapes.ts);
+    // the other member names are kept for older rows and the e2e fixtures.
+    for (const key of ['optionIds', 'selectedOptionIds', 'selected']) {
+      const v = o[key];
+      if (Array.isArray(v)) return { kind: 'options', ids: v.map((x) => String(x)) };
+    }
+    if (typeof o['text'] === 'string' && o['code'] === undefined) {
+      return { kind: 'text', text: o['text'] };
     }
     if (typeof o['code'] === 'string') {
       return {
@@ -118,15 +124,26 @@ export type ScoringState = 'auto' | 'pending' | 'manual';
 export function scoringState(a: ReviewAnswer): ScoringState {
   return a.scoring === 'MANUAL_PENDING' ? 'pending' : a.scoring === 'MANUAL' ? 'manual' : 'auto';
 }
-export const canScoreManually = (a: ReviewAnswer): boolean =>
-  a.type === 'SHORT_ANSWER' && a.scoring !== 'AUTO';
+
+/** A coding run that the local execution stub answered: not real execution, so a person decides. */
+export const isStubGraded = (a: ReviewAnswer): boolean =>
+  (a.runResults ?? []).some((r) => r.tests.some((t) => t.status.toUpperCase() === 'LOCAL_STUB'));
 
 /**
- * Scoring and the verdict apply only to a session UNDER_REVIEW with no verdict yet
- * (docs/api-contract.md section 7: GRADED, COMPLETED and APPEALED sessions are 409).
+ * Follows the answer's own `scoring` field, not its type: a MANUAL or MANUAL_PENDING answer can be
+ * decided, and so can a stub-graded coding answer (development only). The API stays the judge: any
+ * other answer is 409 ANSWER_NOT_MANUAL, which the card explains.
+ */
+export const canScoreManually = (a: ReviewAnswer): boolean =>
+  a.scoring !== 'AUTO' || isStubGraded(a);
+
+/**
+ * Scoring and the verdict apply while the session is UNDER_REVIEW (or GRADED, which moves to
+ * UNDER_REVIEW right after grading) and has no verdict yet. The API checks the status itself and a
+ * 409 SESSION_NOT_UNDER_REVIEW reloads the page, so the controls follow the status field only.
  */
 export const isDecidable = (s: ReviewSession): boolean =>
-  s.session.status === 'UNDER_REVIEW' && verdictOf(s) === null;
+  (s.session.status === 'UNDER_REVIEW' || s.session.status === 'GRADED') && verdictOf(s) === null;
 
 export const pendingCount = (s: ReviewSession): number =>
   s.answers.filter((a) => a.scoring === 'MANUAL_PENDING').length;

@@ -35,6 +35,15 @@ function verdictError(e: unknown): string {
     return 'The session changed since you opened it. The page has been reloaded; check it and try again.';
   }
   if (e instanceof ApiFailure && e.status === 403) return 'Your role cannot set a verdict.';
+  if (e instanceof ApiFailure && e.status === 404) {
+    return 'This session no longer exists for your organisation. Go back to the review queue.';
+  }
+  if (e instanceof ApiFailure && e.status === 400) {
+    return 'The note was not accepted. Remove unusual control characters and keep it under 2000 characters.';
+  }
+  if (e instanceof ApiFailure && e.status === 503) {
+    return 'The service is busy and the verdict was not saved. Wait a moment and try again.';
+  }
   return 'The verdict was not saved. Check your connection and try again.';
 }
 

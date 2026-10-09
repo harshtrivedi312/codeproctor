@@ -37,6 +37,15 @@ export function scoringErrorMessage(e: unknown): string {
       return 'A verdict is already set for this session, so scores can no longer change.';
     }
     if (e.status === 403) return 'Your role cannot score answers.';
+    if (e.status === 404) {
+      return 'This answer or session no longer exists for your organisation. Go back to the review queue and open it again.';
+    }
+    if (e.status === 400) {
+      return 'The note was not accepted. Remove unusual control characters and keep it under 1000 characters.';
+    }
+    if (e.status === 503) {
+      return 'The service is busy and the decision was not saved. Wait a moment and press the button again.';
+    }
   }
   return 'The decision was not saved. Check your connection and try again.';
 }
@@ -208,7 +217,9 @@ function ManualScore({
       <p className="text-sm font-medium">
         {answer.scoring === 'MANUAL_PENDING'
           ? 'This answer needs your decision'
-          : 'Change your decision'}
+          : answer.scoring === 'MANUAL'
+            ? 'Change your decision'
+            : 'Score this answer by hand (it ran on the local stub, not real execution)'}
       </p>
       <div className="mt-2 max-w-xl">
         <Field id={noteId} label="Note (optional)" hint="Up to 1000 characters.">
