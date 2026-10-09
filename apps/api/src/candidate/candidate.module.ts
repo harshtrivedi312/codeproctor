@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ExecutionModule } from '../execution/execution.module';
 import { StorageModule } from '../media/storage.module';
 import { StorageService } from '../media/storage.service';
 import { MailModule } from '../mail/mail.module';
@@ -15,6 +16,7 @@ import { ConsentPdfService } from './consent-pdf.service';
 import { ConsentService } from './consent.service';
 import { MailBackedCandidateMailPort } from './mail-backed-candidate-mail.port';
 import { ObjectStoragePort } from './object-storage.port';
+import { PracticeService } from './practice.service';
 import { OtpService } from './otp.service';
 import { SessionJobsService } from './session-jobs.service';
 import { SessionRateLimiter } from './session-rate-limiter';
@@ -23,7 +25,7 @@ import { TestStartService } from './test-start.service';
 // FR-106, FR-401, FR-505, FR-609 (BE-07). The mail port is the MailModule's awaited send path (BE-06,
 // see mail-backed-candidate-mail.port.ts). The storage port is the StorageService (BE-09).
 @Module({
-  imports: [SessionModule, StorageModule, MailModule],
+  imports: [SessionModule, StorageModule, MailModule, ExecutionModule],
   controllers: [CandidateAuthController, CandidateSessionController],
   providers: [
     CandidateTokenService,
@@ -37,6 +39,7 @@ import { TestStartService } from './test-start.service';
     OtpService,
     SessionRateLimiter,
     SessionJobsService,
+    PracticeService,
     { provide: CandidateMailPort, useClass: MailBackedCandidateMailPort },
     // BE-09: the real S3-compatible store (StorageService extends the port).
     { provide: ObjectStoragePort, useExisting: StorageService },

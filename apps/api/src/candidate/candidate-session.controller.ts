@@ -24,11 +24,14 @@ import {
   ConsentSignedDto,
   HeartbeatDto,
   HeartbeatResultDto,
+  PracticeRunDto,
   ProctorKeyDto,
   SessionStateDto,
   SignConsentDto,
   TestStartedDto,
 } from './dto/candidate.dto';
+import { PracticeService } from './practice.service';
+import type { PracticeQuestionView, PracticeRunView } from './practice.service';
 import { SessionRateLimiter } from './session-rate-limiter';
 import { TestStartService } from './test-start.service';
 import { HEARTBEAT_LIMIT_PER_MINUTE } from './candidate-session.service';
@@ -56,6 +59,7 @@ export class CandidateSessionController {
     private readonly consent: ConsentService,
     private readonly testStart: TestStartService,
     private readonly limiter: SessionRateLimiter,
+    private readonly practice: PracticeService,
   ) {}
 
   @CandidateRoute('candidate_session:read')
@@ -66,6 +70,40 @@ export class CandidateSessionController {
   async state(@Candidate() ctx: CandidateContext): Promise<SessionStateDto> {
     await this.limiter.hit('session', ctx.sessionId, 60, 60);
     return stateDto(await this.session.view(ctx));
+  }
+
+  @Get('practice')
+  @CandidateRoute('candidate_session:read')
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({
+    summary: 'The practice question (FR-406): fixed content, nothing stored',
+    description: 'CONSENTED or VERIFIED only (409 SESSION_NOT_ACTIVE otherwise).',
+  })
+  @ApiOkResponse({ description: 'PracticeQuestionView' })
+  @ApiConflictResponse({ description: 'SESSION_NOT_ACTIVE' })
+  async getPractice(@Candidate() ctx: CandidateContext): Promise<PracticeQuestionView> {
+    await this.limiter.hit('practice', ctx.sessionId, 30, 60);
+    return this.practice.question(ctx);
+  }
+
+  @Post('practice/run')
+  @CandidateRoute('candidate_session:read')
+  @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({
+    summary: 'Run code against the practice samples (FR-406): nothing is stored or graded',
+    description:
+      'Same runner as a real Run (the local stub in development). CONSENTED or VERIFIED only. 20 per minute.',
+  })
+  @ApiOkResponse({ description: 'PracticeRunView' })
+  @ApiConflictResponse({ description: 'SESSION_NOT_ACTIVE' })
+  @ApiTooManyRequestsResponse({ description: 'RATE_LIMITED' })
+  async runPractice(
+    @Candidate() ctx: CandidateContext,
+    @Body() dto: PracticeRunDto,
+  ): Promise<PracticeRunView> {
+    await this.limiter.hit('practice-run', ctx.sessionId, 20, 60);
+    return this.practice.run(ctx, dto.language, dto.code);
   }
 
   @Get('consent')

@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsIn,
+  MaxLength,
   IsArray,
   ArrayMaxSize,
   IsBoolean,
@@ -204,4 +206,17 @@ export class ProctorKeyDto {
   key!: string;
   @ApiProperty() keyEpoch!: number;
   @ApiProperty({ type: CountersDto }) counters!: CountersDto;
+}
+
+/** POST /candidate/session/practice/run (FR-406). Nothing is stored. */
+export class PracticeRunDto {
+  @ApiProperty({ enum: ['python', 'javascript', 'java'] })
+  @IsString()
+  @IsIn(['python', 'javascript', 'java'])
+  language!: 'python' | 'javascript' | 'java';
+
+  @ApiProperty({ maxLength: 50000, description: 'The source to run against the fixed samples' })
+  @IsString()
+  @MaxLength(50_000)
+  code!: string;
 }

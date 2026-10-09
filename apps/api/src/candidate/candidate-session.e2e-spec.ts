@@ -3284,4 +3284,38 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(text).not.toContain(secret);
     }
   });
+
+  describe('practice question (FR-406)', () => {
+    const tokenFor = (inv: InvitationFixture): string =>
+      tokens.sign({ sid: inv.sessionId, oid: tenant.orgId, epoch: 1 }).token;
+
+    it('FR-406: a CONSENTED or VERIFIED candidate gets the fixed practice question; nothing is stored by a run', async () => {
+      const inv = await invite({ status: 'VERIFIED', session: { authEpoch: 1 } });
+      const q = await authed('get', '/practice', tokenFor(inv)).expect(200);
+      expect(q.body).toMatchObject({ languages: ['python', 'javascript', 'java'] });
+      const samples = (q.body as { sampleTests: unknown[] }).sampleTests;
+      expect(samples.length).toBeGreaterThanOrEqual(2);
+      const run = await authed('post', '/practice/run', tokenFor(inv), {
+        language: 'python',
+        code: 'a, b = map(int, input().split())\nprint(a + b)\n',
+      }).expect(200);
+      expect((run.body as { tests: unknown[] }).tests).toHaveLength(samples.length);
+      expect(await owner.submission.count()).toBe(0);
+    });
+
+    it('FR-406, FR-106: the practice is closed once the test runs (409 SESSION_NOT_ACTIVE), an unknown language or a huge source is a 400, no token is a 401', async () => {
+      const live = await invite(liveSession());
+      const res = await authed('get', '/practice', tokenFor(live)).expect(409);
+      expect(res.body).toMatchObject({ code: 'SESSION_NOT_ACTIVE' });
+      const inv = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await authed('post', '/practice/run', tokenFor(inv), { language: 'cobol', code: 'x' }).expect(
+        400,
+      );
+      await authed('post', '/practice/run', tokenFor(inv), {
+        language: 'python',
+        code: 'x'.repeat(50_001),
+      }).expect(400);
+      await request(server()).get(`${API}/practice`).expect(401);
+    });
+  });
 });
