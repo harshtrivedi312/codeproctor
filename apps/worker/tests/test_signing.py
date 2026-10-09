@@ -341,19 +341,6 @@ def test_fr403_everything_is_protected_except_get_health() -> None:
     assert call(app, "/docs", {}, b"", method="GET").status_code == 401  # docs only when local
 
 
-def test_fr403_the_legacy_exemption_is_explicit_temporary_and_exact() -> None:
-    app, _, _ = build(
-        unsigned_routes=signing.UNSIGNED_ROUTES | signing.LEGACY_UNSIGNED_ROUTES,
-        unsigned_prefixes=signing.LEGACY_UNSIGNED_PREFIXES,
-    )
-    # Passed through unsigned to the router (404: this test app has no such routes), never a 401/500.
-    for path in ("/analyze/keystrokes", "/risk"):
-        r = call(app, path, {}, b"")
-        assert r.status_code == 404 and "x-cp-signature" not in r.headers
-    assert call(app, "/analyze/keystrokes", {}, b"", method="GET").status_code == 401
-    assert call(app, "/v1/echo", {}, b"").status_code == 401  # /v1 is never exempt
-
-
 def raw(
     app: Any, headers: dict[str, str], body: bytes, path: str = "/v1/echo", method: str = "POST"
 ) -> tuple[int, bool, list[dict[str, Any]]]:
@@ -519,9 +506,8 @@ def test_fr403_forty_threads_recording_one_nonce_get_exactly_one_recorded() -> N
     assert results.count("recorded") == 1 and results.count("duplicate") == 39
 
 
-def test_fr403_path_variants_of_health_and_the_legacy_prefix_cannot_bypass_signing() -> None:
+def test_fr403_path_variants_of_health_cannot_bypass_signing() -> None:
     app, _, bodies = build()
-    h, body, _ = signed()
     for method, path in (
         ("HEAD", "/health"),
         ("GET", "//health"),
@@ -529,13 +515,4 @@ def test_fr403_path_variants_of_health_and_the_legacy_prefix_cannot_bypass_signi
         ("GET", "/health/"),
     ):
         assert raw(app, {}, b"", path=path, method=method)[0] == 401, (method, path)
-    legacy, _, legacy_bodies = build(
-        unsigned_routes=signing.UNSIGNED_ROUTES | signing.LEGACY_UNSIGNED_ROUTES,
-        unsigned_prefixes=signing.LEGACY_UNSIGNED_PREFIXES,
-    )
-    # An unsigned legacy path that climbs out of the prefix reaches the router, which has no such
-    # route: 404, and the signed /v1/echo handler never runs.
-    for path in ("/analyze/../v1/echo", "/analyze//v1/echo", "/analyze/%2e%2e/v1/echo"):
-        status, _, _ = raw(legacy, {}, body, path=path)
-        assert status == 404, path
-    assert legacy_bodies == [] and bodies == []
+    assert bodies == []

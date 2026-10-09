@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from importlib import metadata
@@ -33,9 +33,6 @@ from worker.face.types import FaceDecision, MatchResult, ReviewReason
 from worker.modellock import LoadedLock, ModelCheck, ModelLockError, check_models, load_lock
 from worker.problem import install_problem_handlers, problem
 from worker.signing import (
-    LEGACY_UNSIGNED_PREFIXES,
-    LEGACY_UNSIGNED_ROUTES,
-    UNSIGNED_ROUTES,
     KeyConfigError,
     SigningMiddleware,
     parse_keys,
@@ -449,6 +446,7 @@ def install_face_routes(
     *,
     keys: dict[str, bytes] | None = None,
     docs_local: bool = False,
+    body_limits: Mapping[str, int] | None = None,
 ) -> None:
     """Wire signing, /v1 errors and the face routes into `app` (one call from app.py)."""
     if runtime is None:
@@ -466,7 +464,5 @@ def install_face_routes(
         SigningMiddleware,
         keys=keys or {},
         docs_exempt=docs_local,
-        # TEMPORARY until BE-12 (Integrity A) moves these routes under signed /v1/analyze/*.
-        unsigned_routes=UNSIGNED_ROUTES | LEGACY_UNSIGNED_ROUTES,
-        unsigned_prefixes=LEGACY_UNSIGNED_PREFIXES,
+        body_limits=body_limits,
     )

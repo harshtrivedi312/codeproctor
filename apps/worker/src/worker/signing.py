@@ -45,11 +45,6 @@ _DIGITS: Final = re.compile(r"[0-9]{1,12}")  # ASCII only: str.isdigit() accepts
 UNSIGNED_ROUTES: Final = frozenset({("GET", "/health")})
 # The docs routes are exempt only in local development (ADR 0014 4.2), by `docs_exempt=True`.
 DOCS_PATHS: Final = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
-# TEMPORARY, passed explicitly by the wiring (routes_face.install_face_routes), never a default:
-# the pre-BE-12 routes that keep X-Internal-Token. BE-12 moves them under signed /v1/analyze/* and
-# deletes this constant and the argument that carries it.
-LEGACY_UNSIGNED_ROUTES: Final = frozenset({("POST", "/risk")})
-LEGACY_UNSIGNED_PREFIXES: Final = (("POST", "/analyze/"),)
 _SIGNATURE: Final = re.compile(r"[A-Za-z0-9_-]{43}")  # base64url of a SHA-256 digest, no padding
 log = logging.getLogger(__name__)
 

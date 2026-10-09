@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from signed_app import KEY, make_app, send, sign_headers, verify_response
 from worker import signing
-from worker.app import UNSIGNED_PATHS, app, create_app
+from worker.app import app, create_app
 from worker.routes_analyze import ANALYSIS_CONCURRENCY, BODY_LIMITS
 
 RISK_BODY = {"events": [], "identityReviewPending": False, "shortAnswerPending": False}
@@ -33,7 +33,6 @@ def test_nfr04_health_is_the_only_unsigned_route() -> None:
     a = make_app()
     r = send(a, "/health", signed=False, method="GET")
     assert r.status_code == 200 and r.json() == {"status": "ok"}
-    assert UNSIGNED_PATHS == frozenset({"/health"})
 
 
 @pytest.mark.parametrize(
@@ -79,13 +78,12 @@ def test_nfr04_the_old_internal_token_no_longer_opens_anything() -> None:
         assert send(a, path, RISK_BODY).status_code == 404
 
 
-def test_nfr04_the_signing_defaults_leave_a_gap_that_the_app_closes() -> None:
-    """signing.py still exempts the legacy /risk and /analyze/ paths by default; app.py overrides it."""
-    assert "/risk" in signing.UNSIGNED_PATHS and signing.UNSIGNED_PREFIXES == ("/analyze/",)
+def test_nfr04_the_app_exempts_exactly_get_health_and_applies_the_route_body_limits() -> None:
     a = make_app()
     mw = next(m for m in a.user_middleware if m.cls is signing.SigningMiddleware)  # type: ignore[comparison-overlap]
-    assert mw.kwargs["unsigned_paths"] == UNSIGNED_PATHS and mw.kwargs["unsigned_prefixes"] == ()
     assert mw.kwargs["body_limits"] == BODY_LIMITS
+    assert "unsigned_routes" not in mw.kwargs and "unsigned_prefixes" not in mw.kwargs  # defaults
+    assert signing.UNSIGNED_ROUTES == frozenset({("GET", "/health")})
 
 
 def test_nfr04_docs_exist_only_in_local_development() -> None:
@@ -215,7 +213,41 @@ def test_nfr04_the_module_level_app_is_signed_too() -> None:
     assert KEY  # the helper key is not the module app's key
 
 
-def test_nfr04_known_gap_the_health_exemption_is_by_path_not_by_method() -> None:
-    """signing.py exempts the path `/health`, so `POST /health` is also unsigned (it answers 405)."""
-    r = send(make_app(), "/health", {"x": 1}, method="POST", signed=False)
-    assert r.status_code == 405  # reaches the router unsigned: harmless, but not "GET /health" only
+def test_nfr04_the_health_exemption_is_by_method_and_path() -> None:
+    a = make_app()
+    assert send(a, "/health", {"x": 1}, method="POST", signed=False).status_code == 401
+    assert send(a, "/health/", method="GET", signed=False).status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/v1/analyze/keystrokes", "/v1/analyze/vad"])
+def test_adr0014_6_6_busy_worker_refuses_keystrokes_and_vad_at_once(path: str) -> None:
+    from helpers import QID, batches, edit
+
+    a = make_app()
+    sem = a.state.analysis_runtime.semaphore
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+    try:
+        if path.endswith("keystrokes"):
+            bs = [b.model_dump(mode="json", by_alias=True) for b in batches([edit(0, "a")])]
+            body: dict[str, object] = {"sessionQuestionId": QID, "batches": bs}
+        else:
+            body = {
+                "sessionId": "s1",
+                "segment": 0,
+                "windowStartMs": 0,
+                "header": {"seq": 0, "url": "https://s3.example.test/h"},
+                "chunks": [],
+            }
+        r = send(a, path, body)
+    finally:
+        sem.release()
+        sem.release()
+    assert r.status_code == 503 and r.json()["code"] == "WORKER_BUSY"
+
+
+def test_adr0001_12_2_the_silero_entry_in_the_model_lock_matches_the_adr() -> None:
+    from signed_app import LOCK
+
+    silero = next(f for f in LOCK.lock.files if f.name == "silero-vad/silero_vad.onnx")
+    assert silero.sha256 == "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+    assert silero.bytes == 2_327_524 and silero.status == "approved" and silero.version == "v6.2.3"
