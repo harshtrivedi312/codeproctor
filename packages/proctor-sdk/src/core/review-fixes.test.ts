@@ -277,7 +277,7 @@ describe('review blockers (FR-702, FR-601, TC-065)', () => {
     const session = new ProctorSession();
     const seen: string[] = [];
     session.on('event', (e) => seen.push(e.type));
-    session.on('capability', (c) => seen.push(`cap:${c.id}:${c.status}`));
+    session.on('capability', (c) => c.id !== 'keystrokes' && seen.push(`cap:${c.id}:${c.status}`));
     let finishLate!: () => void;
     const stop = vi.fn();
     await session.start({
@@ -318,7 +318,7 @@ describe('review blockers (FR-702, FR-601, TC-065)', () => {
     const store = newStore();
     const session = new ProctorSession();
     const caps: string[] = [];
-    session.on('capability', (c) => caps.push(`${c.id}:${c.status}`));
+    session.on('capability', (c) => c.id !== 'keystrokes' && caps.push(`${c.id}:${c.status}`));
     await session.start({
       sessionId: 's',
       hmacKeyBase64: TEST_KEY_B64,

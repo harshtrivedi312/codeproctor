@@ -445,7 +445,7 @@ const CS44: Record<string, Cs44Read> = {
     keys: ['orgId'],
     explicit: ['accommodations'],
     runOnly: [],
-    hidden: ['tokenHash', 'sentAt', 'createdById', 'createdAt'],
+    hidden: ['tokenHash', 'sentAt', 'timeZone', 'createdById', 'createdAt'],
   },
   Test: {
     read: ['id', 'name', 'description', 'durationMinutes', 'profile'],
