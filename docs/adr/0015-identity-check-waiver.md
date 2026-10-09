@@ -357,7 +357,7 @@ Status: **Proposed. The owner accepts it with the batch (CLAUDE.md rule 7; pinne
 
 ### 10.2 Face refusal is a right on request (C-02 amendment)
 
-- When a candidate asks not to be face-matched (through the contact in the invitation email or on the decline screen), the recruiter **grants it and may not refuse**. The recruiter records a reason; "candidate preference" is allowed and maps to `REFUSED_BIOMETRIC_PROCESSING` with no `reasonNote` (the note stays required only for `OTHER`). The grant writes the usual audit rows, with who granted it and when.
+- When a candidate asks not to be face-matched (through the contact in the invitation email, or from the consent page, which shows it when the candidate does not tick the biometric box, FR-401), the recruiter **grants it and may not refuse**. The recruiter records a reason; "candidate preference" is allowed and maps to `REFUSED_BIOMETRIC_PROCESSING` with no `reasonNote` (the note stays required only for `OTHER`). The grant writes the usual audit rows, with who granted it and when.
 - The flag `accommodations.biometricRefusalReason` (section 6, S2) was the hard gate while the owner had not decided. With D-81 decided, it is turned on at deploy for the pilot together with consent v0.5 and the DPIA. **The flag gates the recruiter's selection of the reason only; it never gates a withdrawal (10.3) or the forced waiver for a withdrawn candidate.**
 - The software enforces what it can: the UI offers no "decline this request" path and the grant is one step (INVITED, OPENED or CONSENTED while no identity attempt exists, section 6 windows). That the recruiter may not refuse is a process rule (FSD FR-305 and FR-403); it cannot be enforced in code.
 
