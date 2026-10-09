@@ -124,6 +124,40 @@ export class SessionStateService {
   }
 
   /**
+   * The PAUSED to PAUSED edge (stale pause_reasons gap): only the pause reasons change, so the
+   * write gate (session-write-gate.ts) reads the true list. Compare-and-set on the reasons the
+   * caller read, a non-empty new list (an empty one is PAUSED to IN_PROGRESS), no change to the
+   * clock (deadline_at, paused_ms, proctor_paused_at stay as they are), and PROCTOR membership
+   * unchanged, always (the PROCTOR pause owns the clock).
+   */
+  private assertReasonsOnlyEdge(
+    change: TransitionRequest,
+    froms: readonly SessionStatus[],
+  ): readonly PauseReason[] {
+    const patch = change.patch ?? {};
+    const keys = Object.keys(patch).filter(
+      (k) => (patch as Record<string, unknown>)[k] !== undefined,
+    );
+    const next = patch.pauseReasons;
+    if (
+      froms.length !== 1 ||
+      change.ifPauseReasons === undefined ||
+      next === undefined ||
+      next.length === 0 ||
+      keys.length !== 1 ||
+      new Set(next).size !== next.length
+    ) {
+      throw new IllegalTransitionError('PAUSED', 'PAUSED');
+    }
+    // PROCTOR is never added or lifted here: that pause owns the clock (proctor_paused_at, the credit),
+    // so only SessionStateService's staff methods (proctorResume, a future proctorPause) change it.
+    if (next.includes('PROCTOR') !== change.ifPauseReasons.includes('PROCTOR')) {
+      throw new IllegalTransitionError('PAUSED', 'PAUSED');
+    }
+    return [...next];
+  }
+
+  /**
    * Moves a session along an edge of the transition table. Throws IllegalTransitionError (409
    * ILLEGAL_TRANSITION) for an edge that is not in the table, and SessionStateConflictError (409
    * SESSION_STATE_CONFLICT) when the session was not in `from` at the moment of the update.
@@ -139,6 +173,10 @@ export class SessionStateService {
     const db = change.db ?? this.prisma.client;
     const now = change.now ?? new Date();
     const patch = change.patch ?? {};
+    const reasonsOnly =
+      change.to === 'PAUSED' && froms.includes('PAUSED')
+        ? this.assertReasonsOnlyEdge(change, froms)
+        : null;
     const anchors = stampsRetentionAnchor(change.to) && !froms.includes('APPEALED');
 
     const updated = await db.session.updateMany({
@@ -152,17 +190,23 @@ export class SessionStateService {
             : {},
         ],
       },
-      data: {
-        status: change.to,
-        ...(stampsSubmittedAt(change.to) ? { submittedAt: now } : {}),
-        ...(anchors ? { retentionAnchorAt: now } : {}),
-        ...(patch.startedAt !== undefined ? { startedAt: patch.startedAt } : {}),
-        ...(patch.deadlineAt !== undefined ? { deadlineAt: patch.deadlineAt } : {}),
-        ...(patch.hmacKeyEnc !== undefined ? { hmacKeyEnc: patch.hmacKeyEnc } : {}),
-        ...(patch.pauseReasons !== undefined ? { pauseReasons: [...patch.pauseReasons] } : {}),
-        ...(patch.proctorPausedAt !== undefined ? { proctorPausedAt: patch.proctorPausedAt } : {}),
-        ...(patch.pausedMs !== undefined ? { pausedMs: patch.pausedMs } : {}),
-      },
+      // The reasons-only edge writes exactly the validated list: the data object is built from that
+      // one value, never by spreading the rest of the patch (check and use see the same list).
+      data: reasonsOnly
+        ? { status: 'PAUSED' as const, pauseReasons: [...reasonsOnly] }
+        : {
+            status: change.to,
+            ...(stampsSubmittedAt(change.to) ? { submittedAt: now } : {}),
+            ...(anchors ? { retentionAnchorAt: now } : {}),
+            ...(patch.startedAt !== undefined ? { startedAt: patch.startedAt } : {}),
+            ...(patch.deadlineAt !== undefined ? { deadlineAt: patch.deadlineAt } : {}),
+            ...(patch.hmacKeyEnc !== undefined ? { hmacKeyEnc: patch.hmacKeyEnc } : {}),
+            ...(patch.pauseReasons !== undefined ? { pauseReasons: [...patch.pauseReasons] } : {}),
+            ...(patch.proctorPausedAt !== undefined
+              ? { proctorPausedAt: patch.proctorPausedAt }
+              : {}),
+            ...(patch.pausedMs !== undefined ? { pausedMs: patch.pausedMs } : {}),
+          },
     });
     if (updated.count === 1) return;
     const current = await db.session.findUnique({
