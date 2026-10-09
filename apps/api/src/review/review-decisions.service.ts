@@ -113,8 +113,25 @@ export class ReviewDecisionsService {
       if (before.scoring === 'AUTO') {
         throw new CodedConflictException('This answer is not scored by hand.', 'ANSWER_NOT_MANUAL');
       }
-      const previousCorrect =
-        before.scoring === 'MANUAL' && before.score !== null ? before.score.gt(0) : null;
+      // The previous decision is read from the last audit row of this answer (a score of 0 on a
+      // 0-point question cannot tell true from false); without a row, from the stored score.
+      let previousCorrect: boolean | null = null;
+      if (before.scoring === 'MANUAL') {
+        const last = await tx.auditLog.findFirst({
+          where: {
+            entityId: sessionId,
+            action: 'ANSWER_SCORED_MANUALLY',
+            metadata: { path: ['sessionQuestionId'], equals: sessionQuestionId },
+          },
+          orderBy: { id: 'desc' },
+          select: { metadata: true },
+        });
+        const recorded = (last?.metadata as { correct?: unknown } | null)?.correct;
+        previousCorrect =
+          typeof recorded === 'boolean'
+            ? recorded
+            : before.score !== null && before.score.eq(before.points);
+      }
       const score = dto.correct ? before.points.toFixed(2) : '0.00';
       await tx.sessionQuestion.update({
         where: { id: sessionQuestionId },
@@ -260,9 +277,7 @@ export class ReviewDecisionsService {
   }
 
   /** SET LOCAL lock_timeout: a busy sessions row answers 503 BUSY (section 8), never a hang. */
-  private capLockWait(
-    tx: Parameters<Parameters<PrismaService['client']['$transaction']>[0]>[0],
-  ): Promise<unknown> {
+  private capLockWait(tx: Tx): Promise<unknown> {
     return this.orgContext.runRawSql(
       'cap lock waits of this transaction (SET LOCAL, no data access)',
       () =>

@@ -309,8 +309,16 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
       await patch({ correct: true, note: '   ' }).expect(400);
       await patch({ correct: true, note: 'x'.repeat(1001) }).expect(400);
       await patch({ correct: true, note: 'bad\u0007bell' }).expect(400);
-      await patch({ correct: true, note: 'bidi‮override' }).expect(400);
+      await patch({ correct: true, note: `bidi${String.fromCharCode(0x202e)}override` }).expect(
+        400,
+      );
       await patch({ correct: true, note: 42 }).expect(400);
+      await patch({ correct: true, note: null }).expect(400);
+      await http()
+        .post(verdictUrl(s.sessionId))
+        .set(who.auth)
+        .send({ verdict: 'CLEAN', note: null })
+        .expect(400);
       await patch({ correct: true, score: 50 }).expect(400);
       await patch({ correct: true, scoredBy: GHOST }).expect(400);
       await http().post(verdictUrl('nope')).set(who.auth).send({ verdict: 'CLEAN' }).expect(400);
@@ -430,6 +438,96 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
       });
       expect(review.reviewerId).toBe(who.id);
     });
+
+    it('FU-DB-278, TC-008: called inside org A with a forged actor (reviewer of org B, inactive user, RECRUITER) the service answers the same 404 and writes nothing', async () => {
+      const s = await seedPendingSession();
+      const mod = jest.requireActual<typeof import('./review-decisions.service')>(
+        './review-decisions.service',
+      );
+      const ctx =
+        jest.requireActual<typeof import('../database/org-context')>('../database/org-context');
+      const service = app.get(mod.ReviewDecisionsService);
+      const orgContext = app.get(ctx.OrgContextService);
+      const real = await make(UserRole.REVIEWER);
+      const foreignReviewer = await make(UserRole.REVIEWER, orgB);
+      const inactive = await make(UserRole.REVIEWER);
+      await owner.user.update({ where: { id: inactive.id }, data: { isActive: false } });
+      const recruiter = await make(UserRole.RECRUITER);
+      for (const actor of [foreignReviewer, inactive, recruiter]) {
+        const asOrgA = <T>(fn: () => Promise<T>): Promise<T> =>
+          orgContext.runAsUser({ orgId: orgA, userId: real.id, role: UserRole.REVIEWER }, fn);
+        await expect(
+          asOrgA(() =>
+            service.scoreAnswer({ id: actor.id, orgId: orgA }, undefined, s.sessionId, s.a, {
+              correct: true,
+            }),
+          ),
+        ).rejects.toMatchObject({ status: 404, message: 'Session not found.' });
+        await expect(
+          asOrgA(() =>
+            service.setVerdict({ id: actor.id, orgId: orgA }, undefined, s.sessionId, {
+              verdict: 'CLEAN',
+            }),
+          ),
+        ).rejects.toMatchObject({ status: 404, message: 'Session not found.' });
+        expect(await owner.auditLog.count({ where: { actorId: actor.id } })).toBe(0);
+      }
+      const row = await owner.sessionQuestion.findUniqueOrThrow({ where: { id: s.a } });
+      expect(row).toMatchObject({ scoring: 'MANUAL_PENDING', scoredById: null });
+      expect(await owner.sessionReview.count({ where: { sessionId: s.sessionId } })).toBe(0);
+      expect((await sessionRow(s.sessionId)).status).toBe('UNDER_REVIEW');
+    });
+  });
+
+  describe('D-23: previousCorrect on a 0-point question', () => {
+    it('D-23: correct:true on a 0-point question is recorded as true, not derived from the 0 score', async () => {
+      const sess = await seedSession();
+      const a = await seedAnswer(sess, {
+        type: 'SHORT_ANSWER',
+        position: 1,
+        points: 0,
+        scoring: 'MANUAL_PENDING',
+      });
+      const who = await make(UserRole.REVIEWER);
+      const put = (correct: boolean): request.Test =>
+        http().patch(scoreUrl(sess.sessionId, a)).set(who.auth).send({ correct });
+      await put(true).expect(200);
+      await put(false).expect(200);
+      await put(false).expect(200);
+      const audits = await owner.auditLog.findMany({
+        where: { entityId: sess.sessionId, action: 'ANSWER_SCORED_MANUALLY' },
+        orderBy: { id: 'asc' },
+      });
+      expect(audits.map((x) => (x.metadata as Json).previousCorrect)).toEqual([null, true, false]);
+    });
+  });
+
+  describe('DL-37: lock contention', () => {
+    it('DL-37, FR-205: a held sessions row lock answers 503 BUSY with Retry-After within the lock timeout and writes nothing', async () => {
+      const s = await seedPendingSession();
+      const who = await make(UserRole.REVIEWER);
+      const holder = new Client({ connectionString: infra.postgres.getConnectionUri() });
+      await holder.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('SELECT id FROM sessions WHERE id = $1 FOR UPDATE', [s.sessionId]);
+        const t0 = Date.now();
+        const res = await http()
+          .patch(scoreUrl(s.sessionId, s.a))
+          .set(who.auth)
+          .send({ correct: true });
+        expect(Date.now() - t0).toBeLessThan(6000);
+        expect(res.status).toBe(503);
+        expect(res.body).toMatchObject({ code: 'BUSY' });
+        expect(res.headers['retry-after']).toBeDefined();
+        const row = await owner.sessionQuestion.findUniqueOrThrow({ where: { id: s.a } });
+        expect(row.scoring).toBe('MANUAL_PENDING');
+        expect(await owner.auditLog.count({ where: { entityId: s.sessionId } })).toBe(0);
+      } finally {
+        await holder.query('ROLLBACK');
+        await holder.end();
+      }
+    });
   });
 
   // ---- manual scoring ---------------------------------------------------------------------------
@@ -499,7 +597,7 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
       expect(row.scoringNote).toBe('first');
       const audits = await owner.auditLog.findMany({
         where: { entityId: s.sessionId, action: 'ANSWER_SCORED_MANUALLY' },
-        orderBy: { createdAt: 'asc' },
+        orderBy: { id: 'asc' },
       });
       const forA = audits.filter((a) => (a.metadata as Json).sessionQuestionId === s.a);
       expect(forA.map((a) => (a.metadata as Json).previousCorrect)).toEqual([null, true, false]);
@@ -729,7 +827,7 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
       expect(await total(s.sessionId)).toBe(sum.toFixed(2));
       const audits = await owner.auditLog.findMany({
         where: { entityId: s.sessionId, action: 'ANSWER_SCORED_MANUALLY' },
-        orderBy: { createdAt: 'asc' },
+        orderBy: { id: 'asc' },
       });
       const forA = audits.filter((a) => (a.metadata as Json).sessionQuestionId === s.a);
       expect(forA).toHaveLength(2);

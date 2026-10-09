@@ -9,7 +9,8 @@ import { ManualScoringService } from './manual-scoring.service';
 import { SubmitFlowService } from './submit-flow.service';
 
 // FR-505, FR-506, FR-205 (BE-11): section close, auto-submit, grade-session and manual scoring.
-// ManualScoringService is exported for the review module (BE-13).
+// ManualScoringService is superseded by ReviewDecisionsService (review module, BE-13) and no route
+// uses it; it is removed with FU-BE-269.
 @Module({
   imports: [SessionModule, ExecutionModule],
   providers: [

@@ -3,11 +3,11 @@ import { Transform } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
-  IsOptional,
   IsString,
   IsUUID,
   Length,
   ValidateBy,
+  ValidateIf,
 } from 'class-validator';
 import { Verdict } from '../../generated/prisma/enums';
 import { isStorableText } from '../../questions/text-rules';
@@ -51,7 +51,7 @@ export class ScoreAnswerDto {
     maxLength: MAX_ANSWER_NOTE,
     description: 'Kept with the decision and shown in the review bundle; never in the audit row.',
   })
-  @IsOptional()
+  @ValidateIf((o: { note?: unknown }) => o.note !== undefined)
   @Transform(trim)
   @IsString()
   @Length(1, MAX_ANSWER_NOTE)
@@ -71,7 +71,7 @@ export class SetVerdictDto {
   verdict!: Verdict;
 
   @ApiPropertyOptional({ minLength: 1, maxLength: MAX_VERDICT_NOTE })
-  @IsOptional()
+  @ValidateIf((o: { note?: unknown }) => o.note !== undefined)
   @Transform(trim)
   @IsString()
   @Length(1, MAX_VERDICT_NOTE)
