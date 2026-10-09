@@ -18,6 +18,7 @@ import { ObjectStoragePort } from './object-storage.port';
 import { OtpService } from './otp.service';
 import { SessionJobsService } from './session-jobs.service';
 import { SessionRateLimiter } from './session-rate-limiter';
+import { SystemCheckService } from './system-check.service';
 import { TestStartService } from './test-start.service';
 
 // FR-106, FR-401, FR-505, FR-609 (BE-07). The mail port is the MailModule's awaited send path (BE-06,
@@ -37,6 +38,7 @@ import { TestStartService } from './test-start.service';
     OtpService,
     SessionRateLimiter,
     SessionJobsService,
+    SystemCheckService,
     { provide: CandidateMailPort, useClass: MailBackedCandidateMailPort },
     // BE-09: the real S3-compatible store (StorageService extends the port).
     { provide: ObjectStoragePort, useExisting: StorageService },
