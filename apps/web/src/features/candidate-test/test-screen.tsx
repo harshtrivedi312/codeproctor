@@ -73,6 +73,18 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
 
 const codeKey = (questionId: string, language: CodeLanguage) => `${questionId}:${language}`;
 
+/** What the server holds per question: one answer, with the language it is graded as. */
+type SavedOnServer = {
+  code: Record<string, { language: CodeLanguage; code: string }>;
+  mcq: Record<string, string>;
+};
+const hasCodeDraft = (drafts: Drafts, questionId: string): boolean =>
+  Object.keys(drafts.code).some((k) => k.startsWith(`${questionId}:`));
+const activeLanguage = (
+  q: Schemas['Question'],
+  languages: Record<string, CodeLanguage>,
+): CodeLanguage => languages[q.id] ?? q.languages?.[0] ?? 'python';
+
 /** A section the server has finished. Kept outside the per-section screen (ADR 0002). */
 interface FinishedSection {
   sectionId: string;
@@ -303,36 +315,68 @@ function TestScreenInner({
   const readOnly =
     isEditorReadOnly(lock, expired) || finished || clock.unavailable || proctorLocked;
 
-  // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new Drafts object.
-  const lastSaved = React.useRef<Drafts>({ code: {}, mcq: {} });
-  const [savedSnapshot, setSavedSnapshot] = React.useState<Drafts>({ code: {}, mcq: {} });
-  const autosave = useAutosave(drafts, async (snapshot) => {
-    const previous = lastSaved.current;
+  // Autosave every 10 s (FR-504). Compared by identity: any edit or language switch creates a new
+  // value. The server keeps ONE answer per question (final code + its language, which is what is
+  // graded), so only the language shown is sent, and a language switch is itself a change.
+  const autosaveValue = React.useMemo(() => ({ drafts, languages }), [drafts, languages]);
+  const emptySaved: SavedOnServer = { code: {}, mcq: {} };
+  const savedRef = React.useRef<SavedOnServer>(emptySaved);
+  const [saved, setSaved] = React.useState<SavedOnServer>(emptySaved);
+  const autosave = useAutosave(autosaveValue, async (snapshot) => {
+    const previous = savedRef.current;
+    const next: SavedOnServer = { code: { ...previous.code }, mcq: { ...previous.mcq } };
     const jobs: Promise<DraftResult>[] = [];
     const requestStart = performance.now();
-    for (const [key, code] of Object.entries(snapshot.code)) {
-      if (previous.code[key] === code) continue;
-      const [questionId, lang] = key.split(':') as [string, CodeLanguage];
-      jobs.push(source.saveDraft(questionId, { kind: 'code', language: lang, code }));
-    }
-    for (const [questionId, selectedOptionId] of Object.entries(snapshot.mcq)) {
-      if (previous.mcq[questionId] === selectedOptionId) continue;
+    for (const q of questions) {
+      if (q.type === 'mcq') {
+        const selectedOptionId = snapshot.drafts.mcq[q.id];
+        if (selectedOptionId === undefined || previous.mcq[q.id] === selectedOptionId) continue;
+        jobs.push(
+          source
+            .saveDraft(q.id, { kind: 'mcq', selectedOptionId } satisfies DraftBody)
+            .then((r) => {
+              if (r.ok) next.mcq[q.id] = selectedOptionId;
+              return r;
+            }),
+        );
+        continue;
+      }
+      if (!hasCodeDraft(snapshot.drafts, q.id)) continue; // never touched: nothing to keep
+      const lang = activeLanguage(q, snapshot.languages);
+      const code = snapshot.drafts.code[codeKey(q.id, lang)] ?? q.starterCode?.[lang] ?? '';
+      const held = previous.code[q.id];
+      if (held && held.language === lang && held.code === code) continue;
       jobs.push(
-        source.saveDraft(questionId, { kind: 'mcq', selectedOptionId } satisfies DraftBody),
+        source.saveDraft(q.id, { kind: 'code', language: lang, code }).then((r) => {
+          if (r.ok) next.code[q.id] = { language: lang, code };
+          return r;
+        }),
       );
     }
     const responses = await Promise.all(jobs);
     const responseEnd = performance.now();
-    // A failed or paused save keeps the draft: nothing is marked saved, and the next tick retries
-    // (DL-17: a 409 SESSION_PAUSED never drops code).
+    // What did save is remembered per question, so one failing draft is not sent again together
+    // with every other one (DRAFT_LIMIT 20/60 s). A failed or paused save keeps the draft and the
+    // next tick retries (DL-17: a 409 SESSION_PAUSED never drops code).
+    savedRef.current = next;
+    setSaved(next);
     if (responses.some((r) => !r.ok)) throw new Error('save');
     // The save response carries the server time: re-sync the countdown offset (FR-505, TC-047).
     const serverTimes = responses.flatMap((r) => (r.ok ? [r.savedAt] : []));
     const latestServerTime = serverTimes[serverTimes.length - 1];
     if (latestServerTime) clock.syncFromServer(latestServerTime, requestStart, responseEnd);
-    lastSaved.current = snapshot;
-    setSavedSnapshot(snapshot);
   });
+
+  // Leaving the page loses what is not saved yet, and a reload shows the starter code again.
+  React.useEffect(() => {
+    if (finished) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [finished]);
 
   // Cooldown tick: only while a cooldown is active.
   const cooldownMs = cooldownRemainingMs(lastRunAt, now);
@@ -423,10 +467,12 @@ function TestScreenInner({
   };
 
   const isSaved = (q: Schemas['Question']): boolean => {
-    if (q.type === 'mcq') return savedSnapshot.mcq[q.id] === drafts.mcq[q.id];
-    return Object.entries(drafts.code)
-      .filter(([k]) => k.startsWith(`${q.id}:`))
-      .every(([k, code]) => savedSnapshot.code[k] === code);
+    if (q.type === 'mcq') return saved.mcq[q.id] === drafts.mcq[q.id];
+    if (!hasCodeDraft(drafts, q.id)) return true;
+    const lang = activeLanguage(q, languages);
+    const code = drafts.code[codeKey(q.id, lang)] ?? q.starterCode?.[lang] ?? '';
+    const held = saved.code[q.id];
+    return held !== undefined && held.language === lang && held.code === code;
   };
 
   const run = async () => {

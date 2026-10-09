@@ -330,17 +330,21 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       // The API's DraftDto is whitelisted: only code, language and answer are accepted, and a
       // code draft needs its language. Anything else is a 400, like the real route.
       const draft = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-      const allowed = new Set(['code', 'language', 'answer']);
-      if (
-        !draft ||
-        typeof draft !== 'object' ||
-        Object.keys(draft).some((k) => !allowed.has(k)) ||
-        ('code' in draft && typeof draft.code !== 'string') ||
-        ('code' in draft && typeof draft.language !== 'string') ||
-        ('answer' in draft && (typeof draft.answer !== 'object' || draft.answer === null))
-      ) {
-        return problem(400, 'VALIDATION_FAILED');
-      }
+      // Per question type, like the API: a CODING answer is { code, language } and an MCQ answer is
+      // { answer: { optionIds } }; the other type's fields are a 400.
+      const isMcq = id === 'q2';
+      const keys = draft && typeof draft === 'object' ? Object.keys(draft) : [];
+      const optionIds = (draft?.answer as { optionIds?: unknown } | undefined)?.optionIds;
+      const valid = isMcq
+        ? keys.length === 1 &&
+          keys[0] === 'answer' &&
+          Array.isArray(optionIds) &&
+          optionIds.every((o) => typeof o === 'string')
+        : keys.length === 2 &&
+          typeof draft?.code === 'string' &&
+          typeof draft?.language === 'string' &&
+          ['python', 'javascript'].includes(draft.language);
+      if (!valid) return problem(400, 'VALIDATION_FAILED');
       r.s.drafts.set(id, draft);
       r.s.draftCalls += 1;
       return HttpResponse.json({ savedAt: iso(Date.now()) });
