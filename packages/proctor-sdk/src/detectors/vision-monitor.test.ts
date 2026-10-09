@@ -185,7 +185,10 @@ describe('VisionMonitor event flow with recorded fixtures (FR-606)', () => {
     const h = fakeContext();
     const evidenceApi: EvidenceApi = {
       presign: vi.fn(() =>
-        Promise.resolve({ url: 'https://store.invalid/x', key: 'evidence/s1/abc.jpg' }),
+        Promise.resolve({
+          url: 'https://store.invalid/x',
+          evidenceKey: 'evidence/01HZX3Q8Y2K4M6N8P0R2S4T6V8.jpg',
+        }),
       ),
     };
     const { m, worker, advance } = setup({
@@ -205,8 +208,64 @@ describe('VisionMonitor event flow with recorded fixtures (FR-606)', () => {
     }
     await vi.waitFor(() => expect(h.events.some((e) => e.type === 'PHONE_DETECTED')).toBe(true));
     const phone = h.events.find((e) => e.type === 'PHONE_DETECTED');
-    expect(phone?.options).toMatchObject({ evidenceKey: 'evidence/s1/abc.jpg', confidence: 0.82 });
+    expect(phone?.options).toMatchObject({
+      evidenceKey: 'evidence/01HZX3Q8Y2K4M6N8P0R2S4T6V8.jpg',
+      confidence: 0.82,
+    });
     vi.unstubAllGlobals();
+    m.stop();
+  });
+
+  it('TC-059 (ADR 0013 5.6): a name that is not evidence/<ULID>.jpg never goes into an event', async () => {
+    const h = fakeContext();
+    const evidenceApi: EvidenceApi = {
+      presign: () =>
+        Promise.resolve({ url: 'https://store.invalid/x', evidenceKey: '../../etc/x' }),
+    };
+    const { m, worker, advance } = setup({
+      evidenceApi,
+      captureSnapshot: () => Promise.resolve(new Blob(['jpeg'])),
+    });
+    worker.script = secondsOf(6, { faceCount: 1, objects: PHONE_STRONG });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(new Response(null, { status: 200 }))),
+    );
+    await m.start(h.ctx);
+    for (let i = 0; i < 6; i++) {
+      await m.tick();
+      advance(2000);
+    }
+    await vi.waitFor(() => expect(h.events.some((e) => e.type === 'PHONE_DETECTED')).toBe(true));
+    expect(
+      h.events.find((e) => e.type === 'PHONE_DETECTED')?.options?.['evidenceKey'],
+    ).toBeUndefined();
+    vi.unstubAllGlobals();
+    m.stop();
+  });
+
+  it('FR-606/FR-801: QUOTA_EXCEEDED stops snapshot requests for the session, events still go, one flag', async () => {
+    const h = fakeContext();
+    let presigns = 0;
+    const evidenceApi: EvidenceApi = {
+      presign: () => {
+        presigns++;
+        return Promise.reject(Object.assign(new Error('q'), { kind: 'QUOTA_EXCEEDED' }));
+      },
+    };
+    const { m, worker, advance } = setup({
+      evidenceApi,
+      captureSnapshot: () => Promise.resolve(new Blob(['jpeg'])),
+    });
+    worker.script = secondsOf(20, { faceCount: 1, objects: PHONE_STRONG });
+    await m.start(h.ctx);
+    for (let i = 0; i < 20; i++) {
+      await m.tick();
+      advance(2000);
+    }
+    await vi.waitFor(() => expect(h.events.some((e) => e.type === 'PHONE_DETECTED')).toBe(true));
+    expect(presigns).toBe(1);
+    expect(h.capabilities.filter((c) => c.id === 'evidence-snapshots')).toHaveLength(1);
     m.stop();
   });
 
@@ -318,41 +377,70 @@ describe('InferenceClient back-pressure (FR-606)', () => {
   });
 });
 
-describe('identity re-check (FR-606, ADR 0004)', () => {
-  it('FR-606: a mismatch emits FACE_MISMATCH, a match emits nothing, an error is ignored', async () => {
-    const got: unknown[] = [];
-    const results = [
-      { matched: false, similarity: 0.12 },
-      { matched: true, similarity: 0.9 },
+describe('identity re-check (FR-606, ADR 0013 5.6, C-34)', () => {
+  it('FR-606: the scheduler only uploads and keeps a status: no FACE_MISMATCH, errors are retried later', async () => {
+    const seen: string[] = [];
+    const outcomes = [
+      { kind: 'ACCEPTED' as const },
+      { kind: 'SKIP' as const },
+      { kind: 'RETRY' as const, retryAfterMs: 1000 },
     ];
     let calls = 0;
+    let t = 1_000_000;
     const s = new IdentityScheduler(
       IDENTITY_RECHECK_INTERVAL_MS,
       () => Promise.resolve(new Blob(['f'])),
       () => {
         calls++;
-        const r = results.shift();
+        const r = outcomes.shift();
         return r ? Promise.resolve(r) : Promise.reject(new Error('api down'));
       },
-      (r) => got.push(r),
+      (st) => seen.push(st.state),
+      () => t,
     );
     await s.tick();
     await s.tick();
-    await s.tick();
+    await s.tick(); // RETRY: backoff starts
+    await s.tick(); // inside the backoff: nothing is sent
     expect(calls).toBe(3);
-    expect(got).toEqual([{ matched: false, similarity: 0.12 }]);
+    expect(s.getStatus()).toMatchObject({ state: 'BACKOFF', accepted: 1, skipped: 1, retries: 1 });
+    t += 10 * 60_000;
+    await s.tick(); // rejects -> RETRY again
+    expect(calls).toBe(4);
+    expect(seen).toEqual(['RUNNING', 'RUNNING', 'BACKOFF', 'BACKOFF']);
   });
 
-  it('FR-606: the monitor wires a mismatch to FACE_MISMATCH with the similarity', async () => {
+  it('FR-606: the monitor uploads frames but never emits FACE_MISMATCH', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const h = fakeContext();
+    const frames: number[] = [];
     const { m } = setup({
-      recheckIdentity: () => Promise.resolve({ matched: false, similarity: 0.2 }),
+      recheckIdentity: (f) => {
+        frames.push(f.size);
+        return Promise.resolve({ kind: 'ACCEPTED' as const });
+      },
       captureSnapshot: () => Promise.resolve(new Blob(['f'])),
     });
     await m.start(h.ctx);
     await vi.advanceTimersByTimeAsync(IDENTITY_RECHECK_INTERVAL_MS);
-    expect(h.events.find((e) => e.type === 'FACE_MISMATCH')?.payload).toEqual({ similarity: 0.2 });
+    expect(frames).toHaveLength(1);
+    expect(h.events.some((e) => e.type === 'FACE_MISMATCH')).toBe(false);
+    m.stop();
+    vi.useRealTimers();
+  });
+
+  it('C-34: identityRecheckEnabled=false (waived or face detectors off) schedules nothing', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const h = fakeContext();
+    const recheck = vi.fn(() => Promise.resolve({ kind: 'ACCEPTED' as const }));
+    const { m } = setup({
+      recheckIdentity: recheck,
+      identityRecheckEnabled: false,
+      captureSnapshot: () => Promise.resolve(new Blob(['f'])),
+    });
+    await m.start(h.ctx);
+    await vi.advanceTimersByTimeAsync(IDENTITY_RECHECK_INTERVAL_MS * 3);
+    expect(recheck).not.toHaveBeenCalled();
     m.stop();
     vi.useRealTimers();
   });

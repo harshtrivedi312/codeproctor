@@ -1,5 +1,8 @@
 import { DEFAULT_EVENT_SEVERITY, type ClientEventType } from '@codeproctor/shared';
 
+/** `evidence/<ULID>.jpg`: the only shape that goes into an event's `evidenceKey`. */
+export const EVIDENCE_NAME_RE = /^evidence\/[0-9A-HJKMNP-TV-Z]{26}\.jpg$/;
+
 /** HIGH events carry a JPEG snapshot (FR-801 evidence reference). Severity is the server default table. */
 export function needsEvidence(type: ClientEventType): boolean {
   return DEFAULT_EVENT_SEVERITY[type] === 'HIGH';
@@ -17,7 +20,10 @@ export interface EvidenceUpload {
 export interface EvidenceApi {
   presign(input: { contentType: 'image/jpeg'; bytes: number }): Promise<{
     url: string;
-    key: string;
+    /** The session-relative name `evidence/<ULID>.jpg` (ADR 0013 section 5.6). */
+    evidenceKey?: string;
+    /** Older shape of the same value. */
+    key?: string;
     headers?: Record<string, string>;
   }>;
 }
@@ -64,13 +70,26 @@ export async function uploadEvidence(
     body,
     headers,
   ) => (await fetch(url, { method: 'PUT', body, headers })).status,
+  onRefused?: (e: unknown) => void,
 ): Promise<string | null> {
   const work = (async (): Promise<string | null> => {
     try {
       const p = await api.presign({ contentType: 'image/jpeg', bytes: jpeg.size });
       const status = await put(p.url, jpeg, { 'Content-Type': 'image/jpeg', ...p.headers });
-      return status >= 200 && status < 300 ? p.key : null;
-    } catch {
+      const name = p.evidenceKey ?? p.key;
+      // Only a well-formed session-relative name goes into an event.
+      return status >= 200 &&
+        status < 300 &&
+        typeof name === 'string' &&
+        EVIDENCE_NAME_RE.test(name)
+        ? name
+        : null;
+    } catch (err) {
+      try {
+        onRefused?.(err); // for example QUOTA_EXCEEDED: the caller stops asking
+      } catch {
+        // ignore
+      }
       return null;
     }
   })();

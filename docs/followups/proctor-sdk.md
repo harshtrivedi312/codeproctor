@@ -453,3 +453,12 @@ Open
 - Follow-up: `MultiScreenMonitor` (monitors/multi-screen.ts) still calls `getScreenDetails()` unconditionally in session, which can raise the window-management prompt mid-test; apply the same "only when already granted" rule there.
 - Review round 3 of #391 (stream lifetime): `adopt()` refuses a share that already ended or has no video (lock stays, `screen-share` DENIED, the app asks again); a replaced stream is stopped; `stop()` while the picker is open stops the late stream and does not unlock; `adopt()` without consent stops the tracks; `requestScreenShare` treats a stream without a video track as DENIED; `releaseScreenShare(outcome)` for the app's pre-start stream (the app owns it until `adopt()`).
 
+## Evidence, identity re-check and waivers (PR fe/sdk-identity-evidence; FR-606, FR-305, TC-057..059, C-08, C-25, C-34)
+Done: `createEvidenceClient` (presign with `purpose`, `evidenceKey` name check, `recheck`), the re-check scheduler without any match result (status only; STOP on `IDENTITY_CHECK_WAIVED`, `DETECTOR_DISABLED`, `QUOTA_EXCEEDED`, `SESSION_NOT_ACTIVE`, 401; backoff on 429/503; skip on UPLOAD_NOT_FOUND and 400), no client FACE_MISMATCH, `detectorPolicy` and `parseCandidateAccommodations`, evidence quota stop with a counted flag.
+
+Open / for the hub and Frontend B
+- The evidence presign and `identity/recheck` routes are not built on main yet; the client follows ADR 0013 5.6 (paths configurable). Check the real DTO names when BE-10 lands.
+- `FACE_MISMATCH` is still in `CLIENT_EVENT_TYPES` of `packages/shared` (the hub's shared PR has not landed); the SDK no longer emits it, so nothing to mirror. `SCREEN_SHARE` is not in `PROCTOR_DETECTORS` either: the `screen-share` and `screen-share-surface` capability flags stay and no DETECTOR_UNAVAILABLE SCREEN_SHARE is emitted until the shared PR lands.
+- Discrepancy to confirm: the task text said `faceDetectorsOff` means "FACE and GAZE off"; ADR 0015 section 3 and the built projection (`disabledDetectors` contains `FACE`) make it FACE only (GAZE "unless it is also off"). The SDK follows the ADR: GAZE and OBJECT go off only through `disabledDetectors`. If the API starts returning that list, pass it through `parseCandidateAccommodations`.
+- Frontend B: replace the app's own evidence and re-check calls with the client, read the accommodations once (GET /candidate/session/accommodations) and use `detectorPolicy` for `disabledDetectors` and `identityRecheckEnabled`. A mid-test switch of FACE shows up as 409 `DETECTOR_DISABLED` and stops the scheduler.
+

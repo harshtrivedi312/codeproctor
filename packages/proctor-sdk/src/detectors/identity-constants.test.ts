@@ -26,12 +26,11 @@ describe('identity re-check constants (FR-606, C-08)', () => {
 
   it('FR-606 C-08: the scheduler runs one re-check per 120 s, not more', async () => {
     vi.useFakeTimers();
-    const recheck = vi.fn(() => Promise.resolve({ matched: true }));
+    const recheck = vi.fn(() => Promise.resolve({ kind: 'ACCEPTED' as const }));
     const s = new IdentityScheduler(
       DEFAULT_AI_CONFIG.identityIntervalMs,
       () => Promise.resolve(new Blob(['frame'])),
       recheck,
-      () => undefined,
     );
     s.start();
     await vi.advanceTimersByTimeAsync(119_999);

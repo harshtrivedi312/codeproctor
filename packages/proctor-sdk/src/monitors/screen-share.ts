@@ -115,7 +115,9 @@ export class ScreenShareMonitor implements Detector {
       return { ok: false, reason: 'UNSUPPORTED' };
     }
     if (!got.ok) {
-      if (got.reason === 'DENIED') ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
+      if (got.reason === 'DENIED' && !this.stream) {
+        ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
+      }
       if (got.reason === 'WRONG_SURFACE')
         ctx.emit('SCREEN_SHARE_STOPPED', { reason: 'WRONG_SURFACE' });
       return got;
@@ -154,7 +156,8 @@ export class ScreenShareMonitor implements Detector {
     // start) or has no video is not a share: keep the lock and ask again.
     if (!track || stream.getVideoTracks().some((t) => t.readyState === 'ended')) {
       stream.getTracks().forEach((t) => t.stop());
-      ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
+      // Only when nothing live is held: a dead extra stream must not flag or unlock a good share.
+      if (!this.stream) ctx.setCapability({ id: 'screen-share', status: 'DENIED' });
       return { ok: false, reason: 'DENIED' };
     }
     if (surface !== null && surface !== 'monitor') {
@@ -176,7 +179,8 @@ export class ScreenShareMonitor implements Detector {
       });
     }
     this.stream = stream;
-    track?.addEventListener('ended', () => this.onEnded(stream), { once: true });
+    track.addEventListener('ended', () => this.onEnded(stream), { once: true });
+    ctx.setCapability({ id: 'screen-share', status: 'SUPPORTED' }); // clears an earlier DENIED
     if (this.lost) ctx.emit('SCREEN_SHARE_RESUMED', {});
     this.everShared = true;
     this.lost = false;
