@@ -15,7 +15,8 @@ export interface UploadUrlEnv {
 }
 
 export function currentUploadUrlEnv(): UploadUrlEnv {
-  // process.env.NODE_ENV is inlined by Next at build time: 'production' for next build.
+  // process.env.NODE_ENV is inlined by Next at build time: 'production' for next build. Both values
+  // are read per call (not via lib/env.ts) so tests can stub them.
   return {
     development: process.env.NODE_ENV === 'development',
     mocking: process.env.NEXT_PUBLIC_API_MOCKING === 'enabled',

@@ -123,7 +123,7 @@ export const presignSchema = z.object({
   url: z
     .string()
     .url()
-    .refine((u) => isAllowedUploadUrl(u), { message: 'Upload URL must be https' }),
+    .refine((u) => isAllowedUploadUrl(u), { message: 'Upload URL not allowed' }),
   method: z.literal('PUT'),
   headers: z.record(z.string(), z.string()),
   evidenceKey: z.string().min(1),
@@ -155,7 +155,7 @@ export const mediaPresignSchema = z.union([
     url: z
       .string()
       .url()
-      .refine((u) => isAllowedUploadUrl(u), { message: 'Upload URL must be https' }),
+      .refine((u) => isAllowedUploadUrl(u), { message: 'Upload URL not allowed' }),
     method: z.literal('PUT'),
     headers: z.record(z.string(), z.string()),
     expiresAt: z.string(),

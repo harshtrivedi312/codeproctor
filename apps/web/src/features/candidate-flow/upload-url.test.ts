@@ -32,9 +32,21 @@ describe('upload URL rule (FR-402, FR-403, FR-701; D-61 local MinIO demo)', () =
       'http://127.0.0.1.evil.test/x',
       'http://192.168.0.13:9000/x',
       'http://0.0.0.0:9000/x',
+      'http://localhost:9000@evil.test/x',
+      'http://localhost./x',
+      'http://[::ffff:127.0.0.1]/x',
+      'http://evil.test\\@localhost/x',
+      'http:\\\\evil.test\\x',
+      'http://127.0.0.2/x',
     ]) {
       expect(isAllowedUploadUrl(u, dev)).toBe(false);
       expect(isAllowedUploadUrl(u, prod)).toBe(false);
+    }
+  });
+
+  it('FR-701: loopback spellings the URL parser normalises are allowed in a development build', () => {
+    for (const u of ['http://LOCALHOST:9000/x', 'http://[0:0:0:0:0:0:0:1]:9000/x']) {
+      expect(isAllowedUploadUrl(u, dev)).toBe(true);
     }
   });
 
@@ -83,6 +95,14 @@ describe('the presign schemas apply the rule (FR-701, D-61)', () => {
       expect(check('https://bucket.s3.amazonaws.com/x')).toBe(true);
       expect(check('http://example.com/bucket/x')).toBe(false);
       expect(check('http://localhost.evil.test/x')).toBe(false);
+    }
+  });
+
+  it('FR-701: a mock build keeps accepting its http mock-upload URLs through the schemas', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('NEXT_PUBLIC_API_MOCKING', 'enabled');
+    for (const check of [identity, media]) {
+      expect(check('http://localhost:4000/mock-upload/1')).toBe(true);
     }
   });
 
