@@ -28,6 +28,7 @@ export type ProctorKeyErrorKind =
   | 'NOT_ACTIVE' // 409 SESSION_NOT_ACTIVE
   | 'UNAUTHENTICATED' // 401 (TOKEN_EXPIRED, SESSION_TAKEN_OVER, ...)
   | 'UNAVAILABLE' // retries ran out (network, timeout, 429, 5xx) or an unexpected answer
+  | 'CANCELLED' // forget() (finish or purge) cancelled the request: do not retry
   | 'BAD_RESPONSE'; // 200 with a body that is not a key
 
 /** Carries the kind and the problem code only: never the key, the token or a response body. */
@@ -53,12 +54,6 @@ export interface ProctorKeyProviderOptions {
       callback: () => Promise<T>,
     ): Promise<T>;
   };
-  /**
-   * 'internal' (default): the helper takes the Web Lock `cp-key:<sessionId>` around each attempt.
-   * 'none': the caller already holds that lock (Web Locks are not re-entrant: a nested request
-   * for the same name would wait forever); the helper then takes none.
-   */
-  lock?: 'internal' | 'none';
   /** Longest wait for the Web Lock (default 30 s); a frozen tab holding it ends as UNAVAILABLE. */
   lockTimeoutMs?: number;
   /** IndexedDB refused the key: it works in memory, but every reload will cost an OTP resume. */
@@ -121,6 +116,17 @@ function problemCode(text: string): string {
   }
 }
 
+/** Per call: `lock: 'none'` when the caller already holds `cp-key:<sessionId>`. */
+export interface ProctorKeyCallOptions {
+  /**
+   * 'internal' (default): the helper takes the Web Lock `cp-key:<sessionId>` around each attempt.
+   * 'none': the caller already holds that lock (Web Locks are not re-entrant: a nested request for
+   * the same name would wait forever). Per CALL, not per instance, so the session's own fetches
+   * (as `keyProvider`) always take the lock.
+   */
+  lock?: 'internal' | 'none';
+}
+
 /**
  * Gets the batch signing key from `POST /candidate/session/proctor-key` (ADR 0013 sections 2, 4),
  * keeps it as a NON-EXTRACTABLE CryptoKey in IndexedDB with its epoch, and reloads it after a
@@ -158,7 +164,7 @@ export class ProctorKeyProvider {
     try {
       stored = await this.store.get(this.o.sessionId);
     } catch {
-      throw new ProctorKeyError('UNAVAILABLE'); // a faulty store: no detail, never the key
+      return null; // unreadable: ask the server (ensureKey falls through to fetchKey)
     }
     if (!stored) return null;
     if (expectedEpoch !== undefined && stored.epoch !== expectedEpoch) return null;
@@ -172,8 +178,11 @@ export class ProctorKeyProvider {
   }
 
   /** Stored key if present, otherwise one request to the server. */
-  async ensureKey(expectedEpoch?: number): Promise<ProctorKeyResult> {
-    return (await this.loadStoredKey(expectedEpoch)) ?? this.fetchKey(expectedEpoch);
+  async ensureKey(
+    expectedEpoch?: number,
+    o: ProctorKeyCallOptions = {},
+  ): Promise<ProctorKeyResult> {
+    return (await this.loadStoredKey(expectedEpoch)) ?? this.fetchKey(expectedEpoch, o);
   }
 
   /**
@@ -181,11 +190,11 @@ export class ProctorKeyProvider {
    * request. `expectedEpoch` (the token's epoch) lets a key another tab stored meanwhile count only
    * when it is of that epoch.
    */
-  fetchKey(expectedEpoch?: number): Promise<ProctorKeyResult> {
+  fetchKey(expectedEpoch?: number, o: ProctorKeyCallOptions = {}): Promise<ProctorKeyResult> {
     // The generation is read BEFORE any await: a forget() (finish, purge) from here on cancels
     // this request, also while it waits for the Web Lock.
     const gen = this.gen;
-    this.inflight ??= this.lockedFetch(gen, expectedEpoch).finally(() => {
+    this.inflight ??= this.lockedFetch(gen, expectedEpoch, o.lock === 'none').finally(() => {
       this.inflight = null;
     });
     return this.inflight;
@@ -198,7 +207,11 @@ export class ProctorKeyProvider {
    * during backoff, so a long Retry-After never parks other tabs. Inside the lock a key that
    * another tab stored while we waited is used instead of going to the network.
    */
-  private async lockedFetch(gen: number, expectedEpoch?: number): Promise<ProctorKeyResult> {
+  private async lockedFetch(
+    gen: number,
+    expectedEpoch: number | undefined,
+    noLock: boolean,
+  ): Promise<ProctorKeyResult> {
     // Unknown (a failed read) is not the same as empty: it never lets "any stored key" through.
     const read = await this.readStored();
     const before: { known: boolean; epoch?: number } = read.ok
@@ -209,10 +222,11 @@ export class ProctorKeyProvider {
     const max = this.o.backoffMaxMs ?? 15_000;
     const sleep = this.o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     for (let attempt = 0; ; attempt++) {
-      const out = await this.withLock(async () => {
-        if (gen !== this.gen) throw new ProctorKeyError('UNAVAILABLE'); // purged: no POST
+      const out = await this.withLock(noLock, async () => {
+        if (gen !== this.gen) throw new ProctorKeyError('CANCELLED'); // purged: no POST
         const now = (await this.readStored()).value;
         if (now && this.otherTabStored(now.epoch, before, expectedEpoch)) {
+          if (gen !== this.gen) throw new ProctorKeyError('CANCELLED'); // purged while reading
           const r: ProctorKeyResult = {
             key: now.key,
             epoch: now.epoch,
@@ -252,13 +266,13 @@ export class ProctorKeyProvider {
     }
   }
 
-  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
+  private async withLock<T>(noLock: boolean, fn: () => Promise<T>): Promise<T> {
     const locks =
       this.o.locks ??
       (typeof navigator !== 'undefined'
         ? (navigator as { locks?: ProctorKeyProviderOptions['locks'] }).locks
         : undefined);
-    if (this.o.lock === 'none' || !locks) return fn();
+    if (noLock || !locks) return fn();
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), this.o.lockTimeoutMs ?? 30_000);
     try {
@@ -362,7 +376,14 @@ export class ProctorKeyProvider {
     ) {
       throw new ProctorKeyError('BAD_RESPONSE');
     }
-    const key = await importSessionKey(keyB64); // non-extractable
+    // The server has issued the key now: a failing import must not be retried (the retry would
+    // answer KEY_ALREADY_ISSUED and force an OTP resume), so it is final.
+    let key: CryptoKey;
+    try {
+      key = await importSessionKey(keyB64); // non-extractable
+    } catch {
+      throw new ProctorKeyError('BAD_RESPONSE');
+    }
     if (!isSigningKey(key)) throw new ProctorKeyError('BAD_RESPONSE');
     let persisted = true;
     if (gen !== this.gen) {

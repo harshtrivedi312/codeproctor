@@ -645,8 +645,12 @@ export class ProctorSession {
     sessionId: string,
     store: IdbStore = new IdbStore(),
   ): Promise<{ epoch: number } | null> {
-    const stored = await new IdbKeyStore(store).get(sessionId);
-    return stored ? { epoch: stored.epoch } : null;
+    try {
+      const stored = await new IdbKeyStore(store).get(sessionId);
+      return stored ? { epoch: stored.epoch } : null;
+    } catch {
+      return null; // unreadable store: the app asks the server
+    }
   }
 
   /** The app refreshed the candidate token after `onReauthRequired`: send again. */

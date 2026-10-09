@@ -53,13 +53,10 @@ function isUsable(v: unknown): v is StoredKey {
 export class IdbKeyStore implements KeyStore {
   constructor(private readonly store: IdbStore) {}
 
+  /** Null when there is no usable row; a failed READ rejects (unknown is not empty). */
   async get(sessionId: string): Promise<StoredKey | null> {
-    try {
-      const v = await this.store.get<unknown>(STORES.meta, hmacKeyName(sessionId));
-      return isUsable(v) ? { key: v.key, epoch: v.epoch } : null;
-    } catch {
-      return null; // unreadable: the app asks the server (or the candidate does an OTP resume)
-    }
+    const v = await this.store.get<unknown>(STORES.meta, hmacKeyName(sessionId));
+    return isUsable(v) ? { key: v.key, epoch: v.epoch } : null;
   }
 
   async put(sessionId: string, value: StoredKey): Promise<void> {
@@ -72,6 +69,6 @@ export class IdbKeyStore implements KeyStore {
   }
 
   async delete(sessionId: string): Promise<void> {
-    await this.store.delete(STORES.meta, hmacKeyName(sessionId)).catch(() => undefined);
+    await this.store.delete(STORES.meta, hmacKeyName(sessionId)); // callers decide what a failure means
   }
 }
