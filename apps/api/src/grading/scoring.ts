@@ -4,7 +4,6 @@
 import { mcqAnswerSchema, shortAnswerAnswerSchema } from './answer-shapes';
 import { normalizeShortAnswer } from '../questions/answer-spec';
 import type { McqAnswerSpec, ShortAnswerSpec } from '../questions/answer-spec';
-import { candidateOptionId } from './option-ids';
 
 const DECIMAL = /^(\d{1,8})(?:\.(\d{1,2}))?$/;
 
@@ -43,11 +42,16 @@ export function codingScore(points: bigint, tests: readonly Weighted[]): bigint 
 }
 
 /** MCQ by key: the selected set must equal the correct set. No answer, or a malformed one, is wrong. */
-export function mcqCorrect(spec: McqAnswerSpec, answer: unknown, sessionId: string): boolean {
+export function mcqCorrect(
+  spec: McqAnswerSpec,
+  answer: unknown,
+  /** author option id -> the id this session's candidate was shown (OptionIdService.of). */
+  candidateId: (optionId: string) => string,
+): boolean {
   const parsed = mcqAnswerSchema.safeParse(answer);
   if (!parsed.success) return false;
   const selected = new Set(parsed.data.optionIds);
-  const correct = new Set(spec.correctOptionIds.map((id) => candidateOptionId(sessionId, id)));
+  const correct = new Set(spec.correctOptionIds.map((id) => candidateId(id)));
   if (selected.size !== correct.size) return false;
   for (const id of correct) if (!selected.has(id)) return false;
   return true;

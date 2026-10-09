@@ -526,10 +526,11 @@ export class ProctorEventsService {
    * and its pause stand or fall together:
    *   - IN_PROGRESS and a candidate reason is active: PAUSED, through SessionStateService.
    *   - PAUSED and no candidate reason is active and no PROCTOR pause is in force: IN_PROGRESS.
-   * Both are `SessionStateService.transition` calls guarded on the pause reasons that were read, so
+   *   - PAUSED and the active candidate reasons (plus PROCTOR, which a candidate event never touches)
+   *     differ from the stored list: PAUSED to PAUSED with the new list, so the write gate
+   *     (session-write-gate.ts) reads the true reasons (stale pause_reasons gap, FU-BEB-161).
+   * All are `SessionStateService.transition` calls guarded on the pause reasons that were read, so
    * a proctor pause added meanwhile is never overwritten or lifted (0 rows, re-read, try again).
-   * While the session is already PAUSED a new reason only becomes an event: the stored reason list
-   * is not edited (SessionStateService has no PAUSED to PAUSED edge yet; see the follow-ups).
    * The clock does not change (deadline_at, paused_ms and proctor_paused_at are untouched).
    */
   private async applyPauseEffects(
@@ -557,20 +558,37 @@ export class ProctorEventsService {
             ifPauseReasons: current.pauseReasons,
             patch: { pauseReasons: [...active] },
           });
-        } else if (
-          current.status === 'PAUSED' &&
-          active.size === 0 &&
-          !current.pauseReasons.includes('PROCTOR')
-        ) {
-          await this.states.transition({
-            sessionId: ctx.sessionId,
-            from: 'PAUSED',
-            to: 'IN_PROGRESS',
-            now,
-            db,
-            ifPauseReasons: current.pauseReasons,
-            patch: { pauseReasons: [] },
-          });
+        } else if (current.status === 'PAUSED') {
+          // PROCTOR is owned by the staff routes: keep it as it is, whatever the events say.
+          const next: PauseReason[] = [
+            ...CANDIDATE_REASONS.filter((r) => active.has(r)),
+            // Everything that is not a candidate reason (PROCTOR) is kept exactly as stored.
+            ...current.pauseReasons.filter((r) => !CANDIDATE_REASONS.includes(r)),
+          ];
+          const same =
+            next.length === current.pauseReasons.length &&
+            next.every((r) => current.pauseReasons.includes(r));
+          if (next.length === 0) {
+            await this.states.transition({
+              sessionId: ctx.sessionId,
+              from: 'PAUSED',
+              to: 'IN_PROGRESS',
+              now,
+              db,
+              ifPauseReasons: current.pauseReasons,
+              patch: { pauseReasons: [] },
+            });
+          } else if (!same) {
+            await this.states.transition({
+              sessionId: ctx.sessionId,
+              from: 'PAUSED',
+              to: 'PAUSED',
+              now,
+              db,
+              ifPauseReasons: current.pauseReasons,
+              patch: { pauseReasons: next },
+            });
+          }
         }
         return;
       } catch (e) {

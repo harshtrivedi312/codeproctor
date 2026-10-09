@@ -89,7 +89,9 @@ export function LoginForm(): React.JSX.Element {
   const reset = params.get('reset') === 'done';
   const twoFactorOff = params.get('reason') === 'two-factor-off';
   const twoFactorOn = params.get('reason') === 'two-factor-on';
-  const twoFactorUnconfirmed = params.get('reason') === 'two-factor-unconfirmed';
+  // After the fixed "outcome unknown" 500 or a lost answer (api-contract section 8): say what we
+  // know, and how to find out.
+  const unconfirmedReason = params.get('reason');
 
   return (
     <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} noValidate className="space-y-4">
@@ -109,10 +111,17 @@ export function LoginForm(): React.JSX.Element {
           Two-factor sign-in is on. Sign in again with your authenticator code.
         </Alert>
       ) : null}
-      {twoFactorUnconfirmed && !banner ? (
-        <Alert tone="info" role="status" title="We could not confirm the set-up">
-          You were signed out to be safe. Sign in again. If you are asked for a code from your
-          authenticator app, two-factor sign-in is on. If not, set it up again from Security.
+      {!banner && unconfirmedReason === 'two-factor-unconfirmed' ? (
+        <Alert tone="warning" role="status" title="We could not confirm the change">
+          You were signed out on this device to be safe. Sign in again. If you are asked for an
+          authenticator code, two-factor sign-in is on. If not, it is off: set it up or turn it off
+          again from the Security page if you want to.
+        </Alert>
+      ) : null}
+      {!banner && unconfirmedReason === 'recovery-unconfirmed' ? (
+        <Alert tone="warning" role="status" title="We could not confirm that sign-in finished">
+          Sign in again from the start. If the recovery code is now refused, it was already used:
+          enter another recovery code or the code from your authenticator app.
         </Alert>
       ) : null}
       {signOutUnconfirmed ? (

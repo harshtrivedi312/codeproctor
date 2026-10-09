@@ -26,6 +26,7 @@ const judge0 = {
 const candidate = {
   JWT_CANDIDATE_SECRET: 'c'.repeat(40),
   OTP_PEPPER: 'd'.repeat(40),
+  QUESTION_OPTION_ID_SECRET: 'e'.repeat(40),
 };
 
 describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, ADR 0013 section 2)', () => {
@@ -130,5 +131,19 @@ describe('Candidate session environment (BE-07, ADR 0003, ADR 0007 section 6, AD
     expect(
       validateEnv({ ...valid, CANDIDATE_TOKEN_TTL_SECONDS: '600' }).CANDIDATE_TOKEN_TTL_SECONDS,
     ).toBe(600);
+  });
+  it('NFR-04, CS-4.6: QUESTION_OPTION_ID_SECRET is required in pilot and production and a placeholder is refused in shared environments', () => {
+    const base = { ...valid, ...candidate };
+    expect(() =>
+      validateEnv({ ...base, APP_ENV: 'pilot', QUESTION_OPTION_ID_SECRET: undefined }),
+    ).toThrow(/QUESTION_OPTION_ID_SECRET/);
+    expect(() =>
+      validateEnv({
+        ...base,
+        APP_ENV: 'staging',
+        QUESTION_OPTION_ID_SECRET: 'change-me-' + 'x'.repeat(40),
+      }),
+    ).toThrow(/QUESTION_OPTION_ID_SECRET/);
+    expect(validateEnv({ ...valid }).QUESTION_OPTION_ID_SECRET).toBeUndefined();
   });
 });

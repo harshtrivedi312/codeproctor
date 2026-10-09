@@ -6,9 +6,16 @@ import {
   WEBCAM_CONSTRAINTS,
   type RecorderFactory,
 } from './recorder';
-import { UploadQueue } from './upload-queue';
+import { MediaCounters, type MediaCounter } from './counters';
+import { UploadQueue, type UploadQueueOptions } from './upload-queue';
 import type { CapabilityFlag } from '../core/types';
-import type { DeviceLoss, MediaApi, RecorderHealth, RecordingStream } from './types';
+import {
+  RECORDING_STREAMS,
+  type DeviceLoss,
+  type MediaApi,
+  type RecorderHealth,
+  type RecordingStream,
+} from './types';
 
 export interface RecordingPipelineOptions {
   sessionId: string;
@@ -28,6 +35,14 @@ export interface RecordingPipelineOptions {
   maxMemoryBytes?: number;
   maxBufferBytes?: number;
   backoffBaseMs?: number;
+  /** Reachability probe while the connection is down, for example the session heartbeat. */
+  probe?: UploadQueueOptions['probe'];
+  /** The server said the session is over: uploading stopped, chunks kept (SESSION_NOT_ACTIVE). */
+  onEnded?: UploadQueueOptions['onEnded'];
+  /** A segment's first chunk was refused for good; it is kept and retried slowly. */
+  onChunkBlocked?: UploadQueueOptions['onChunkBlocked'];
+  /** Injected clock for chunk start times and durations (tests). */
+  now?: () => number;
 }
 
 /**
@@ -42,14 +57,78 @@ export class RecordingPipeline {
   private readonly owned = new Map<RecordingStream, MediaStream>();
   private readonly onOnline = (): void => this.queue.retryNow();
   private started = false;
+  private readonly counters: MediaCounters;
+  /** The MediaStream each recorder reads, to restart a recorder without asking for the device again. */
+  private readonly sources = new Map<RecordingStream, MediaStream>();
+  /** The server said the session is over: no device may be opened or recorder started any more. */
+  private ended = false;
+  /** stop() or finish() began: no recorder may start any more, whatever is still awaiting. */
+  private closing = false;
 
   constructor(private readonly o: RecordingPipelineOptions) {
     this.store = o.store ?? new IdbStore();
+    this.counters = new MediaCounters(this.store, o.sessionId);
     this.queue = new UploadQueue({
       sessionId: o.sessionId,
       api: o.api,
       store: this.store,
       ...(o.put ? { put: o.put } : {}),
+      ...(o.probe ? { probe: o.probe } : {}),
+      onEnded: (info) => {
+        this.ended = true;
+        // Privacy: the session is over, so nothing more may be captured (recorders stop, their
+        // last chunk is refused by the queue, every device is released).
+        void this.releaseAll().catch(() => undefined);
+        o.onCapability?.({
+          id: 'recording-ended',
+          status: 'UNVERIFIABLE',
+          detail:
+            'The server says the session is over: recording uploads stopped, chunks are kept.',
+        });
+        o.onEnded?.(info);
+      },
+      onSegmentLost: (info) => {
+        o.onCapability?.({
+          id: 'recording-segment-lost',
+          status: 'UNVERIFIABLE',
+          detail: `The first chunk of a ${info.stream.toLowerCase()} segment could not be buffered: that segment is lost.`,
+        });
+      },
+      onQuota: (info) => {
+        o.onCapability?.({
+          id: 'recording-quota',
+          status: 'UNVERIFIABLE',
+          detail: `The upload quota for ${info.stream.toLowerCase()} is used up for this session; chunks wait and may never be sent.`,
+        });
+      },
+      onSeqConflict: (info) => {
+        o.onCapability?.({
+          id: 'recording-seq-conflict',
+          status: 'UNVERIFIABLE',
+          detail: `A ${info.stream.toLowerCase()} chunk collided with one the server already confirmed (our counters were behind). The stream is held: recording continues and its chunks are kept until the counters are refreshed (seedCounters), then the held chunks are dropped and counted. Chunks confirmed under stale numbers before are not recoverable.`,
+        });
+      },
+      onStaleIdentityLoss: (info) => {
+        o.onCapability?.({
+          id: 'recording-stale-identity',
+          status: 'UNVERIFIABLE',
+          detail: `${String(info.chunks)} ${info.stream.toLowerCase()} chunks were dropped when the counters were refreshed: they carried numbers the server had already confirmed for other chunks.`,
+        });
+      },
+      onChunkBlocked: (info) => {
+        o.onCapability?.({
+          id: 'recording-blocked',
+          status: 'UNVERIFIABLE',
+          detail: `The server refused the first chunk of a ${info.stream.toLowerCase()} segment; it is kept and retried slowly.`,
+        });
+        o.onChunkBlocked?.(info);
+      },
+      onCapExceeded: () =>
+        o.onCapability?.({
+          id: 'recording-buffer',
+          status: 'UNVERIFIABLE',
+          detail: 'The recording buffer is full of protected chunks; it is above its cap.',
+        }),
       ...(o.onHealth ? { onHealth: o.onHealth } : {}),
       ...(o.staleAfterMs === undefined ? {} : { staleAfterMs: o.staleAfterMs }),
       ...(o.maxMemoryBytes === undefined ? {} : { maxMemoryBytes: o.maxMemoryBytes }),
@@ -72,6 +151,14 @@ export class RecordingPipeline {
   /** Resume uploads left over from a previous page load (FR-702). Needs no device access. */
   async start(): Promise<void> {
     await this.queue.start();
+    await this.counters.load();
+    // Never restart below a chunk still waiting from an earlier page load.
+    for (const stream of RECORDING_STREAMS) {
+      this.counters.seed(stream, {
+        nextSeq: this.queue.maxSeq(stream) + 1,
+        nextSegment: this.queue.maxSegment(stream) + 1,
+      });
+    }
     globalThis.addEventListener?.('online', this.onOnline);
     this.started = true;
   }
@@ -88,26 +175,66 @@ export class RecordingPipeline {
     return this.owned.get('WEBCAM') ?? null;
   }
 
-  /** In-memory segment counters: recording must still work when IndexedDB is broken. */
-  private readonly segmentCounters = new Map<RecordingStream, number>();
+  /**
+   * Lift a stream's counters to the server's (`proctor-key` `counters.media`), keeping the larger
+   * of local and server so a new device never reuses a seq or segment.
+   */
+  seedCounters(counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>): void {
+    const held = this.queue.health().heldStreams;
+    if (held.length === 0 || this.ended || this.closing) {
+      this.applySeed(counters); // nothing to release: just lift the counters
+      return;
+    }
+    void this.seedAndRelease(counters, held).catch(() => this.applySeed(counters));
+  }
 
-  private async nextSegment(stream: RecordingStream): Promise<number> {
-    const key = `${this.o.sessionId}:segment:${stream}`;
-    let stored = -1;
-    try {
-      stored = (await this.store.get<number>(STORES.meta, key)) ?? -1;
-    } catch {
-      // IndexedDB unavailable: fall back to the in-memory counter and the queue's view.
+  private applySeed(counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>): void {
+    for (const [stream, v] of Object.entries(counters)) {
+      // Streams this recorder does not know (a future ROOM_SCAN) are ignored, not an error.
+      if (!v || !(RECORDING_STREAMS as readonly string[]).includes(stream)) continue;
+      this.counters.seed(stream as RecordingStream, v);
+      void this.counters.persist(stream as RecordingStream); // best effort, also on later loads
     }
-    const next =
-      Math.max(stored, this.segmentCounters.get(stream) ?? -1, this.queue.maxSegment(stream)) + 1;
-    this.segmentCounters.set(stream, next);
-    try {
-      await this.store.put(STORES.meta, key, next);
-    } catch {
-      // not persisted; a reload may reuse the number, the server upserts by (stream, segment, seq)
+  }
+
+  /**
+   * End the holds after a collision (the app refreshed the counters from the server). Order
+   * matters: the held streams' recorders are stopped FIRST (a real MediaRecorder emits a final
+   * chunk when stopped; it must take its number from the old counters and be dropped with the
+   * held ones), then the counters are seeded, then the held chunks are dropped as counted
+   * stale-identity losses, and only then do the recorders restart into a fresh segment whose seqs
+   * continue from the seeded `nextSeq`. Nothing is guessed and no seq is reused.
+   */
+  private async seedAndRelease(
+    counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>,
+    held: RecordingStream[],
+  ): Promise<void> {
+    const restart: RecordingStream[] = [];
+    for (const stream of held) {
+      const rec = this.recorders.get(stream);
+      if (!rec) continue;
+      restart.push(stream);
+      await rec.stop(); // the device stays open
+      if (this.recorders.get(stream) === rec) this.recorders.delete(stream);
     }
-    return next;
+    this.applySeed(counters);
+    // finish()/stop()/the end of the session may have begun while we waited: release nothing then.
+    if (this.ended || this.closing) return;
+    await this.queue.releaseHeld();
+    if (this.ended || this.closing) return;
+    for (const stream of restart) {
+      const src = this.sources.get(stream);
+      const live = src?.getTracks().some((t) => t.readyState !== 'ended') ?? false;
+      // Restart only if nothing else registered a recorder meanwhile and the device is alive.
+      if (src && live && !this.recorders.has(stream)) await this.begin(stream, src);
+    }
+  }
+
+  /** Stop every recorder and release every device this pipeline opened (recorders UNION owned). */
+  private async releaseAll(): Promise<void> {
+    const streams = new Set<RecordingStream>([...this.recorders.keys(), ...this.owned.keys()]);
+    for (const stream of streams) await this.stopStream(stream).catch(() => undefined);
+    this.sources.clear();
   }
 
   private supported(stream: RecordingStream): boolean {
@@ -124,6 +251,7 @@ export class RecordingPipeline {
 
   /** Record a screen stream the caller already obtained (displaySurface was checked there). */
   async recordScreen(stream: MediaStream): Promise<boolean> {
+    if (this.ended || this.closing) return false; // no recorder may start (before anything else)
     this.o.assertConsent();
     if (!this.supported('SCREEN')) return false;
     // 5 fps keeps files small; some browsers ignore it, which is fine.
@@ -131,11 +259,13 @@ export class RecordingPipeline {
       .getVideoTracks()[0]
       ?.applyConstraints({ frameRate: { ideal: SCREEN_FRAME_RATE, max: SCREEN_FRAME_RATE } })
       .catch(() => undefined);
+    if (this.ended || this.closing) return false;
     await this.begin('SCREEN', stream);
-    return true;
+    return !(this.ended || this.closing);
   }
 
   async recordWebcam(): Promise<MediaStream | null> {
+    if (this.ended || this.closing) return null;
     this.o.assertConsent();
     if (!this.supported('WEBCAM')) return null;
     const md = this.o.mediaDevices ?? navigator.mediaDevices;
@@ -146,12 +276,19 @@ export class RecordingPipeline {
       this.o.onCapability?.({ id: 'record-webcam', status: 'DENIED' });
       return null;
     }
+    if (this.ended || this.closing) {
+      // The session ended (or stop() began) while the permission prompt was open: release the device at once.
+      s.getTracks().forEach((t) => t.stop());
+      return null;
+    }
     this.owned.set('WEBCAM', s);
     await this.begin('WEBCAM', s);
+    if (this.ended || this.closing) return null; // ended during begin(): it released the device
     return s;
   }
 
   async recordAudio(): Promise<MediaStream | null> {
+    if (this.ended || this.closing) return null;
     this.o.assertConsent();
     if (!this.supported('AUDIO')) return null;
     const md = this.o.mediaDevices ?? navigator.mediaDevices;
@@ -165,20 +302,42 @@ export class RecordingPipeline {
       this.o.onCapability?.({ id: 'record-audio', status: 'DENIED' });
       return null;
     }
+    if (this.ended || this.closing) {
+      // The session ended while the permission prompt was open: release the device at once.
+      s.getTracks().forEach((t) => t.stop());
+      return null;
+    }
     this.owned.set('AUDIO', s);
     await this.begin('AUDIO', s);
+    if (this.ended || this.closing) return null; // ended during begin(): it released the device
     return s;
   }
 
   private async begin(stream: RecordingStream, media: MediaStream): Promise<void> {
     if (!this.started) await this.start();
     await this.recorders.get(stream)?.stop();
-    const segment = await this.nextSegment(stream);
+    const segment = await this.counters.newSegment(stream);
+    if (this.ended || this.closing) {
+      // SESSION_NOT_ACTIVE or stop()/finish() arrived while we waited: register nothing, release.
+      this.owned
+        .get(stream)
+        ?.getTracks()
+        .forEach((t) => t.stop());
+      this.owned.delete(stream);
+      return;
+    }
+    this.sources.set(stream, media);
     const rec = new ChunkRecorder(
       stream,
       segment,
-      (c, d) => this.queue.add(c, d),
+      async (c, d) => {
+        // The counter is persisted before the chunk is stored, so a reload never reuses its seq.
+        await this.counters.persist(stream);
+        await this.queue.add(c, d);
+      },
       this.o.recorderFactory,
+      () => this.counters.allocSeq(stream), // continues across segments and restarts
+      this.o.now,
     );
     this.recorders.set(stream, rec);
     let reported = false;
@@ -206,6 +365,7 @@ export class RecordingPipeline {
   async stopStream(stream: RecordingStream): Promise<void> {
     await this.recorders.get(stream)?.stop();
     this.recorders.delete(stream);
+    this.sources.delete(stream);
     this.owned
       .get(stream)
       ?.getTracks()
@@ -215,14 +375,18 @@ export class RecordingPipeline {
 
   /**
    * End of session (FR-702). Stops recorders (final chunks are flushed), waits up to
-   * `drainTimeoutMs` for uploads, then deletes every chunk and segment counter of this session from
-   * IndexedDB. Chunks that did not make it are counted in `droppedChunks` and `droppedBytes`;
-   * the caller should show that gap. Only `${sessionId}:segment:` meta keys are removed, because
-   * the event queue keeps its own counter under the same session prefix.
+   * `drainTimeoutMs` for uploads, then deletes every buffered chunk of this session from IndexedDB.
+   * Chunks that did not make it are counted in `droppedChunks` and `droppedBytes`; the caller
+   * should show that gap. The per-stream media counters (`<sessionId>:media:<STREAM>`, small
+   * integers, no candidate data) are KEPT on purpose, like the event counter: a new load of the
+   * same session must continue the seq and segment numbers or the server answers SEQ_CONFLICT or
+   * `alreadyUploaded`. The stale-session sweep removes them later. The legacy
+   * `<sessionId>:segment:` keys are removed.
    */
   async finish(opts: { drainTimeoutMs?: number } = {}): Promise<RecorderHealth> {
+    this.closing = true; // first: no recorder may start while the queue drains
     globalThis.removeEventListener?.('online', this.onOnline);
-    for (const s of [...this.recorders.keys()]) await this.stopStream(s);
+    await this.releaseAll();
     await this.queue.waitUntilIdle(opts.drainTimeoutMs ?? 15_000);
     this.queue.stop();
     await this.queue.purge();
@@ -233,8 +397,9 @@ export class RecordingPipeline {
 
   /** Stop recording; unsent chunks stay in IndexedDB and upload on the next load. */
   async stop(): Promise<void> {
+    this.closing = true; // first: nothing may start while we tear down
     globalThis.removeEventListener?.('online', this.onOnline);
-    for (const s of [...this.recorders.keys()]) await this.stopStream(s);
+    await this.releaseAll();
     this.queue.stop();
   }
 }

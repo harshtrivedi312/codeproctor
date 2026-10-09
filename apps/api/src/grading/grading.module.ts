@@ -5,11 +5,13 @@ import { CloseSectionService } from './close-section.service';
 import { GradeSessionService } from './grade-session.service';
 import { GradingQueue } from './grading-queue';
 import { GradingWorker } from './grading-worker';
+import { OptionIdService } from './option-ids';
 import { ManualScoringService } from './manual-scoring.service';
 import { SubmitFlowService } from './submit-flow.service';
 
 // FR-505, FR-506, FR-205 (BE-11): section close, auto-submit, grade-session and manual scoring.
-// ManualScoringService is exported for the review module (BE-13).
+// ManualScoringService is superseded by ReviewDecisionsService (review module, BE-13) and no route
+// uses it; it is removed with FU-BE-269.
 @Module({
   imports: [SessionModule, ExecutionModule],
   providers: [
@@ -19,7 +21,14 @@ import { SubmitFlowService } from './submit-flow.service';
     GradeSessionService,
     ManualScoringService,
     GradingWorker,
+    OptionIdService,
   ],
-  exports: [GradingQueue, SubmitFlowService, ManualScoringService, GradeSessionService],
+  exports: [
+    GradingQueue,
+    SubmitFlowService,
+    ManualScoringService,
+    GradeSessionService,
+    OptionIdService,
+  ],
 })
 export class GradingModule {}

@@ -3,6 +3,8 @@ import Editor, { loader, type OnMount, type BeforeMount } from '@monaco-editor/r
 import type { CodeLanguage } from '@codeproctor/shared';
 import type * as MonacoNs from 'monaco-editor';
 import * as React from 'react';
+import type { KeystrokeRecorder } from '@codeproctor/proctor-sdk';
+import { bindKeystrokes, type KeystrokeBinding } from './keystroke-binding';
 import { LANGUAGE_KEYWORDS } from './keywords';
 
 // Self-hosted Monaco: files are copied to /public/monaco by scripts/copy-monaco.mjs (no CDN).
@@ -62,20 +64,74 @@ export interface CodeEditorProps {
   onChange: (value: string) => void;
   /** Called when a paste or drop is blocked, so the screen can tell the candidate. */
   onBlocked: (kind: 'paste' | 'drop') => void;
-  /** Every content change, for keystroke capture (FR-608). The demo passes no consumer. */
+  /** Every content change (the demo passes no consumer). */
   onContentChange?: (change: { versionId: number; changes: readonly unknown[] }) => void;
+  /**
+   * The SDK's keystroke recorder, when this editor is the test's answer editor (FR-608, TC-062).
+   * Absent for the practice editor and the demo, which never record. A function because the recorder
+   * exists only once the proctor session has started.
+   */
+  getKeystrokes?: () => KeystrokeRecorder | null;
   ariaLabel: string;
 }
 
 export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
-  const { questionId, language, value, readOnly, onChange, onBlocked, onContentChange, ariaLabel } =
-    props;
+  const {
+    questionId,
+    language,
+    value,
+    readOnly,
+    onChange,
+    onBlocked,
+    onContentChange,
+    getKeystrokes,
+    ariaLabel,
+  } = props;
   const blockedRef = React.useRef(onBlocked);
   const contentRef = React.useRef(onContentChange);
   React.useEffect(() => {
     blockedRef.current = onBlocked;
     contentRef.current = onContentChange;
   });
+
+  // The keystroke binding reads these through refs, updated in a layout effect so they are fresh
+  // when Monaco swaps its model for a new question or language (its own effect runs after this).
+  const keystrokesRef = React.useRef(getKeystrokes);
+  const contextRef = React.useRef({ sessionQuestionId: questionId, language });
+  const bindingRef = React.useRef<KeystrokeBinding | null>(null);
+  const editorRef = React.useRef<MonacoNs.editor.IStandaloneCodeEditor | null>(null);
+  // The last text this editor reported through onChange: a different `value` prop is the app
+  // setting the text itself (reset to starter code), which the recording must see as a RESET.
+  const lastEmittedRef = React.useRef(value);
+  React.useLayoutEffect(() => {
+    keystrokesRef.current = getKeystrokes;
+    contextRef.current = { sessionQuestionId: questionId, language };
+    if (value !== lastEmittedRef.current) {
+      bindingRef.current?.expectExternalText(value);
+      lastEmittedRef.current = value;
+    }
+  });
+  const ensureBinding = (): void => {
+    const editor = editorRef.current;
+    if (!editor || bindingRef.current || !keystrokesRef.current) return;
+    const binding = bindKeystrokes(
+      editor,
+      () => keystrokesRef.current?.() ?? null,
+      () => contextRef.current,
+    );
+    bindingRef.current = binding;
+    disposers.current.push(() => {
+      binding.dispose();
+      bindingRef.current = null;
+    });
+  };
+  React.useEffect(() => {
+    // The recorder prop can arrive after the editor mounted: bind then. Otherwise, after Monaco
+    // swapped its model, re-check the recording against the new question and language. (The
+    // getter changes identity with the proctor state; sync() is cheap and does nothing in sync.)
+    ensureBinding();
+    bindingRef.current?.sync();
+  }, [questionId, language, getKeystrokes]);
 
   // Everything attached in onMount is released on unmount.
   const disposers = React.useRef<Array<() => void>>([]);
@@ -111,6 +167,8 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       contentRef.current?.({ versionId: e.versionId, changes: e.changes });
     });
     disposers.current.push(() => content.dispose());
+    editorRef.current = editor;
+    ensureBinding();
   };
 
   return (
@@ -122,7 +180,10 @@ export default function CodeEditor(props: CodeEditorProps): React.JSX.Element {
       theme="codeproctor-dark"
       beforeMount={configureOnce}
       onMount={onMount}
-      onChange={(v) => onChange(v ?? '')}
+      onChange={(v) => {
+        lastEmittedRef.current = v ?? '';
+        onChange(v ?? '');
+      }}
       loading={<p className="p-4 text-sm text-neutral-200">Loading the editor…</p>}
       options={{
         readOnly,

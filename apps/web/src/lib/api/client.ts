@@ -69,7 +69,7 @@ const refreshMiddleware: Middleware = {
  * A 503 whose problem code is BUSY (lock contention, the action did not happen) is sent again, at
  * most 3 more times, after the Retry-After wait (1 to 5 s plus jitter, about 10 s in all). Nothing
  * else is retried: not another 503, not a 500 (a staff write may have committed), nothing on the
- * credential and re-auth routes (see isNoRetryRoute). The retry stops when the call was aborted
+ * credential and re-auth routes or the candidate routes (see isNoRetryRoute). The retry stops when the call was aborted
  * (the screen left) or the session generation or user changed, and never sends for another person.
  * A call can opt out with the NO_BUSY_RETRY_HEADER header. The body is cloned before the first
  * send; a body that cannot be cloned is not retried.

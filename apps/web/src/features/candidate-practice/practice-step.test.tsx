@@ -65,6 +65,30 @@ describe('practice question (FR-406)', () => {
     expect(localStorage.length + sessionStorage.length).toBe(0);
   });
 
+  it('FR-406 DL-58: a local stub run says "Local stub, not real execution" and shows no pass or fail', async () => {
+    await signIn();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/practice/run`, () =>
+        HttpResponse.json({
+          outcome: 'completed',
+          tests: [],
+          stdout: '',
+          stderr: 'local stub, not real execution',
+          stub: true,
+          message: 'local stub, not real execution',
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderWithQuery(<PracticeStep onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    await user.type(await screen.findByLabelText('Practice code editor'), 'print(1)');
+    await user.click(screen.getByRole('button', { name: /^run$/i }));
+    expect(await screen.findByTestId('run-stub-notice')).toHaveTextContent(
+      /local stub, not real execution/i,
+    );
+    expect(screen.queryByText(/sample tests passed/i)).not.toBeInTheDocument();
+  });
+
   it('FR-406: runs are spaced like the real test (one per 5 seconds)', async () => {
     await signIn();
     const user = userEvent.setup();

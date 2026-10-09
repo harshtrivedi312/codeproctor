@@ -623,7 +623,7 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
   const readOnly = ALL_MODELS.filter((m) => CANDIDATE_MODELS[m]?.kind === 'read');
   const grantOnly = ALL_MODELS.filter((m) => CANDIDATE_MODELS[m]?.kind === 'grant-only');
 
-  it('TC-008 the denied models are the 13 that are in no CS-4.3 row', () => {
+  it('TC-008 the denied models are the 14 that are in no CS-4.3 row', () => {
     expect([...denied].sort()).toEqual(
       [
         'User',
@@ -639,6 +639,7 @@ describe('CS-4.3 the CANDIDATE allowlist, deny by default (NFR-04, TC-008)', () 
         'Appeal',
         'WebhookEndpoint',
         'WebhookDelivery',
+        'ScheduledWindow', // C-53: staff and the SCHEDULE_CAPACITY system read only
       ].sort(),
     );
   });
@@ -1076,7 +1077,7 @@ describe('CS-4.5 a CANDIDATE scope refuses relation vectors 1 to 5 (NFR-04, TC-0
 
   it('TC-008 the refusal covers every relation field of every model a candidate can query', () => {
     // Every relation side in the relation table, on every allowlisted model, in include, select,
-    // where and orderBy. 118 relation fields exist in all (59 foreign keys, both sides); those of the
+    // where and orderBy. 124 relation fields exist in all (62 foreign keys, both sides); those of the
     // allowed models are walked.
     let checked = 0;
     for (const model of Object.keys(CANDIDATE_MODELS) as ModelName[]) {
