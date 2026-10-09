@@ -10,6 +10,7 @@ export * from './core/session';
 export * from './core/key-store';
 export * from './core/proctor-key';
 export * from './core/system-check';
+export * from './core/accommodations';
 export {
   FLAG_DETAIL_MAX,
   FLAG_ID_RE,
@@ -69,6 +70,7 @@ export * from './detectors/inference-client';
 export * from './detectors/default-worker';
 export * from './detectors/evidence';
 export * from './detectors/identity';
+export * from './detectors/evidence-client';
 export * from './detectors/voice-monitor';
 export * from './detectors/vision-monitor';
 export { mountCalibrationPanel } from './demo/calibration';

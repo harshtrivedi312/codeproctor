@@ -72,3 +72,23 @@ If the app keeps its own pre-check share (as the precheck step does), it passes 
 - Privacy: device labels and ids are never sent; the only label is the one of a camera that matched a virtual-camera name (the VIRTUAL_CAMERA payload carries `deviceLabel`). Errors carry a kind and a problem code only.
 - Answers: 200 `{ passed, blocking }`; 400 `REJECTED`, 401 `UNAUTHENTICATED`, 409 SESSION_NOT_ACTIVE `NOT_ACTIVE` are final; 408, 429, 5xx (503 BUSY) retry with Retry-After, then `UNAVAILABLE` (a `SystemCheckError`). The start gate answers 409 `SYSTEM_CHECK_BLOCKED` when the latest check is missing, stale or not passed.
 - After the start the same checks repeat inside signed batches: `MultiScreenMonitor` and `VirtualCameraMonitor` emit MULTI_MONITOR and VIRTUAL_CAMERA events through the session.
+
+## Evidence, identity re-check and waivers (ADR 0013 section 5.6; FR-606, FR-305; C-08, C-25, C-34)
+
+```ts
+const evidence = createEvidenceClient({ baseUrl, getToken: () => token });
+const policy = detectorPolicy(parseCandidateAccommodations(await getAccommodationsJson()));
+const vision = new VisionMonitor({
+  /* ... */
+  evidenceApi: evidence.evidenceApi, // purpose EVENT snapshots attached to HIGH events
+  recheckIdentity: evidence.rechecker, // one 640 px JPEG every 120 s, purpose IDENTITY_RECHECK
+  identityRecheckEnabled: policy.identityRecheck,
+  onIdentityStatus: (s) => showStatus(s), // counts and a state only
+});
+await session.start({ /* ... */ disabledDetectors: policy.disabledDetectors });
+```
+
+- Evidence: `POST /candidate/session/evidence/presign` with `purpose` (`EVENT` or `IDENTITY_RECHECK`), `contentType: image/jpeg` and `bytes`; the answer carries `evidenceKey` (`evidence/<ULID>.jpg`), which is the only shape that goes into an event's `evidenceKey`. 409 `QUOTA_EXCEEDED` stops snapshot requests for the session (events still go; flag `evidence-snapshots`).
+- Re-check: the frame is uploaded and its name posted to `POST /candidate/session/identity/recheck` with `capturedAt`; the server answers 202 with NO result and writes FACE_MISMATCH itself. The SDK never emits or relays FACE_MISMATCH any more. 409 `IDENTITY_CHECK_WAIVED` and `DETECTOR_DISABLED` stop the scheduler quietly; 429 and 503 back off (Retry-After); a frame that cannot be taken is skipped.
+- Waivers (C-25, C-34): `identityCheckWaived` turns off the re-check only (FACE keeps running); `faceDetectorsOff` turns off FACE and, with it, the server re-check; GAZE and OBJECT only through `disabledDetectors` when the API returns them. `SCREEN_SHARE` is never disabled. A missing or unreadable answer weakens nothing.
+- Privacy: a frame lives in memory for one tick, is never written to IndexedDB or storage, never logged, and is not referenced after the upload or `stop()`.

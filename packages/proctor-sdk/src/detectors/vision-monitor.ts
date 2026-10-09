@@ -2,7 +2,7 @@ import type { ProctorDetector } from '@codeproctor/shared';
 import type { Detector, DetectorContext } from '../core/types';
 import { DEFAULT_AI_CONFIG, resolveModelUrls, type AiDetectorConfig } from './config';
 import { needsEvidence, captureJpeg, uploadEvidence, type EvidenceApi } from './evidence';
-import { IdentityScheduler, type IdentityRechecker } from './identity';
+import { IdentityScheduler, type IdentityRechecker, type IdentityStatus } from './identity';
 import { InferenceClient, type WorkerLike } from './inference-client';
 import type { InferenceTask, ResultMessage } from './protocol';
 import { FaceRules, GazeRules, ObjectRules, type RuleEvent } from './rules';
@@ -17,7 +17,18 @@ export interface VisionMonitorOptions {
   /** Give up on worker init after this long (default 30 s). */
   initTimeoutMs?: number;
   evidenceApi?: EvidenceApi;
+  /**
+   * Uploads one frame for the server identity re-check (ADR 0013 5.6; `createEvidenceClient().rechecker`).
+   * The server answers 202 and writes FACE_MISMATCH itself: this monitor never emits it.
+   */
   recheckIdentity?: IdentityRechecker;
+  /**
+   * False when the accommodations waive the identity check or turn the face detectors off (C-25,
+   * C-34): the re-check is not scheduled at all (the server would refuse it).
+   */
+  identityRecheckEnabled?: boolean;
+  /** Status of the re-check for the UI (counts and a state, never a frame or a result). */
+  onIdentityStatus?: (s: IdentityStatus) => void;
   /** Test seams. */
   now?: () => number;
   grabFrame?: (video: HTMLVideoElement) => Promise<ImageBitmap>;
@@ -60,6 +71,7 @@ export class VisionMonitor implements Detector {
   private video: HTMLVideoElement | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private identity: IdentityScheduler | null = null;
+  private evidenceOff = false;
   private tasks = new Set<InferenceTask>();
   private failures = new Map<InferenceTask, number>();
   private face!: FaceRules;
@@ -245,18 +257,18 @@ export class VisionMonitor implements Detector {
     this.video = video;
     this.down = null;
 
-    if (this.o.recheckIdentity && this.tasks.has('face')) {
+    if (
+      this.o.recheckIdentity &&
+      this.o.identityRecheckEnabled !== false &&
+      this.tasks.has('face') &&
+      !ctx.isDisabled('FACE')
+    ) {
+      // One upload per interval; the server decides and writes FACE_MISMATCH itself (never here).
       this.identity = new IdentityScheduler(
         this.cfg.identityIntervalMs,
         () => this.snapshot(),
         this.o.recheckIdentity,
-        (r) =>
-          ctx.emit(
-            'FACE_MISMATCH',
-            r.similarity === undefined
-              ? {}
-              : { similarity: Math.max(-1, Math.min(1, r.similarity)) },
-          ),
+        this.o.onIdentityStatus,
       );
       this.identity.start();
     }
@@ -368,10 +380,31 @@ export class VisionMonitor implements Detector {
   }
 
   private async captureEvidence(): Promise<string | null> {
-    if (!this.o.evidenceApi) return null;
+    if (!this.o.evidenceApi || this.evidenceOff) return null;
     const jpeg = await this.snapshot();
     if (!jpeg) return null;
-    return uploadEvidence(this.o.evidenceApi, jpeg, this.cfg.evidenceTimeoutMs);
+    return uploadEvidence(
+      this.o.evidenceApi,
+      jpeg,
+      this.cfg.evidenceTimeoutMs,
+      undefined,
+      (err) => {
+        // QUOTA_EXCEEDED (300 EVENT names per session) or a waived/disabled refusal: events go
+        // without a snapshot from now on, and the reviewers are told with a counted flag.
+        const kind = (err as { kind?: unknown } | null)?.kind;
+        if (kind === 'QUOTA_EXCEEDED' || kind === 'NOT_ACTIVE') {
+          this.evidenceOff = true;
+          this.ctx?.setCapability({
+            id: 'evidence-snapshots',
+            status: 'UNVERIFIABLE',
+            detail:
+              kind === 'QUOTA_EXCEEDED'
+                ? 'Snapshot quota used up: later events carry no snapshot.'
+                : 'The session is over: no more snapshots.',
+          });
+        }
+      },
+    );
   }
 
   /** Worker CPU and skipped frames, for the calibration screen and the CPU report. */
@@ -393,6 +426,7 @@ export class VisionMonitor implements Detector {
     this.generation++;
     this.reported.clear();
     this.failures.clear();
+    this.evidenceOff = false;
     this.down = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;

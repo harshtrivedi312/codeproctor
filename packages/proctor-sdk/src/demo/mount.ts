@@ -2,6 +2,7 @@ import { ProctorSession } from '../core/session';
 import { createFetchTransport } from '../core/transport';
 import { createDefaultMonitors } from '../index';
 import { createDefaultInferenceWorker } from '../detectors/default-worker';
+import { createEvidenceClient } from '../detectors/evidence-client';
 import type { EvidenceApi } from '../detectors/evidence';
 import { VisionMonitor } from '../detectors/vision-monitor';
 import { VoiceMonitor, createVadWebFactory } from '../detectors/voice-monitor';
@@ -101,7 +102,6 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
   const demoFetch: typeof fetch = (input, init) =>
     offline.checked ? Promise.reject(new TypeError('Simulated network drop')) : fetch(input, init);
   const token = `demo-${o.sessionId}`; // dev mock token, identifies the demo session only
-  const auth = { Authorization: `Bearer ${token}` };
 
   const monitors = createDefaultMonitors();
   const session = new ProctorSession();
@@ -154,26 +154,18 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
     }
   }, 1000);
 
-  // ADR 0013 section 5.6: evidence presign takes a `purpose` and returns `evidenceKey`
-  // (`evidence/<ULID>.jpg`); SDK core's EvidenceApi expects `key` and has no purpose.
-  const presignEvidence = async (
-    purpose: 'EVENT' | 'IDENTITY_RECHECK',
-    input: { contentType: 'image/jpeg'; bytes: number },
-  ): Promise<{ url: string; key: string; headers?: Record<string, string> }> => {
-    const res = await demoFetch(`${o.apiBase}/evidence/presign`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...auth },
-      body: JSON.stringify({ purpose, ...input }),
-    });
-    if (!res.ok) throw new Error('presign failed');
-    const j = (await res.json()) as {
-      url: string;
-      evidenceKey: string;
-      headers?: Record<string, string>;
-    };
-    return { url: j.url, key: j.evidenceKey, ...(j.headers ? { headers: j.headers } : {}) };
-  };
-  const evidenceApi: EvidenceApi = { presign: (input) => presignEvidence('EVENT', input) };
+  // ADR 0013 section 5.6: evidence presign (purpose EVENT or IDENTITY_RECHECK) and the identity
+  // re-check upload, through the SDK client. The server answers 202 and writes FACE_MISMATCH itself.
+  const evidence = createEvidenceClient({
+    baseUrl: o.apiBase,
+    getToken: () => token,
+    fetchFn: demoFetch,
+    presignPath: '/evidence/presign',
+    recheckPath: '/identity/recheck',
+    put: async (url, body, headers) =>
+      (await demoFetch(url, { method: 'PUT', body, headers })).status,
+  });
+  const evidenceApi: EvidenceApi = evidence.evidenceApi;
 
   /** Release anything a start that finished (or is still finishing) after stop() created. */
   const teardownLate = async (): Promise<void> => {
@@ -228,28 +220,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         evidenceApi,
         // The ADR limits re-checks to 1 per 60 s (SDK default is 120 s); 61 s so the demo shows one.
         config: { identityIntervalMs: 61_000 },
-        // ADR 0013 section 5.6: upload the frame, then POST its name; the server answers 202 with
-        // no result and writes FACE_MISMATCH itself. SDK core still relays a client-side
-        // FACE_MISMATCH when the callback says `matched: false`, so this demo adapter always
-        // reports `matched: true` to stop that relay (the mismatch shows in the server panel).
-        recheckIdentity: async (frame) => {
-          const p = await presignEvidence('IDENTITY_RECHECK', {
-            contentType: 'image/jpeg',
-            bytes: frame.size,
-          });
-          const put = await demoFetch(p.url, {
-            method: 'PUT',
-            body: frame,
-            headers: { 'Content-Type': 'image/jpeg', ...p.headers },
-          });
-          if (!put.ok) return null;
-          await demoFetch(`${o.apiBase}/identity/recheck`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...auth },
-            body: JSON.stringify({ evidenceKey: p.key, capturedAt: new Date().toISOString() }),
-          });
-          return { matched: true };
-        },
+        recheckIdentity: evidence.rechecker,
       });
       const voice = new VoiceMonitor({
         getStream: () => pl.audioStream,
