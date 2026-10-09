@@ -56,7 +56,8 @@ export function busyDelayMs(header: string | null, random: () => number = Math.r
 export function isNoRetryRoute(pathname: string, method: string): boolean {
   const path = pathname.replace(/^\/api(?=\/v\d+\/)/, '');
   if (/^\/v\d+\/auth\//.test(path)) return true; // login, 2FA, password, refresh, logout
-  // A Run that reached Judge0 keeps its slot on a 503 (contract section 8, FR-502); the SDK resends from its own buffer.
+  // Candidate routes (`/v1/candidate/*`, any method): a Run that reached Judge0 keeps its slot on a
+  // 503 (contract section 8, FR-502) and the SDK resends from its own buffer, so the web never does.
   if (/^\/v\d+\/candidate\//.test(path)) return true;
   const m = method.toUpperCase();
   if (m !== 'GET' && m !== 'HEAD' && /^\/v\d+\/admin\/users(?:\/|$)/.test(path)) return true; // invite, PATCH, unlock, re-issue, 2FA reset

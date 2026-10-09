@@ -10,6 +10,7 @@ import type {
   OtpLockoutMail,
   OtpMail,
   ReminderMail,
+  TwoFactorNoticeTemplate,
 } from './mail.port';
 import type { EmailJob } from './mail-templates';
 import { MailError } from './mail-transport';
@@ -92,5 +93,12 @@ export class QueuedMailPort extends MailPort {
       to,
       params: { delayedUntil: m.delayedUntil.toISOString() },
     });
+  }
+  sendTwoFactorNotice(
+    to: string,
+    template: TwoFactorNoticeTemplate,
+    occurredAt: Date,
+  ): Promise<MailOutcome> {
+    return this.put({ template, to, params: { occurredAt: occurredAt.toISOString() } });
   }
 }
