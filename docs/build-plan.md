@@ -685,7 +685,7 @@ Single-runner rules: the Database A session is the only one that starts or stops
 
 Shared-file rule: `apps/api/src/app.module.ts`, `apps/worker/src/worker/app.py` and `apps/web/src/lib/**` have one owner (Backend A, Integrity A, Frontend A). The second session adds only its own module registration line or router include, in a small commit announced to the owner, and resolves conflicts by keeping both sides.
 
-## 12. Production readiness plan (owner decision D-80, 2026-10-09)
+## 12. Production readiness plan (after the owner's instruction D-80, 2026-10-09; a Delivery Lead plan, not yet approved by the owner)
 
 The owner: "demo looks good. go ahead and get this project finished and ready for production." The demo sprint (D-67) is over. This plan is compiled from each track's production inventory (2026-10-09). Sizes: S under a day, M 1 to 3 days, L 3 to 5 days, XL more than a week. All estimates are rough.
 
@@ -695,7 +695,7 @@ The owner: "demo looks good. go ahead and get this project finished and ready fo
 3. run the pilot;
 4. pass the pilot exit review and the legal review, then decide on and build the production layout.
 
-Production itself has no ADR yet (see R5); it needs owner decisions on cost and availability.
+Production itself has no ADR yet (see R6); it needs owner decisions on cost and availability.
 
 ### R1. Finish the end-to-end candidate flow (priority 1, in flight)
 
@@ -778,8 +778,8 @@ Compliance (D-77: the compliance review session drafts, the owner decides, a law
   Code by Backend A (XL); needs the hub's ADR 0017 §6/§7 text.
 - **Pilot backups:** the scheduler and runbook (Database B, S). Then the owner runs the first backup and a restore drill on a throwaway instance.
 - **SES sending domain** (DKIM, SPF, DMARC), production access and a server-only role (owner).
-- **CloudWatch alarms** from FU-BE-191/213.
-- **Worker deployment and a Linux x86 Judge0.**
+- **CloudWatch alarms** from FU-BE-191/213: Backend A writes the Terraform, the owner applies it.
+- **Worker deployment and a Linux x86 Judge0:** Integrity B (the worker image) and Backend A (Judge0) write the code, the owner applies it.
 
 ### R5. Assurance
 
@@ -816,7 +816,7 @@ There's no production ADR. ADR 0017 is the pilot layout, and architecture.md lea
    - bulk invitations in scope or not;
    - the erase-confirmation wording (FU-FEB-14).
 2. **Models:**
-   - P-13: say yes in Integrity B's window;
+   - P-13 is approved (D-74); Integrity B needs the same yes typed in its own window before it downloads;
    - the AuraFace licence decision;
    - P-14, where INT-01 tuning runs, and the volunteer call (C-11, C-20).
 3. **AWS (console and CloudShell, after the reviewed code lands):**
