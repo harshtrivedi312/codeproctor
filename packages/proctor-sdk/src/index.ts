@@ -56,3 +56,7 @@ export * from './detectors/identity';
 export * from './detectors/voice-monitor';
 export * from './detectors/vision-monitor';
 export { mountCalibrationPanel } from './demo/calibration';
+
+export * from './core/batch-queue';
+export * from './keystrokes/keystroke-queue';
+export * from './keystrokes/recorder';
