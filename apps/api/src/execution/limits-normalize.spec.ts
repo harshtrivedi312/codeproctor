@@ -55,25 +55,39 @@ describe('output normalization (FR-503)', () => {
 
   // ReDoS guard without an absolute time limit (a wall-clock threshold flaked on loaded CI
   // runners): the cost must grow about linearly. Quadratic work would take about 16x as long for
-  // 4x the input, linear about 4x, so the bound sits between. Each size is timed several times and
-  // the fastest run is used, which discards the runs a busy runner slowed down.
+  // 4x the input, linear about 4x, so the bound sits between. The two sizes are measured
+  // interleaved (small, large, small, large, ...) and each keeps its fastest run, so a busy runner
+  // that slows one phase cannot skew the ratio, and the runs it did slow are discarded.
   it('FR-503: normalization cost grows linearly with the input (no ReDoS)', () => {
     const worstCase = (n: number): string =>
-      // A long run followed by a non-space is the shape that makes `\s+$` regexes quadratic.
-      ' '.repeat(n) + 'x\n' + 'x' + ' \t'.repeat(n) + '\n' + ' \n'.repeat(n) + ' '.repeat(n);
-    const fastest = (n: number): number => {
-      const input = worstCase(n);
-      let best = Number.POSITIVE_INFINITY;
-      for (let i = 0; i < 7; i += 1) {
-        const t0 = process.hrtime.bigint();
-        normalizeOutput(input);
-        best = Math.min(best, Number(process.hrtime.bigint() - t0));
-      }
-      return Math.max(best, 1);
-    };
+      // A long run followed by a non-space is the shape that makes `\s+$` regexes quadratic;
+      // CR runs and form feed / vertical tab runs cover the other whitespace paths.
+      ' '.repeat(n) +
+      'x\n' +
+      'x' +
+      ' \t'.repeat(n) +
+      '\n' +
+      ' \n'.repeat(n) +
+      ' '.repeat(n) +
+      '\r'.repeat(n) +
+      'x\r\n' +
+      ' \f\v'.repeat(n) +
+      '\r\n';
     const small = 32_768;
-    fastest(small); // warm the JIT before measuring
-    const ratio = fastest(small * 4) / fastest(small);
+    const inputs = [worstCase(small), worstCase(small * 4)];
+    const best = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+    const timeOnce = (input: string): number => {
+      const t0 = process.hrtime.bigint();
+      normalizeOutput(input);
+      return Number(process.hrtime.bigint() - t0);
+    };
+    timeOnce(inputs[0] ?? ''); // warm the JIT before measuring
+    for (let i = 0; i < 7; i += 1) {
+      for (const k of [0, 1] as const) {
+        best[k] = Math.min(best[k] ?? Number.POSITIVE_INFINITY, timeOnce(inputs[k] ?? ''));
+      }
+    }
+    const ratio = Math.max(best[1] ?? 1, 1) / Math.max(best[0] ?? 1, 1);
     expect(ratio).toBeLessThan(10);
   });
 
