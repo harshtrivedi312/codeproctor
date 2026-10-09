@@ -307,7 +307,9 @@ describe('capability id conformity (ADR 0013 sections 2, 5.8)', () => {
     const ids = new Set<string>();
     for (const f of files(join(__dirname, '..'))) {
       const src = readFileSync(f, 'utf8');
-      // 'x', "x" and `x` literals; a template with a hole is expanded for the known vision tasks.
+      // 'x', "x" and `x` literals. Template ids are expanded by hand: `vision-${task}` comes from
+      // detectors/vision-monitor.ts (tasks in detectors/protocol.ts), `record-${stream}` from
+      // recording/pipeline.ts; a new template id fails this test until it is listed here.
       for (const m of src.matchAll(/\bid:\s*(['"`])([^'"`]+)\1/g)) {
         const id = m[2] as string;
         if (id.includes('${')) {
@@ -580,5 +582,102 @@ describe('what the body may carry (counts only)', () => {
     expect(JSON.stringify(all)).not.toContain(TOKEN);
     expect(JSON.stringify(Object.entries(localStorage))).not.toContain(TOKEN);
     expect(JSON.stringify(r.bodies)).not.toContain(TOKEN);
+  });
+});
+
+describe('late answers, body-less window, scope of the retry (FR-609, TC-063)', () => {
+  it('a renewal that arrives after the Heartbeat stopped waiting is still delivered once', async () => {
+    const tokens: string[] = [];
+    const cfg = rig(
+      { heartbeatIntervalMs: 20, onToken: (t) => tokens.push(t.sessionToken) },
+      undefined,
+    );
+    // the transport answers after ~80 ms: well after the Heartbeat cap (0.8 x 20 ms)
+    let first = true;
+    cfg.cfg.transport.heartbeat = async () => {
+      if (!first) return true;
+      first = false;
+      await new Promise((r) => setTimeout(r, 80));
+      return {
+        ok: true,
+        renewal: { sessionToken: TOKEN, sessionTokenExpiresAt: '2026-01-01T00:15:00Z' },
+      };
+    };
+    const s = new ProctorSession();
+    await s.start(cfg.cfg);
+    await vi.waitFor(() => expect(tokens).toEqual([TOKEN]), { timeout: 3000 });
+    await s.stop();
+  });
+
+  it('after a refused body beats go out body-less until the next 5-minute window, then the body is tried again', async () => {
+    let rejectBodies = true;
+    const r = rig({ heartbeatIntervalMs: 20 }, (b) =>
+      b !== undefined && rejectBodies ? { ok: true, bodyRejected: true } : true,
+    );
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(r.bodies.length).toBeGreaterThan(5), { timeout: 3000 });
+    // first beat carried a body (and was refused); every later one in the window has none
+    expect(r.bodies[0]).toBeDefined();
+    expect(r.bodies.slice(1).every((b) => b === undefined)).toBe(true);
+    rejectBodies = false;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + FLAG_RESEND_MS + 1000);
+    const n = r.bodies.length;
+    await vi.waitFor(() => expect(r.bodies.slice(n).some((b) => b !== undefined)).toBe(true), {
+      timeout: 3000,
+    });
+    await s.stop();
+  });
+
+  it('only 400 and 413 trigger the body-less retry; a 403 or 415 is just a failed beat', async () => {
+    for (const status of [403, 415, 404]) {
+      let calls = 0;
+      const t = createFetchTransport({
+        baseUrl: 'https://api.test',
+        getToken: () => 'tok',
+        fetchFn: () => {
+          calls++;
+          return Promise.resolve(new Response('{}', { status }));
+        },
+      });
+      expect(
+        await t.heartbeat({
+          queue: { pendingEventBatches: 0, pendingKeystrokeBatches: 0, rejectedBatches: 0 },
+        }),
+      ).toBe(false);
+      expect(calls).toBe(1);
+    }
+  });
+
+  it('online is false during the 401 hold', async () => {
+    const hb = new Heartbeat(
+      () => Promise.resolve({ auth: 'TOKEN_EXPIRED' }),
+      60_000,
+      undefined,
+      undefined,
+      {
+        authLostAfter: 1,
+      },
+    );
+    hb.start();
+    await vi.waitFor(() => expect(hb.beatNow()).resolves.toBe(false));
+    expect(hb.online).toBe(false);
+    hb.stop();
+  });
+
+  it('forceFull in the middle of a round owes every flag again; a 429 leaves a flag pending', () => {
+    const r = new FlagReporter();
+    for (let i = 0; i < 40; i++) r.record(flag(`f-${String(i).padStart(2, '0')}`, 'SUPPORTED'));
+    r.take(1).commit(); // 32 sent, 8 still owed
+    r.forceFull();
+    const next = r.take(2);
+    next.commit();
+    // all 40 are owed again: 32 now, 8 on the beat after
+    expect(next.flags).toHaveLength(32);
+    expect(r.take(3).flags).toHaveLength(8);
+    const pending = new FlagReporter();
+    pending.record(flag('keep-me'));
+    pending.take(1); // a 429 beat: never committed
+    expect(pending.take(2).flags.map((f) => f.id)).toEqual(['keep-me']);
   });
 });

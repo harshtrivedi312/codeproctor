@@ -43,7 +43,13 @@ export class Heartbeat {
 
   /** True while the last beat was acknowledged and none failed since (and the heartbeat is live). */
   get online(): boolean {
-    return !this.stopped && this.endedBy === null && this.failures === 0 && this.lastOkAt !== null;
+    return (
+      !this.stopped &&
+      this.endedBy === null &&
+      !this.authHold &&
+      this.failures === 0 &&
+      this.lastOkAt !== null
+    );
   }
 
   /**

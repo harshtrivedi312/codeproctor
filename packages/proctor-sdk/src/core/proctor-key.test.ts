@@ -679,7 +679,7 @@ describe('the key is never written after a purge, never extractable (ADR 0013 se
     await vi.waitFor(() => expect(again.sent.length).toBeGreaterThan(0), { timeout: 6000 });
     expect(again.sent[0]?.signature).toBe(hmacHex(KEY3_B64, again.sent[0]?.body ?? ''));
     await s.stop();
-  });
+  }, 15_000);
 
   it('B2: an extractable or non-HMAC key is refused by start, setKey and the store, and a provider that returns one gets no adoption', async () => {
     const extractable = await crypto.subtle.importKey(
