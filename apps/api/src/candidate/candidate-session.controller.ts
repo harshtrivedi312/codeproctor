@@ -2,8 +2,18 @@ import { candidateVisibleStatus } from '../session/candidate-visible-status';
 // Candidate routes behind a session token (ADR 0013 section 5.10). The session is the token's: no
 // route has a :sessionId, and ids in a body are never used to pick a session (CS-1). Each route is
 // limited per session in Redis, not per IP (ADR 0013 section 5.1).
-import { Body, Controller, Get, Header, HttpCode, Post, Req } from '@nestjs/common';
 import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Header,
+  HttpCode,
+  Post,
+  Req,
+} from '@nestjs/common';
+import {
+  ApiBody,
   ApiConflictResponse,
   ApiServiceUnavailableResponse,
   ApiOkResponse,
@@ -29,7 +39,11 @@ import {
   SignConsentDto,
   TestStartedDto,
 } from './dto/candidate.dto';
+import { busyLockToProblem } from '../session/busy-lock';
 import { SessionRateLimiter } from './session-rate-limiter';
+import { systemCheckBodySchema } from './system-check.schema';
+import type { SystemCheckResult } from './system-check.schema';
+import { SystemCheckService } from './system-check.service';
 import { TestStartService } from './test-start.service';
 import type { TestStartView } from './test-start.service';
 import { HEARTBEAT_LIMIT_PER_MINUTE } from './candidate-session.service';
@@ -72,6 +86,7 @@ export class CandidateSessionController {
     private readonly consent: ConsentService,
     private readonly testStart: TestStartService,
     private readonly limiter: SessionRateLimiter,
+    private readonly systemCheck: SystemCheckService,
   ) {}
 
   @CandidateRoute('candidate_session:read')
@@ -143,6 +158,46 @@ export class CandidateSessionController {
     return this.limiter.guarded('consent-decline', ctx.sessionId, 10, 60, () =>
       this.consent.decline(ctx, { ip: req.ip, userAgent: req.headers['user-agent'] }),
     );
+  }
+
+  @Post('system-check')
+  @CandidateRoute('candidate_session:heartbeat')
+  @HttpCode(200)
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({
+    summary: 'Pre-start system check (FR-402, FR-605, FR-610, ADR 0013 section 5.4)',
+    description:
+      'CONSENTED or VERIFIED. Stores the latest result with the server time, merges the capability flags, records a Sec-CH-UA mismatch as advisory, writes new MULTI_MONITOR and VIRTUAL_CAMERA findings as unsigned events and, when it passed, queues verify-session. 10 per minute, 50 per session. 503 with Retry-After when the write could not be fenced.',
+  })
+  @ApiBody({ schema: { type: 'object', description: 'ADR 0013 section 5.4 body (strict)' } })
+  @ApiOkResponse({ description: '{ passed, blocking[] }' })
+  @ApiConflictResponse({ description: 'SESSION_NOT_ACTIVE' })
+  @ApiTooManyRequestsResponse({ description: 'RATE_LIMITED' })
+  @ApiServiceUnavailableResponse({ description: 'BUSY: retry after the Retry-After seconds' })
+  async submitSystemCheck(
+    @Candidate() ctx: CandidateContext,
+    @Body() raw: unknown,
+    @Req() req: Request,
+  ): Promise<SystemCheckResult> {
+    const parsed = systemCheckBodySchema.safeParse(raw);
+    // Fixed message: the rejected value is never echoed.
+    if (!parsed.success) throw new BadRequestException('The system check is malformed.');
+    const secChUa = req.headers['sec-ch-ua'];
+    try {
+      // The per-minute limit is checked first, then the per-session total: a refused or busy
+      // request gives both slots back (DL-37), so a retry loop cannot use up the lifetime budget.
+      return await this.limiter.guarded('system-check', ctx.sessionId, 10, 60, () =>
+        this.limiter.guarded('system-check-total', ctx.sessionId, 50, 86_400, () =>
+          this.systemCheck.submit(
+            ctx,
+            parsed.data,
+            typeof secChUa === 'string' ? secChUa : undefined,
+          ),
+        ),
+      );
+    } catch (e) {
+      throw busyLockToProblem(e) ?? e;
+    }
   }
 
   @CandidateRoute('candidate_session:read')
