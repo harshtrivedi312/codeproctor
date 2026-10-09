@@ -13,7 +13,7 @@ email address, or a real candidate. Last checked against `main` on 2026-10-07 (c
 | Sign in as staff, browse questions, tests, users | the real stack (sections 1 to 4)                               | Works (checked).                                                    |
 | Open a candidate invitation link                 | `node infra/scripts/demo-invite.mjs` (section 4)               | The link opens, and the one-time code arrives in Mailpit (#305).    |
 | Take a test as a candidate, end to end           | the real stack                                                 | The gate, email code and consent work; code runs via the stub.      |
-| Run candidate code                               | Judge0                                                         | **Not on `main` yet** on a Mac: Judge0 needs Linux x86 (section 7). |
+| Run candidate code                               | Judge0                                                         | Runs via the local stub (canned results); real Judge0 is Linux x86 (section 7). |
 
 ## 1. Prerequisites
 
@@ -65,7 +65,7 @@ What `local-env.mjs` does: copies `.env.example`, replaces every `change-me` wit
 lets the browser upload to, and play recordings from, origins listed there; it must match `S3_ENDPOINT`). The API serves under
 `/api`, and the web app's built-in default (`http://localhost:4000`) lacks that prefix, so without the
 second file every sign-in fails with "The server did not answer as expected". `.env` sets `APP_ENV=development` explicitly: it is required and has no default, and the local-only paths
-(the seed, the demo scripts, and later the mail sink, object store and execution stub) switch on only for
+(the seed, the demo scripts, and the mail sink, object store and execution stub) switch on only for
 exactly that value. The script refuses to overwrite
 an existing `.env`; delete the file to start again. Never put these values anywhere shared.
 
@@ -136,7 +136,7 @@ pnpm dev:web                          # http://localhost:3000
 
 Check the API: <http://localhost:4000/api/v1/health> answers `{"status":"ok", ...}` with PostgreSQL and
 Redis `up`. The API log will repeat `Job consent-pdf failed`: the seeded consents have no PDF and there
-is no object store locally yet. That is expected until the local object store exists (section 7).
+may be no PDF for a seeded consent. The "File uploads" row in section 6 says what was checked.
 
 **Browser**: use **Chrome or Firefox**, and always open the web app as `http://localhost:3000` (not
 `127.0.0.1`: the API's allowed web origin is exactly that). Safari does not keep the staff sign-in
@@ -208,12 +208,12 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | Mailpit (the inbox) in the stack                      | Works: the stack starts it and a test email sent to port 1025 shows in <http://localhost:8025> (checked). |
 | Candidate one-time email code                         | **Works (#305 is on `main`)**: with `EMAIL_PROVIDER=smtp-dev` (which `local-env.mjs` writes), asking for the code sends the mail to Mailpit (<http://localhost:8025>), and the code from that mail opens the session (checked 2026-10-07: link, code sent, code accepted, session `OPENED`). |
 | MinIO (the object store) in the stack                 | Works: the two buckets exist at start, an upload and a listing through the S3 API work, and a browser preflight from `http://localhost:3000` is allowed while any other origin is not (checked). |
-| File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log still shows a few `Job consent-pdf failed` lines; the job also emails the consent copy, which needs the candidate mail binding (above). Browser uploads from the candidate screens are not exercised here. |
+| File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log may still show `Job consent-pdf failed` lines for seeded consents that have no PDF (the cause was not re-checked after the mail binding landed). Browser uploads from the candidate screens are not exercised here. |
 | Running candidate code                                | The API accepts `JUDGE0_MODE=stub` and `local-env.mjs` switches it on (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
-| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. **The API has no worker client on `main` yet** (nothing in `apps/api` reads the `WORKER_*` settings), so the worker runs but the identity check does not call it; the match is MANUAL_REVIEW whatever the models. **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
+| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. The API calls the worker (signed requests; `WORKER_BASE_URL`, `WORKER_HMAC_KEY_ID` and `WORKER_HMAC_KEY` from `.env`). **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
 | Proctoring in a real browser against the real API     | Not wired end to end; the browser parts run in mock mode (`/t/demo/test`, `/dev/proctor`).              |
 
-## 7. Not on `main` yet: what is planned
+## 7. What is done, and what is still planned
 
 These are tracked in the delivery plan; this guide changes as each lands.
 
@@ -232,7 +232,7 @@ Changes to `infra/docker-compose.yml` get the architecture hub's gate review.
 ## 8. Stop, restart, start again
 
 ```bash
-pnpm demo:down                        # stops the API and the web app
+pnpm demo:down                        # stops the API, the web app and the worker
 pnpm demo:down --infra                # ... and the containers; the data stays in Docker volumes
 pnpm demo:up                          # starts everything again (safe to repeat)
 ```
