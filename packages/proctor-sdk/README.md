@@ -47,15 +47,16 @@ pipeline.seedCounters(counters?.media ?? {}); // media streams continue at max(l
 ## System check before the start (ADR 0013 section 5.4; FR-604, FR-605, FR-610)
 
 ```ts
-const surface = (await screenShare.request()).ok ? 'MONITOR' : 'OTHER'; // the app asks, on a user gesture
+const outcome = await screenShare.request(); // the app asks, on a user gesture
 const { passed, blocking } = await runSystemCheck({
   baseUrl,
   getToken: () => token,
-  screenShare: surface,
+  // MONITOR, OTHER, UNVERIFIABLE (the browser does not report the surface) or null (no share)
+  screenShare: surfaceOf(outcome),
 });
 ```
 
-- A pure function: it only looks (no camera, microphone or screen prompt) and posts `POST /candidate/session/system-check` with the candidate token. No key exists yet, so there is no HMAC. `collectSystemCheck()` builds the same body without a request for the app's own pre-flight screen.
+- A pure function: it only looks (no camera, microphone or screen prompt; `getScreenDetails()` is used only when the window-management permission is already granted, otherwise `screen.isExtended`; each browser step is cut after 3 s and reported UNVERIFIABLE) and posts `POST /candidate/session/system-check` with the candidate token. No key exists yet, so there is no HMAC. `collectSystemCheck()` builds the same body without a request for the app's own pre-flight screen.
 - Body: browser brand and major version, network downlink/rtt when the browser reports them, `devices` as booleans plus the screen-share surface enum, MULTI_MONITOR and VIRTUAL_CAMERA findings, and capability flags (`multi-screen`, `virtual-camera`, `camera-permission`, `microphone-permission`, `screen-share`, `screen-share-surface`, `media-recorder` WebM VP8/Opus, `fullscreen-api`, `idb`, `web-crypto`). A check the browser cannot make is UNSUPPORTED or UNVERIFIABLE, never a pass.
 - Privacy: device labels and ids are never sent; the only label is the one of a camera that matched a virtual-camera name (the VIRTUAL_CAMERA payload carries `deviceLabel`). Errors carry a kind and a problem code only.
 - Answers: 200 `{ passed, blocking }`; 400 `REJECTED`, 401 `UNAUTHENTICATED`, 409 SESSION_NOT_ACTIVE `NOT_ACTIVE` are final; 408, 429, 5xx (503 BUSY) retry with Retry-After, then `UNAVAILABLE` (a `SystemCheckError`). The start gate answers 409 `SYSTEM_CHECK_BLOCKED` when the latest check is missing, stale or not passed.

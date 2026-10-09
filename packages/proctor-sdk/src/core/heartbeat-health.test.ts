@@ -681,3 +681,116 @@ describe('late answers, body-less window, scope of the retry (FR-609, TC-063)', 
     expect(pending.take(2).flags.map((f) => f.id)).toEqual(['keep-me']);
   });
 });
+
+describe('late answers never reach a stopped, ended or restarted run (FR-609, TC-063)', () => {
+  const late = () => {
+    let resolve!: (r: HeartbeatResult) => void;
+    const promise = new Promise<HeartbeatResult>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+
+  it('a renewal that arrives after stop() never reaches onToken or onHeartbeat', async () => {
+    const gate = late();
+    const tokens: string[] = [];
+    const states: string[] = [];
+    const flags: string[] = [];
+    const r = rig({
+      heartbeatIntervalMs: 60_000,
+      onToken: (t) => tokens.push(t.sessionToken),
+      onHeartbeat: (st) => states.push(st.status),
+    });
+    r.cfg.transport.heartbeat = () => gate.promise;
+    const s = new ProctorSession();
+    s.on('capability', (f) => flags.push(f.id));
+    await s.start(r.cfg);
+    await s.stop();
+    gate.resolve({
+      ok: true,
+      bodyRejected: true,
+      state: { status: 'IN_PROGRESS' },
+      renewal: { sessionToken: TOKEN, sessionTokenExpiresAt: '2026-01-01T00:15:00Z' },
+    });
+    await new Promise((x) => setTimeout(x, 30));
+    expect(tokens).toEqual([]);
+    expect(states).toEqual([]);
+    expect(flags).not.toContain('heartbeat-body-rejected');
+  });
+
+  it('a late bodyRejected of run 1 does not make run 2 body-less and does not flag it', async () => {
+    const gate = late();
+    const first = rig({ heartbeatIntervalMs: 60_000 });
+    first.cfg.transport.heartbeat = () => gate.promise;
+    const s = new ProctorSession();
+    await s.start(first.cfg);
+    await s.stop(); // run 1 is over while its beat is still in flight
+    const second = rig({ heartbeatIntervalMs: 20 });
+    const flags: string[] = [];
+    s.on('capability', (f) => flags.push(f.id));
+    await s.start(second.cfg);
+    gate.resolve({ ok: true, bodyRejected: true });
+    await vi.waitFor(() => expect(second.bodies.length).toBeGreaterThan(3), { timeout: 3000 });
+    // every beat of run 2 carries its health body
+    expect(second.bodies.every((b) => b !== undefined)).toBe(true);
+    expect(flags).not.toContain('heartbeat-body-rejected');
+    await s.stop();
+  });
+
+  it('a late renewal after the session ended (taken over) is dropped', async () => {
+    const gate = late();
+    const tokens: string[] = [];
+    let beats = 0;
+    const r = rig({ heartbeatIntervalMs: 20, onToken: (t) => tokens.push(t.sessionToken) });
+    r.cfg.transport.heartbeat = () => {
+      beats++;
+      return beats === 1 ? gate.promise : Promise.resolve({ ended: 'TAKEN_OVER' as const });
+    };
+    const s = new ProctorSession();
+    const ended: string[] = [];
+    s.on('ended', (e) => ended.push(e.reason));
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(ended).toEqual(['TAKEN_OVER']), { timeout: 3000 });
+    gate.resolve({
+      ok: true,
+      renewal: { sessionToken: TOKEN, sessionTokenExpiresAt: '2026-01-01T00:15:00Z' },
+    });
+    await new Promise((x) => setTimeout(x, 30));
+    expect(tokens).toEqual([]);
+    await s.stop();
+  });
+
+  it('an older renewal never replaces a newer one', async () => {
+    const tokens: string[] = [];
+    const answers = [
+      { sessionToken: 'newer', sessionTokenExpiresAt: '2026-01-01T00:30:00Z' },
+      { sessionToken: 'older', sessionTokenExpiresAt: '2026-01-01T00:15:00Z' },
+    ];
+    let i = 0;
+    const r = rig({ heartbeatIntervalMs: 20, onToken: (t) => tokens.push(t.sessionToken) }, () => ({
+      ok: true,
+      renewal: answers[Math.min(i++, 1)] as { sessionToken: string; sessionTokenExpiresAt: string },
+    }));
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(i).toBeGreaterThan(3), { timeout: 3000 });
+    expect(tokens).toEqual(['newer']);
+    await s.stop();
+  });
+
+  it('heartbeat-body-rejected clears when a beat that carried a body is acknowledged', async () => {
+    let reject = true;
+    const seen: string[] = [];
+    const r = rig({ heartbeatIntervalMs: 20 }, (b) =>
+      b !== undefined && reject ? { ok: true, bodyRejected: true } : { ok: true },
+    );
+    const s = new ProctorSession();
+    s.on('capability', (f) => {
+      if (f.id === 'heartbeat-body-rejected') seen.push(f.status);
+    });
+    await s.start(r.cfg);
+    await vi.waitFor(() => expect(seen).toEqual(['UNVERIFIABLE']), { timeout: 3000 });
+    reject = false;
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + FLAG_RESEND_MS + 1000);
+    await vi.waitFor(() => expect(seen).toEqual(['UNVERIFIABLE', 'SUPPORTED']), { timeout: 3000 });
+    await s.stop();
+  });
+});

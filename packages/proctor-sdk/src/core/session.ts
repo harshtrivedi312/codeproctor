@@ -226,6 +226,7 @@ export class ProctorSession {
   private bodyRejectedFlagged = false;
   /** Until this time beats carry no body (the server refused one). */
   private bodylessUntil = 0;
+  private lastTokenExpiry = 0;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
   private config: ProctorSessionConfig | null = null;
@@ -448,7 +449,9 @@ export class ProctorSession {
     };
 
     // Heartbeat and page listeners first: a slow or hanging detector must not delay them (FR-609).
-    this.heartbeat = new Heartbeat(
+    let me: Heartbeat | null = null; // this run's Heartbeat, for the late-answer check below
+    const runId = this.startGen;
+    this.heartbeat = me = new Heartbeat(
       async () => {
         // A live session keeps its retention mark fresh (and so its stored key) through a long
         // outage: another tab's stale sweep must never remove it.
@@ -459,11 +462,24 @@ export class ProctorSession {
           ? { body: undefined, commit: () => undefined }
           : this.beatBody();
         const r = await config.transport.heartbeat(body);
+        // An answer that arrives after stop(), the end of the session or a restart belongs to a run
+        // that is over: nothing is committed or delivered (a late token could overwrite a fresh one).
+        if (
+          runId !== this.startGen ||
+          this.heartbeat !== me ||
+          this.stopping ||
+          this.endedFired ||
+          !this.config
+        ) {
+          return r;
+        }
         if (r === true || (typeof r === 'object' && 'ok' in r)) commit(); // acknowledged
         // Delivered from here, not from the Heartbeat hooks: the transport may need two requests
         // (body refused, then a body-less retry) and answer after the Heartbeat stopped waiting. A
-        // late renewed token must still reach the app.
-        if (typeof r === 'object' && 'ok' in r) this.deliverBeat(r, config);
+        // late renewed token of a LIVE run must still reach the app.
+        if (typeof r === 'object' && 'ok' in r) {
+          this.deliverBeat(r, config, body !== undefined && Object.keys(body).length > 0);
+        }
         return r;
       },
       config.heartbeatIntervalMs ?? 10_000,
@@ -637,7 +653,6 @@ export class ProctorSession {
     const gen = this.purgeGen;
     const run = this.startGen; // a stop() and start() of this session makes this call stale
     try {
-      if (run !== this.startGen) return;
       await ks.put(sid, { key, epoch });
       // The session was purged while the put ran (also across a stop() and a new start()): take
       // the row out again.
@@ -723,6 +738,7 @@ export class ProctorSession {
   private deliverBeat(
     r: Extract<HeartbeatResult, { ok: true }>,
     config: ProctorSessionConfig,
+    carriedBody: boolean,
   ): void {
     if (r.bodyRejected) {
       this.bodylessUntil = Date.now() + FLAG_RESEND_MS;
@@ -735,10 +751,22 @@ export class ProctorSession {
           detail: 'The server refused the heartbeat health body; beats go without it for a while.',
         });
       }
+    } else if (carriedBody && this.bodyRejectedFlagged) {
+      // A beat that carried a body was acknowledged: the earlier refusal is over.
+      this.bodyRejectedFlagged = false;
+      this.fire('capability', { id: 'heartbeat-body-rejected', status: 'SUPPORTED' });
     }
     if (r.resync) this.flags?.forceFull();
     try {
-      if (r.renewal) config.onToken?.(r.renewal);
+      // A renewal that expires no later than the last one delivered is stale: never replace a
+      // newer token with an older one.
+      if (r.renewal) {
+        const exp = Date.parse(r.renewal.sessionTokenExpiresAt);
+        if (Number.isNaN(exp) || exp > this.lastTokenExpiry) {
+          if (!Number.isNaN(exp)) this.lastTokenExpiry = exp;
+          config.onToken?.(r.renewal);
+        }
+      }
       if (r.state) config.onHeartbeat?.(r.state);
     } catch {
       // a faulty app callback must not stop the beat
@@ -910,6 +938,7 @@ export class ProctorSession {
     this.heartbeat?.stop();
     this.heartbeat = null; // probe() after stop or finish sends nothing
     this.bodylessUntil = 0;
+    this.lastTokenExpiry = 0;
     for (const d of this.started.reverse()) {
       try {
         await d.stop();

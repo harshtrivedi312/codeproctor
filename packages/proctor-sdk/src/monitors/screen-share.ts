@@ -7,6 +7,22 @@ export type ScreenShareOutcome =
 type DisplayMedia = Pick<MediaDevices, 'getDisplayMedia'>;
 
 /**
+ * Maps the outcome of `request()` to the system-check `devices.screenShare` value, never a fake
+ * pass: a verified whole-screen share is MONITOR, a share whose surface the browser does not
+ * report is UNVERIFIABLE, a wrong surface is OTHER. A refused or unsupported request has no
+ * surface at all (null): the app handles it (the share is missing, not "other").
+ */
+export function surfaceOf(
+  outcome: ScreenShareOutcome,
+): 'MONITOR' | 'OTHER' | 'UNVERIFIABLE' | null {
+  if (outcome.ok) {
+    if (outcome.surface === null) return 'UNVERIFIABLE';
+    return outcome.surface === 'monitor' ? 'MONITOR' : 'OTHER';
+  }
+  return outcome.reason === 'WRONG_SURFACE' ? 'OTHER' : null;
+}
+
+/**
  * FR-604: the whole screen must be shared (displaySurface === 'monitor') and the share must
  * stay alive. A window or tab share is stopped right away (WRONG_SURFACE); an ended track logs
  * SCREEN_SHARE_STOPPED and locks the test until request() succeeds again (SCREEN_SHARE_RESUMED).

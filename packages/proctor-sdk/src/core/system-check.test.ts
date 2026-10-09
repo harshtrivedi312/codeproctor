@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 // The route's own schema: the body must be one the built API accepts (ADR 0013 section 5.4).
 import { systemCheckBodySchema } from '../../../../apps/api/src/candidate/system-check.schema';
 import { MultiScreenMonitor } from '../monitors/multi-screen';
+import { surfaceOf } from '../monitors/screen-share';
 import { VirtualCameraMonitor } from '../monitors/virtual-camera';
 import { TEST_KEY_B64 } from '../test/helpers';
 import type { SendResult, SignedBatch } from './batch-queue';
@@ -342,13 +343,170 @@ describe('after the start the checks repeat inside signed batches (FR-605, FR-61
       store: new IdbStore(indexedDB, `sc-${Math.random()}`),
       flushIntervalMs: 10,
     });
-    await vi.waitFor(() => {
-      const types = sent.flatMap((b) =>
-        (JSON.parse(b.body) as { events: { type: string }[] }).events.map((e) => e.type),
-      );
-      expect(types).toEqual(expect.arrayContaining(['MULTI_MONITOR', 'VIRTUAL_CAMERA']));
-    });
+    await vi.waitFor(
+      () => {
+        const types = sent.flatMap((b) =>
+          (JSON.parse(b.body) as { events: { type: string }[] }).events.map((e) => e.type),
+        );
+        expect(types).toEqual(expect.arrayContaining(['MULTI_MONITOR', 'VIRTUAL_CAMERA']));
+      },
+      { timeout: 3000 },
+    );
     expect(sent[0]?.signature).toMatch(/^[0-9a-f]{64}$/);
     await s.stop();
+  });
+});
+
+describe('review fixes: prompts, timeouts, clamps, labels (FR-604, FR-605, FR-610, TC-054, TC-056, TC-064)', () => {
+  it('surfaceOf never turns an unverified surface into a pass', () => {
+    const stream = {} as MediaStream;
+    expect(surfaceOf({ ok: true, stream, surface: 'monitor' })).toBe('MONITOR');
+    expect(surfaceOf({ ok: true, stream, surface: null })).toBe('UNVERIFIABLE');
+    expect(surfaceOf({ ok: true, stream, surface: 'window' })).toBe('OTHER');
+    expect(surfaceOf({ ok: false, reason: 'WRONG_SURFACE' })).toBe('OTHER');
+    expect(surfaceOf({ ok: false, reason: 'DENIED' })).toBeNull();
+    expect(surfaceOf({ ok: false, reason: 'UNSUPPORTED' })).toBeNull();
+  });
+
+  it('getScreenDetails (a prompt) is only called when window-management is already granted', async () => {
+    const getScreenDetails = vi.fn(() => Promise.resolve({ screens: [{}, {}] }));
+    const win = { screen: { isExtended: false }, getScreenDetails };
+    const e = env({ window: win });
+    (e.navigator as { permissions: object }).permissions = {
+      query: ({ name }: { name: string }) =>
+        Promise.resolve({ state: name === 'window-management' ? 'prompt' : 'granted' }),
+    };
+    const body = await collectSystemCheck({ env: e });
+    expect(getScreenDetails).not.toHaveBeenCalled();
+    expect(body.findings).toEqual([]); // fell back to isExtended (single)
+    // granted: the count is used
+    (e.navigator as { permissions: object }).permissions = {
+      query: () => Promise.resolve({ state: 'granted' }),
+    };
+    const granted = await collectSystemCheck({ env: e });
+    expect(getScreenDetails).toHaveBeenCalledTimes(1);
+    expect(granted.findings[0]?.payload).toEqual({ api: 'WINDOW_MANAGEMENT', screenCount: 2 });
+  });
+
+  it('a browser step that never settles is cut and reported UNVERIFIABLE (never a pass)', async () => {
+    const e = env();
+    const hang = () => new Promise<never>(() => undefined);
+    (e.navigator as { mediaDevices: object; permissions: object }).mediaDevices = {
+      enumerateDevices: hang,
+    };
+    (e.navigator as { permissions: object }).permissions = { query: hang };
+    e.window = { screen: { isExtended: false }, getScreenDetails: hang };
+    const t0 = Date.now();
+    const body = await collectSystemCheck({ env: e, stepTimeoutMs: 30 });
+    expect(Date.now() - t0).toBeLessThan(2000);
+    const by = (id: string) => body.capabilities.find((c) => c.id === id)?.status;
+    expect(body.devices).toMatchObject({ camera: false, microphone: false });
+    expect(by('camera-permission')).toBe('UNVERIFIABLE');
+    expect(by('virtual-camera')).not.toBe('SUPPORTED');
+  });
+
+  it('fullscreenEnabled false means UNSUPPORTED even if the function exists', async () => {
+    const e = env({
+      document: {
+        fullscreenEnabled: false,
+        documentElement: { requestFullscreen: () => undefined },
+      },
+    });
+    const body = await collectSystemCheck({ env: e });
+    expect(body.capabilities.find((c) => c.id === 'fullscreen-api')?.status).toBe('UNSUPPORTED');
+    const e2 = env({ document: { documentElement: { requestFullscreen: () => undefined } } });
+    expect(
+      (await collectSystemCheck({ env: e2 })).capabilities.find((c) => c.id === 'fullscreen-api')
+        ?.status,
+    ).toBe('SUPPORTED');
+  });
+
+  it('a virtual-camera label is cleaned (printable, <=128) and an empty one is no finding', async () => {
+    const dirty = await collectSystemCheck({
+      env: env({}, [
+        {
+          kind: 'videoinput',
+          label: `OBS Virtual\u0000 Camera\u0007${'x'.repeat(300)}`,
+          deviceId: 'a',
+        },
+      ] as MediaDeviceInfo[]),
+      now: () => NOW,
+    });
+    const label = String(dirty.findings[0]?.payload['deviceLabel']);
+    expect(label).toMatch(/^OBS Virtual Camerax+$/);
+    expect(Array.from(label).length).toBeLessThanOrEqual(128);
+    expect(systemCheckBodySchema.safeParse(dirty).success).toBe(true);
+    const empty = await collectSystemCheck({
+      env: env({}, [
+        { kind: 'videoinput', label: 'obs virtual\u0000', deviceId: 'a' },
+      ] as MediaDeviceInfo[]),
+    });
+    expect(empty.findings).toHaveLength(1);
+    const none = await collectSystemCheck({
+      env: env({}, [
+        { kind: 'videoinput', label: '\u0001\u0002obs', deviceId: 'a' },
+      ] as MediaDeviceInfo[]),
+    });
+    expect(systemCheckBodySchema.safeParse(none).success).toBe(true);
+  });
+
+  it('no camera at all is UNVERIFIABLE for the virtual-camera check, not SUPPORTED', async () => {
+    const body = await collectSystemCheck({
+      env: env({}, [{ kind: 'audioinput', label: 'mic', deviceId: 'm' }] as MediaDeviceInfo[]),
+    });
+    expect(body.devices.camera).toBe(false);
+    expect(body.capabilities.find((c) => c.id === 'virtual-camera')?.status).toBe('UNVERIFIABLE');
+  });
+
+  it('a spoofed UA version is clamped to the route range; NaN attempts cannot loop forever', async () => {
+    const e = env();
+    (e.navigator as { userAgent: string }).userAgent = 'Mozilla/5.0 Firefox/99999999';
+    const body = await collectSystemCheck({ env: e });
+    expect(body.browser).toEqual({ brand: 'Firefox', majorVersion: 999 });
+    expect(systemCheckBodySchema.safeParse(body).success).toBe(true);
+    const down = vi.fn(() => Promise.resolve(reply(503, { code: 'BUSY' })));
+    const err = await runSystemCheck({
+      baseUrl: 'https://api.test',
+      getToken: () => TOKEN,
+      fetchFn: down,
+      env: env(),
+      maxAttempts: Number.NaN,
+      sleep: () => Promise.resolve(),
+    }).catch((x: unknown) => x);
+    expect((err as SystemCheckError).kind).toBe('UNAVAILABLE');
+    expect(down).toHaveBeenCalledTimes(3); // the default
+    const big = vi.fn(() => Promise.resolve(reply(503, {})));
+    await runSystemCheck({
+      baseUrl: 'https://api.test',
+      getToken: () => TOKEN,
+      fetchFn: big,
+      env: env(),
+      maxAttempts: 1_000_000,
+      sleep: () => Promise.resolve(),
+    }).catch(() => undefined);
+    expect(big).toHaveBeenCalledTimes(5); // capped
+  });
+
+  it('408 is retried; a 200 with an invalid body is UNAVAILABLE (bad response), never a pass', async () => {
+    let n = 0;
+    const r = await runSystemCheck({
+      baseUrl: 'https://api.test',
+      getToken: () => TOKEN,
+      fetchFn: () =>
+        Promise.resolve(++n === 1 ? reply(408, {}) : reply(200, { passed: true, blocking: [] })),
+      env: env(),
+      sleep: () => Promise.resolve(),
+    });
+    expect(r.passed).toBe(true);
+    for (const bad of [{ passed: 'yes', blocking: [] }, { passed: true }, 'nope']) {
+      const err = await runSystemCheck({
+        baseUrl: 'https://api.test',
+        getToken: () => TOKEN,
+        fetchFn: () => Promise.resolve(reply(200, bad)),
+        env: env(),
+      }).catch((x: unknown) => x);
+      expect((err as SystemCheckError).kind).toBe('UNAVAILABLE');
+      expect((err as SystemCheckError).code).toBe('BAD_RESPONSE');
+    }
   });
 });

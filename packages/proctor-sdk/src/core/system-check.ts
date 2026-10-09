@@ -1,5 +1,5 @@
 import { checkMultiScreen, type WindowLike } from '../monitors/multi-screen';
-import { checkVirtualCamera } from '../monitors/virtual-camera';
+import { classifyCameras } from '../monitors/virtual-camera';
 import { timedFetch } from './http';
 import { parseRetryAfter } from './transport';
 import type { CapabilityFlag } from './types';
@@ -37,12 +37,17 @@ export interface SystemCheckOptions {
   baseUrl: string;
   /** The candidate token, read per request, never stored or logged. */
   getToken: () => string;
-  /** The surface the app got from `ScreenShareMonitor.request()`; UNVERIFIABLE when it did not ask. */
-  screenShare?: ScreenShareSurface;
+  /**
+   * The surface of the app's screen share: use `surfaceOf(outcome)` from the screen-share monitor.
+   * UNVERIFIABLE when the app did not ask or the browser does not report the surface.
+   */
+  screenShare?: ScreenShareSurface | null;
   fetchFn?: typeof fetch;
   path?: string;
   env?: SystemCheckEnv;
   now?: () => Date;
+  /** Each browser step (screens, devices, permissions, IndexedDB) is cut after this long (default 3 s) and reported UNVERIFIABLE. */
+  stepTimeoutMs?: number;
   /** Per request, body read included (default 15 s). */
   timeoutMs?: number;
   /** Attempts for transient failures (network, timeout, 408, 429, 5xx), default 3. */
@@ -105,7 +110,7 @@ function brandOf(nav: NonNullable<SystemCheckEnv['navigator']>): {
       ) ?? real[0];
     if (pick) {
       const v = Number.parseInt(pick.version, 10);
-      return { brand: clean(pick.brand), majorVersion: Number.isFinite(v) && v >= 0 ? v : 0 };
+      return { brand: clean(pick.brand, 64), majorVersion: clampMajor(v) };
     }
   }
   const ua = nav.userAgent ?? '';
@@ -118,13 +123,28 @@ function brandOf(nav: NonNullable<SystemCheckEnv['navigator']>): {
   ];
   for (const [re, brand] of table) {
     const m = re.exec(ua);
-    if (m) return { brand, majorVersion: Number.parseInt(m[1] as string, 10) };
+    if (m) return { brand, majorVersion: clampMajor(Number.parseInt(m[1] as string, 10)) };
   }
   return { brand: 'Unknown', majorVersion: 0 };
 }
 
-/** The route trims and caps the brand at 64 and refuses NUL: send a tidy ASCII-ish string. */
-function clean(s: string): string {
+/** The route takes 0..999: a spoofed UA must not turn the check into a final 400. */
+function clampMajor(v: number): number {
+  return Number.isFinite(v) ? Math.max(0, Math.min(999, Math.trunc(v))) : 0;
+}
+
+/** Bounded wait for a browser step that may never settle (a prompt open, a hung API). */
+function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  p.catch(() => undefined);
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Printable characters only, trimmed, at most `max` code points (the route refuses NUL and control characters). */
+function clean(s: string, max: number): string {
   // Keep printable characters only (the route refuses NUL; control characters are noise).
   const t = Array.from(s)
     .filter((ch) => {
@@ -132,9 +152,9 @@ function clean(s: string): string {
       return c >= 0x20 && c !== 0x7f;
     })
     .join('')
-    .trim()
-    .slice(0, 64);
-  return t === '' ? 'Unknown' : t;
+    .trim();
+  const cut = Array.from(t).slice(0, max).join('').trim();
+  return cut === '' ? 'Unknown' : cut;
 }
 
 const SCREEN_PERMISSIONS = [
@@ -147,8 +167,9 @@ const SCREEN_PERMISSIONS = [
  * Never requests a device: `enumerateDevices` and `permissions.query` do not prompt.
  */
 export async function collectSystemCheck(
-  o: Pick<SystemCheckOptions, 'env' | 'screenShare' | 'now'> = {},
+  o: Pick<SystemCheckOptions, 'env' | 'screenShare' | 'now' | 'stepTimeoutMs'> = {},
 ): Promise<SystemCheckBody> {
+  const step = Math.min(10_000, Math.max(1, o.stepTimeoutMs ?? 3000)); // per browser step
   const g = globalThis as unknown as Record<string, unknown>;
   // A field the caller sets (even to undefined) is used as given: "absent" is a valid test and
   // browser state; only a field that is not mentioned falls back to the real global.
@@ -179,7 +200,39 @@ export async function collectSystemCheck(
   const findings: SystemCheckFinding[] = [];
 
   // Screens (FR-605): count and API only.
-  const ms = env.window ? await checkMultiScreen(env.window).catch(() => null) : null;
+  // getScreenDetails() would show the window-management prompt while the permission is "prompt"
+  // (and never settle while it is open): only use it when the permission is already granted, else
+  // fall back to the prompt-free screen.isExtended.
+  let win = env.window;
+  if (win && typeof win.getScreenDetails === 'function') {
+    let granted = false;
+    if (nav.permissions && typeof nav.permissions.query === 'function') {
+      const q = nav.permissions;
+      for (const name of ['window-management', 'window-placement']) {
+        const st = await within(
+          q.query({ name }).then(
+            (r) => r.state,
+            () => 'unknown',
+          ),
+          step,
+          'unknown',
+        );
+        if (st === 'granted') {
+          granted = true;
+          break;
+        }
+        if (st !== 'unknown') break;
+      }
+    }
+    if (!granted) win = { screen: win.screen };
+  }
+  const ms = win
+    ? await within(
+        checkMultiScreen(win).catch(() => null),
+        step,
+        null,
+      )
+    : null;
   if (ms?.kind === 'MULTI') {
     findings.push({
       type: 'MULTI_MONITOR',
@@ -195,7 +248,7 @@ export async function collectSystemCheck(
   } else {
     capabilities.push({
       id: 'multi-screen',
-      status: ms?.kind === 'DENIED' ? 'DENIED' : 'UNSUPPORTED',
+      status: ms?.kind === 'DENIED' ? 'DENIED' : ms === null ? 'UNVERIFIABLE' : 'UNSUPPORTED',
       detail: 'Cannot tell how many screens are connected.',
     });
   }
@@ -205,23 +258,34 @@ export async function collectSystemCheck(
   let microphone = false;
   const md = nav.mediaDevices;
   if (md && typeof md.enumerateDevices === 'function') {
-    try {
-      const list = await md.enumerateDevices();
+    // Unknown (a rejection or a hang) leaves both false and is never a pass.
+    const list: readonly { kind: string; label: string }[] | null = await within(
+      md.enumerateDevices().then(
+        (l) => l as readonly { kind: string; label: string }[] | null,
+        () => null,
+      ),
+      step,
+      null,
+    );
+    if (list) {
       camera = list.some((d) => d.kind === 'videoinput');
       microphone = list.some((d) => d.kind === 'audioinput');
-    } catch {
-      // unknown: both stay false
     }
-    const vc = await checkVirtualCamera(md).catch(() => ({ kind: 'UNSUPPORTED' }) as const);
-    if (vc.kind === 'VIRTUAL') {
-      findings.push({
-        type: 'VIRTUAL_CAMERA',
-        occurredAt: now,
-        payload: { deviceLabel: vc.label },
+    const vc = list ? classifyCameras(list) : ({ kind: 'UNSUPPORTED' } as const);
+    // The label is untrusted text: printable, trimmed, at most 128; an empty one is no finding.
+    const label = vc.kind === 'VIRTUAL' ? clean(vc.label, 128) : '';
+    if (vc.kind === 'VIRTUAL' && label !== '' && label !== 'Unknown') {
+      findings.push({ type: 'VIRTUAL_CAMERA', occurredAt: now, payload: { deviceLabel: label } });
+      capabilities.push({ id: 'virtual-camera', status: 'SUPPORTED' });
+    } else if (vc.kind === 'CLEAN' && camera) {
+      capabilities.push({ id: 'virtual-camera', status: 'SUPPORTED' });
+    } else if (vc.kind === 'CLEAN' || vc.kind === 'VIRTUAL') {
+      // No camera to look at (or an unusable label): nothing was verified.
+      capabilities.push({
+        id: 'virtual-camera',
+        status: 'UNVERIFIABLE',
+        detail: camera ? 'The camera name could not be read.' : 'No camera was found.',
       });
-      capabilities.push({ id: 'virtual-camera', status: 'SUPPORTED' });
-    } else if (vc.kind === 'CLEAN') {
-      capabilities.push({ id: 'virtual-camera', status: 'SUPPORTED' });
     } else {
       capabilities.push({
         id: 'virtual-camera',
@@ -251,7 +315,11 @@ export async function collectSystemCheck(
       continue;
     }
     try {
-      const s = (await nav.permissions.query({ name })).state;
+      const s = await within(
+        nav.permissions.query({ name }).then((r) => r.state),
+        step,
+        'unknown',
+      );
       capabilities.push({
         id,
         status: s === 'granted' ? 'SUPPORTED' : s === 'denied' ? 'DENIED' : 'UNVERIFIABLE',
@@ -293,13 +361,21 @@ export async function collectSystemCheck(
     status: webm ? 'SUPPORTED' : 'UNSUPPORTED',
     detail: 'WebM with VP8 and Opus',
   });
+  // fullscreenEnabled is authoritative when the browser reports it (false means fullscreen is
+  // blocked, for example in a sandboxed frame); the function check is only the fallback.
+  const fe = env.document?.fullscreenEnabled;
   const fs =
-    env.document?.fullscreenEnabled === true ||
-    typeof env.document?.documentElement?.requestFullscreen === 'function';
+    typeof fe === 'boolean'
+      ? fe
+      : typeof env.document?.documentElement?.requestFullscreen === 'function';
   capabilities.push({ id: 'fullscreen-api', status: fs ? 'SUPPORTED' : 'UNSUPPORTED' });
   capabilities.push({
     id: 'idb',
-    status: (await idbWorks(env.indexedDB)) ? 'SUPPORTED' : 'UNSUPPORTED',
+    ...(await (async (): Promise<{ status: CapabilityFlag['status'] }> => {
+      if (!env.indexedDB) return { status: 'UNSUPPORTED' };
+      const r = await within<boolean | null>(idbWorks(env.indexedDB), step, null);
+      return { status: r === null ? 'UNVERIFIABLE' : r ? 'SUPPORTED' : 'UNSUPPORTED' };
+    })()),
   });
   const subtle = env.crypto?.subtle;
   capabilities.push({
@@ -396,9 +472,13 @@ export async function runSystemCheck(o: SystemCheckOptions): Promise<SystemCheck
   const body = await collectSystemCheck(o);
   const f = o.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const attempts = Math.max(1, o.maxAttempts ?? 3);
-  const base = o.backoffBaseMs ?? 1000;
-  const max = o.backoffMaxMs ?? 15_000;
+  // Bounded and finite: NaN or a huge value must not make the loop endless or the wait unbounded.
+  const num = (v: number | undefined, def: number, lo: number, hi: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : def;
+  const attempts = Math.trunc(num(o.maxAttempts, 3, 1, 5));
+  const base = num(o.backoffBaseMs, 1000, 0, 60_000);
+  const max = num(o.backoffMaxMs, 15_000, 0, 60_000);
+  const timeoutMs = num(o.timeoutMs, 15_000, 1, 60_000);
   const payload = JSON.stringify(body);
   for (let attempt = 0; ; attempt++) {
     let retryAfterMs: number | undefined;
@@ -418,7 +498,7 @@ export async function runSystemCheck(o: SystemCheckOptions): Promise<SystemCheck
           body: payload,
           cache: 'no-store',
         },
-        o.timeoutMs ?? 15_000,
+        timeoutMs,
       );
       if (a.ok) {
         const r = parseResult(a.text);

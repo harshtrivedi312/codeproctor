@@ -441,10 +441,12 @@ Open
 Done: `runSystemCheck()` and `collectSystemCheck()` (see the README), body validated in tests against the built route's own zod schema (`apps/api/src/candidate/system-check.schema.ts`, a deliberate test-only coupling), privacy tests (no labels or ids), retry and final-error handling, a session-level test that the monitors repeat MULTI_MONITOR and VIRTUAL_CAMERA inside signed batches.
 
 For Frontend B
-- Call `runSystemCheck` after the screen-share request and before the start; pass the surface the `ScreenShareMonitor` reported (`MONITOR`, `OTHER`, or `UNVERIFIABLE` when the browser does not report it). Show `blocking` reasons; a `SYSTEM_CHECK_BLOCKED` from the start means a fresh passed check is needed. The app's own `/dev/proctor` and test-start code may have a local copy of this call: replace it.
+- Call `runSystemCheck` after the screen-share request and before the start; pass `surfaceOf(outcome)` of the `ScreenShareMonitor.request()` result (`MONITOR`, `OTHER`, `UNVERIFIABLE` when the browser does not report the surface, or null when no share was obtained; never map a missing surface to MONITOR). Show `blocking` reasons; a `SYSTEM_CHECK_BLOCKED` from the start means a fresh passed check is needed. The app's own `/dev/proctor` and test-start code may have a local copy of this call: replace it.
 
 Open
 - Browser brand comes from `userAgentData.brands` then the UA string; the server also compares `Sec-CH-UA` (advisory), so a spoofed UA shows up there, not here.
 - `network` uses `navigator.connection` (Chromium only); other browsers send none.
 - The check enumerates devices without permission, so camera labels are usually hidden before the camera permission: `virtual-camera` is then UNVERIFIABLE and the VIRTUAL_CAMERA finding comes from the in-test monitor after the permission is granted. The app may call `runSystemCheck` again after the camera permission to get a label-based result (the route allows 10 per minute).
+- Review of #391: a late heartbeat answer of a stopped, ended or restarted run is dropped (no commit, token, state, flag or resync), an older renewal never replaces a newer one, `heartbeat-body-rejected` returns to SUPPORTED after an acknowledged beat that carried a body; `surfaceOf` for the screen-share outcome; no `getScreenDetails` prompt; step timeouts; clamps; label cleaning; `fullscreenEnabled` is authoritative. Note: during the 5-minute body-less window the `recorder` and `queue` health blocks are missing too, not only capabilities.
+- Hub: move `system-check.schema.ts` to `packages/shared` (ADR) so the SDK and the API share one schema instead of the test-only import.
 

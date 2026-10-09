@@ -2,10 +2,6 @@ import type { EndReason } from './batch-queue';
 import type { HeartbeatResult } from './transport';
 
 export interface HeartbeatHooks {
-  /** The server asked for the full capability set again. */
-  onResync?: () => void;
-  /** An acknowledged beat that carried the server state and/or a renewed token. */
-  onOk?: (r: Extract<HeartbeatResult, { ok: true }>) => void;
   /** After `authLostAfter` consecutive 401 answers (default 3) the beat stops; `resume()` continues. */
   onAuthLost?: (code: string) => void;
   authLostAfter?: number;
@@ -116,8 +112,6 @@ export class Heartbeat {
           return;
         }
         this.auth401 = 0;
-        if (r.resync) this.safely(() => this.hooks.onResync?.());
-        this.safely(() => this.hooks.onOk?.(r));
         ok = true;
       } else {
         this.auth401 = 0;
