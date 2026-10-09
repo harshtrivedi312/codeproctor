@@ -75,7 +75,8 @@ describe('the presign schemas apply the rule (FR-701, D-61)', () => {
       url,
       method: 'PUT',
       headers,
-      evidenceKey: 'identity/1/id-01.jpg',
+      name: 'identity/1/id-01J9ZZZZZZZZZZZZZZZZZZZZZZ.jpg',
+      attempt: 1,
       expiresAt: '2026-10-09T10:00:00.000Z',
     }).success;
   const media = (url: string) =>

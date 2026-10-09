@@ -21,6 +21,7 @@ const deployed = {
   REQUIRE_LEGAL_APPROVED_CONSENT: 'true',
   JWT_CANDIDATE_SECRET: 'c'.repeat(40),
   OTP_PEPPER: 'd'.repeat(40),
+  QUESTION_OPTION_ID_SECRET: 'e'.repeat(40),
   SESSION_KEY_ENC_KEY_k1: Buffer.alloc(32, 5).toString('base64'),
   // Pilot and production require SES (C-31); nothing is sent in this suite.
   EMAIL_PROVIDER: 'ses',

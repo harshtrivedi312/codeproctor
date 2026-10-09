@@ -2,9 +2,10 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
+import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
 import { api, type Schemas } from '@/lib/api/client';
 import { busyStore } from '@/lib/api/busy';
-import { disposeModels, MODEL_ROOT } from '@/features/questions/monaco-registry';
+import { withRefreshLock } from '@/lib/refresh-coordination';
 import {
   beginSession,
   beginSignOut,
@@ -12,9 +13,10 @@ import {
   getGeneration,
   getSessionUserId,
   REQUEST_TIMEOUT_MS,
+  LOGOUT_LOCK_WAIT_MS,
+  signOutStillWanted,
   handleSignInElsewhere,
   invalidateRefreshes,
-  isSignOutMarkerSet,
   isSignOutPending,
   SESSION_EPOCH_KEY,
   SIGN_OUT_MARKER_KEY,
@@ -87,6 +89,13 @@ interface AuthContextValue {
   signOut: () => Promise<void>;
 }
 
+/** Tracks a whole sign-out (not only its logout call) so a sign-in waits for it. Call the result when done. */
+function trackSignOut(): () => void {
+  let done: () => void = () => undefined;
+  trackLogout(new Promise<void>((resolve) => (done = resolve)));
+  return done;
+}
+
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }): React.JSX.Element {
@@ -114,24 +123,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
    * Asks the server to end the session. Success, or 401 (there is no valid session left, so
    * nothing can be restored), clears the pending marker; anything else leaves it set.
    */
-  const confirmLogout = React.useCallback(async () => {
-    const startedIn = getGeneration();
+  const confirmLogout = React.useCallback(async (generationAtSignOut?: number) => {
+    // The generation the sign-out began under, captured by the caller before any await. A sign-in
+    // that lands later (this tab or another) bumps it and the logout below is then never sent.
+    const startedIn = generationAtSignOut ?? getGeneration();
     logoutOutstanding.current += 1;
-    const call = (async (): Promise<boolean> => {
+    // Inside the cross-tab refresh lock, so a logout never overlaps a refresh in another tab (a
+    // refresh on a family the logout is revoking looks like token reuse, TC-005). The wait for the
+    // lock is bounded. Whatever the wait was, the logout is sent only if this sign-out is still the
+    // current state: same generation and the sign-out still pending. A sign-in during the wait
+    // bumps the generation (this tab's own sign-in, or another tab's epoch event, which does so
+    // while a logout is outstanding), and its new cookie must not be revoked.
+    const call = withRefreshLock(async (): Promise<'ok' | 'failed' | 'superseded'> => {
+      if (startedIn !== getGeneration()) return 'superseded'; // a sign-in since: not ours to revoke
+      // The shared marker was cleared by another tab: it confirmed this sign-out, or it signed in
+      // (its epoch event may not have reached this tab yet). Either way nothing is sent here, and
+      // this tab's in-memory signing-out flag is left as it is (no refresh from this tab). When this
+      // tab could not write the marker at all, the in-memory flag decides (signOutStillWanted).
+      if (!signOutStillWanted()) return 'superseded';
       try {
         const { response } = await api.POST('/v1/auth/logout', {
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
-        return response.ok || response.status === 401;
+        return response.ok || response.status === 401 ? 'ok' : 'failed';
       } catch {
-        return false;
+        return 'failed';
       }
-    })();
+    }, LOGOUT_LOCK_WAIT_MS).catch((): 'failed' => 'failed');
     trackLogout(call);
-    const ok = await call;
+    const result = await call;
     logoutOutstanding.current -= 1;
     // A new sign-in happened meanwhile: this answer is about the old session; ignore it.
     if (startedIn !== getGeneration()) return;
+    if (result === 'superseded') {
+      unconfirmedGen.current = null;
+      setSignOutUnconfirmed(false);
+      return;
+    }
+    const ok = result === 'ok';
     if (ok) confirmSignedOut();
     // Remember which generation the failed answer belongs to, so Retry can tell it went stale.
     unconfirmedGen.current = ok ? null : startedIn;
@@ -144,7 +173,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
    * to someone else now, so just hide the button.
    */
   const retrySignOut = React.useCallback(async () => {
-    if (unconfirmedGen.current !== getGeneration() || !isSignOutMarkerSet()) {
+    if (unconfirmedGen.current !== getGeneration() || !signOutStillWanted()) {
       unconfirmedGen.current = null;
       setSignOutUnconfirmed(false);
       return;
@@ -251,6 +280,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       // late 401 cannot start a refresh.
       const settled = beginSignOut();
       publishSession(null);
+      // From here until the logout is answered, a sign-in must wait (settleSession), and the
+      // logout belongs to this generation, captured before any await. Every sign-out path
+      // (Sign out, 2FA off, 2FA on, unknown set-up outcome) goes through here.
+      const generationAtSignOut = getGeneration();
+      const finished = trackSignOut();
+      // `settled` waits for a refresh already running. In theory that wait is unbounded; in practice
+      // a refresh stops within one request timeout (~10 s), so the logout can lag the UI sign-out
+      // by that much (the session is already forgotten here).
       await settled;
       try {
         // The session listener also cancels and clears on the user change; this is explicit so the
@@ -262,8 +299,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
         // Nothing to do: the logout call below must still run.
       }
       try {
-        await confirmLogout();
+        await confirmLogout(generationAtSignOut);
       } finally {
+        finished();
         // Whatever the server said, this browser has forgotten the session. If the server did not
         // confirm, the pending marker stays set so a reload does not restore it (FR-104).
         router.replace(target);
