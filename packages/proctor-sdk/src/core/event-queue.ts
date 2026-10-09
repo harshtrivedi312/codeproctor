@@ -11,7 +11,7 @@ import {
 } from './batch-queue';
 import { canonicalJson } from './canonical';
 
-export type { SendResult, SignedBatch } from './batch-queue';
+export type { EndReason, SendOutcome, SendResult, SignedBatch } from './batch-queue';
 import type { SendResult, SignedBatch } from './batch-queue';
 
 /** Sends one signed event batch (POST /candidate/session/events). */
