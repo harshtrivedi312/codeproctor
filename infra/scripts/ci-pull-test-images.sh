@@ -7,7 +7,8 @@
 # No Docker Hub token is used or needed: a credential would go through the owner (ADR 0009, C-63).
 # Both mirrors serve the same content, so the digest is the same on either one. To move to a newer
 # image, change the tag in the tests and the digest here together (infra/scripts/ci-pull-test-images.test.mjs
-# fails if they drift).
+# fails if they drift). A mirror only serves what it has cached: if a pull fails with 'manifest unknown',
+# the pinned digest may need a refresh; the script fails closed and never falls back to Docker Hub.
 set -eu
 
 pull_one() {
@@ -17,13 +18,15 @@ pull_one() {
   for registry in mirror.gcr.io/library public.ecr.aws/docker/library; do
     attempt=1
     while [ "$attempt" -le 3 ]; do
-      if docker pull -q "$registry/$name@$digest" >/dev/null 2>&1; then
+      if timeout 300 docker pull -q "$registry/$name@$digest" >/dev/null; then
         docker tag "$registry/$name@$digest" "$name:$tag"
         echo "pulled $name:$tag ($digest) from $registry"
         return 0
       fi
+      if [ "$attempt" -lt 3 ]; then
+        sleep $((attempt * 5))
+      fi
       attempt=$((attempt + 1))
-      sleep $((attempt * 5))
     done
   done
   echo "could not pull $name:$tag from any mirror" >&2
