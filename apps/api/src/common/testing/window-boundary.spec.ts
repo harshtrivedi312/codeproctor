@@ -5,12 +5,12 @@ describe('awaitSafeWindow (test helper for fixed-window rate limits)', () => {
     jest.useRealTimers();
   });
 
-  it('FR-103, TC-006: returns at once when more than the safe margin is left in the window', async () => {
+  it('FR-103, FR-303 (test helper, no TC row): returns at once when more than the safe margin is left in the window', async () => {
     jest.useFakeTimers({ now: new Date('2026-10-09T17:30:00.000Z') });
     await expect(awaitSafeWindow(3600, 30_000)).resolves.toBeUndefined();
   });
 
-  it('FR-103, TC-006: waits past the boundary when under the safe margin is left', async () => {
+  it('FR-103, FR-303 (test helper, no TC row): waits past the boundary when under the safe margin is left', async () => {
     jest.useFakeTimers({ now: new Date('2026-10-09T17:59:50.000Z') });
     let done = false;
     const p = awaitSafeWindow(3600, 30_000).then(() => {
