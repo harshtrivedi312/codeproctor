@@ -6,7 +6,8 @@ import {
   WEBCAM_CONSTRAINTS,
   type RecorderFactory,
 } from './recorder';
-import { UploadQueue } from './upload-queue';
+import { MediaCounters, type MediaCounter } from './counters';
+import { UploadQueue, type UploadQueueOptions } from './upload-queue';
 import type { CapabilityFlag } from '../core/types';
 import type { DeviceLoss, MediaApi, RecorderHealth, RecordingStream } from './types';
 
@@ -28,6 +29,14 @@ export interface RecordingPipelineOptions {
   maxMemoryBytes?: number;
   maxBufferBytes?: number;
   backoffBaseMs?: number;
+  /** Reachability probe while the connection is down, for example the session heartbeat. */
+  probe?: UploadQueueOptions['probe'];
+  /** The server said the session is over: uploading stopped, chunks kept (SESSION_NOT_ACTIVE). */
+  onEnded?: UploadQueueOptions['onEnded'];
+  /** A segment's first chunk was refused for good; it is kept and retried slowly. */
+  onChunkBlocked?: UploadQueueOptions['onChunkBlocked'];
+  /** Injected clock for chunk start times and durations (tests). */
+  now?: () => number;
 }
 
 /**
@@ -42,14 +51,40 @@ export class RecordingPipeline {
   private readonly owned = new Map<RecordingStream, MediaStream>();
   private readonly onOnline = (): void => this.queue.retryNow();
   private started = false;
+  private readonly counters: MediaCounters;
 
   constructor(private readonly o: RecordingPipelineOptions) {
     this.store = o.store ?? new IdbStore();
+    this.counters = new MediaCounters(this.store, o.sessionId);
     this.queue = new UploadQueue({
       sessionId: o.sessionId,
       api: o.api,
       store: this.store,
       ...(o.put ? { put: o.put } : {}),
+      ...(o.probe ? { probe: o.probe } : {}),
+      onEnded: (info) => {
+        o.onCapability?.({
+          id: 'recording-ended',
+          status: 'UNVERIFIABLE',
+          detail:
+            'The server says the session is over: recording uploads stopped, chunks are kept.',
+        });
+        o.onEnded?.(info);
+      },
+      onChunkBlocked: (info) => {
+        o.onCapability?.({
+          id: 'recording-blocked',
+          status: 'UNVERIFIABLE',
+          detail: `The server refused the first chunk of a ${info.stream.toLowerCase()} segment; it is kept and retried slowly.`,
+        });
+        o.onChunkBlocked?.(info);
+      },
+      onCapExceeded: () =>
+        o.onCapability?.({
+          id: 'recording-buffer',
+          status: 'UNVERIFIABLE',
+          detail: 'The recording buffer is full of protected chunks; it is above its cap.',
+        }),
       ...(o.onHealth ? { onHealth: o.onHealth } : {}),
       ...(o.staleAfterMs === undefined ? {} : { staleAfterMs: o.staleAfterMs }),
       ...(o.maxMemoryBytes === undefined ? {} : { maxMemoryBytes: o.maxMemoryBytes }),
@@ -72,6 +107,14 @@ export class RecordingPipeline {
   /** Resume uploads left over from a previous page load (FR-702). Needs no device access. */
   async start(): Promise<void> {
     await this.queue.start();
+    await this.counters.load();
+    // Never restart below a chunk still waiting from an earlier page load.
+    for (const stream of ['SCREEN', 'WEBCAM', 'AUDIO'] as const) {
+      this.counters.seed(stream, {
+        nextSeq: this.queue.maxSeq(stream) + 1,
+        nextSegment: this.queue.maxSegment(stream) + 1,
+      });
+    }
     globalThis.addEventListener?.('online', this.onOnline);
     this.started = true;
   }
@@ -88,26 +131,14 @@ export class RecordingPipeline {
     return this.owned.get('WEBCAM') ?? null;
   }
 
-  /** In-memory segment counters: recording must still work when IndexedDB is broken. */
-  private readonly segmentCounters = new Map<RecordingStream, number>();
-
-  private async nextSegment(stream: RecordingStream): Promise<number> {
-    const key = `${this.o.sessionId}:segment:${stream}`;
-    let stored = -1;
-    try {
-      stored = (await this.store.get<number>(STORES.meta, key)) ?? -1;
-    } catch {
-      // IndexedDB unavailable: fall back to the in-memory counter and the queue's view.
+  /**
+   * Lift a stream's counters to the server's (`proctor-key` `counters.media`), keeping the larger
+   * of local and server so a new device never reuses a seq or segment.
+   */
+  seedCounters(counters: Partial<Record<RecordingStream, Partial<MediaCounter>>>): void {
+    for (const [stream, v] of Object.entries(counters)) {
+      if (v) this.counters.seed(stream as RecordingStream, v);
     }
-    const next =
-      Math.max(stored, this.segmentCounters.get(stream) ?? -1, this.queue.maxSegment(stream)) + 1;
-    this.segmentCounters.set(stream, next);
-    try {
-      await this.store.put(STORES.meta, key, next);
-    } catch {
-      // not persisted; a reload may reuse the number, the server upserts by (stream, segment, seq)
-    }
-    return next;
   }
 
   private supported(stream: RecordingStream): boolean {
@@ -173,12 +204,18 @@ export class RecordingPipeline {
   private async begin(stream: RecordingStream, media: MediaStream): Promise<void> {
     if (!this.started) await this.start();
     await this.recorders.get(stream)?.stop();
-    const segment = await this.nextSegment(stream);
+    const segment = await this.counters.newSegment(stream);
     const rec = new ChunkRecorder(
       stream,
       segment,
-      (c, d) => this.queue.add(c, d),
+      async (c, d) => {
+        // The counter is persisted before the chunk is stored, so a reload never reuses its seq.
+        await this.counters.persist(stream);
+        await this.queue.add(c, d);
+      },
       this.o.recorderFactory,
+      () => this.counters.allocSeq(stream), // continues across segments and restarts
+      this.o.now,
     );
     this.recorders.set(stream, rec);
     let reported = false;

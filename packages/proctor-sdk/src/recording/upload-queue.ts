@@ -4,8 +4,10 @@ import {
   MAX_BUFFER_BYTES,
   MediaApiError,
   RECORDING_STREAMS,
+  contentTypeFor,
   type ChunkRef,
   type MediaApi,
+  type PresignedPut,
   type RecorderHealth,
   type RecordingStream,
 } from './types';
@@ -14,24 +16,45 @@ interface StoredChunk {
   data: ArrayBuffer;
 }
 
-/** Key layout: `${sessionId}:${stream}:${segment}:${seq}:${bytes}:${contentType}`, all sortable. */
+/**
+ * Key layout: `${sid}:${stream}:${segment}:${seq}:${bytes}:${contentType}:${startedAtMs}:${durationMs}:${f|n}`
+ * (segment and seq zero padded so keys sort in recording order; `f` marks the first chunk of a
+ * segment). Chunks stored by an earlier SDK version have only the first six parts: they get a
+ * start time of "now minus 10 s", a 10 s duration, the bare content type, and are not first.
+ */
 export function chunkKey(sessionId: string, c: ChunkRef): string {
-  return `${sessionId}:${c.stream}:${padSeq(c.segment)}:${padSeq(c.seq)}:${c.bytes}:${encodeURIComponent(c.contentType)}`;
+  return [
+    sessionId,
+    c.stream,
+    padSeq(c.segment),
+    padSeq(c.seq),
+    c.bytes,
+    encodeURIComponent(c.contentType),
+    Math.round(c.startedAtMs ?? Date.now() - 10_000),
+    Math.round(c.durationMs ?? 10_000),
+    c.first ? 'f' : 'n',
+  ].join(':');
 }
 
 export function parseChunkKey(key: string): ChunkRef | null {
   const parts = key.split(':');
   if (parts.length < 6) return null;
-  const [, stream, segment, seq, bytes, ct] = parts;
+  const [, stream, segment, seq, bytes, , startedAt, duration, first] = parts;
   if (!RECORDING_STREAMS.includes(stream as RecordingStream)) return null;
   const n = (v: string | undefined): number => Number(v);
   if ([segment, seq, bytes].some((v) => !Number.isInteger(n(v)))) return null;
+  const st = stream as RecordingStream;
+  const modern =
+    parts.length >= 9 && Number.isFinite(n(startedAt)) && Number.isInteger(n(duration));
   return {
-    stream: stream as RecordingStream,
+    stream: st,
     segment: n(segment),
     seq: n(seq),
     bytes: n(bytes),
-    contentType: decodeURIComponent(ct ?? ''),
+    contentType: contentTypeFor(st),
+    startedAtMs: modern ? n(startedAt) : Date.now() - 10_000,
+    durationMs: modern ? Math.min(60_000, Math.max(1, n(duration))) : 10_000,
+    first: modern && first === 'f',
   };
 }
 
@@ -39,8 +62,24 @@ export interface UploadQueueOptions {
   sessionId: string;
   api: MediaApi;
   store: IdbStore;
-  /** Upload one object; defaults to fetch PUT. Returns the HTTP status or throws on network error. */
+  /**
+   * Upload one object; defaults to fetch PUT with a timeout. Returns the HTTP status or throws on
+   * a network error. `headers` are exactly the ones the presign returned.
+   */
   put?: (url: string, body: ArrayBuffer, headers: Record<string, string>) => Promise<number>;
+  /** Per PUT timeout for the default `put` (default 30 s). */
+  putTimeoutMs?: number;
+  /**
+   * Reachability probe used while the connection is down (for example the session heartbeat).
+   * Without it, one chunk is let through as the probe. No presign is made while the probe fails.
+   */
+  probe?: () => Promise<boolean>;
+  /** The server said the session is over (SESSION_NOT_ACTIVE): uploading stopped, chunks kept. */
+  onEnded?: (info: { code?: string }) => void;
+  /** A segment's first chunk was refused for good; it is kept and retried slowly. */
+  onChunkBlocked?: (info: { code?: string; stream: RecordingStream; segment: number }) => void;
+  /** A first chunk was admitted above the buffer cap because only protected chunks remain. */
+  onCapExceeded?: () => void;
   concurrency?: number;
   maxBufferBytes?: number;
   backoffBaseMs?: number;
@@ -59,17 +98,31 @@ export interface UploadQueueOptions {
   staleAfterMs?: number;
 }
 
-const defaultPut = async (
-  url: string,
-  body: ArrayBuffer,
-  headers: Record<string, string>,
-): Promise<number> => (await fetch(url, { method: 'PUT', body, headers })).status;
+function makeDefaultPut(timeoutMs: number): NonNullable<UploadQueueOptions['put']> {
+  return async (url, body, headers) => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      return (await fetch(url, { method: 'PUT', body, headers, signal: ctl.signal })).status;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+/** Longest wait between tries for a first chunk the server refused for good. */
+const BLOCKED_RETRY_MS = 5 * 60_000;
+/** A cached presign is reused until this long before it expires. */
+const PRESIGN_REUSE_MARGIN_MS = 5000;
 
 /**
- * Chunk upload queue (FR-701, FR-702, TC-063, NFR-08).
+ * Chunk upload queue (FR-701, FR-702, TC-063, TC-070, NFR-08).
  *
  * Every chunk is written to IndexedDB first, then uploaded by at most `concurrency` (2) workers
- * that do presign, PUT, confirm. The editor thread only pays for the IndexedDB write; the network
+ * that do presign, PUT, confirm. The server counts every presign request (a repeat for the same
+ * chunk too; only a confirmed chunk answers `alreadyUploaded` without counting), so a chunk is
+ * presigned lazily right before its PUT, the URL is reused for retries until 5 s before it
+ * expires, and nothing is presigned while the connection is down. The editor thread only pays for the IndexedDB write; the network
  * work is async. Failures back off exponentially per chunk and the chunk stays in IndexedDB, so a
  * 60 s outage or a reload loses nothing. The buffer is capped at 200 MB: past the cap the oldest
  * chunks that are not uploading are dropped and counted in the health report (the review UI must
@@ -100,11 +153,24 @@ export class UploadQueue {
   private storageDegraded = false;
   private lastStorageProbe = -Infinity;
   private memBytes = 0;
+  /** Presigned URLs, memory only (never persisted, never logged), reused for retries. */
+  private readonly presigns = new Map<string, PresignedPut>();
+  /** No connection: do not presign, probe instead. */
+  private offline = false;
+  private offlineAttempts = 0;
+  private nextProbeAt = 0;
+  private probing = false;
+  /** Per stream: no presign before this time (PRESIGN_QUOTA_EXCEEDED). */
+  private readonly streamHold = new Map<RecordingStream, number>();
+  private ended = false;
+  private capExceeded = false;
+  /** First chunks the server refused for good (kept, retried slowly). */
+  private readonly blocked = new Set<string>();
 
   constructor(private readonly o: UploadQueueOptions) {
     this.concurrency = o.concurrency ?? 2;
     this.cap = o.maxBufferBytes ?? MAX_BUFFER_BYTES;
-    this.put = o.put ?? defaultPut;
+    this.put = o.put ?? makeDefaultPut(o.putTimeoutMs ?? 30_000);
     this.baseMs = o.backoffBaseMs ?? 1000;
     this.maxMs = o.backoffMaxMs ?? 30_000;
     this.jitter = o.jitter ?? 0.2;
@@ -138,13 +204,26 @@ export class UploadQueue {
     return m;
   }
 
+  /** Highest stored seq for a stream, so counters never restart below a chunk still waiting. */
+  maxSeq(stream: RecordingStream): number {
+    let m = -1;
+    for (const c of this.pending.values()) if (c.stream === stream) m = Math.max(m, c.seq);
+    return m;
+  }
+
   async add(chunk: ChunkRef, data: ArrayBuffer): Promise<void> {
     const key = chunkKey(this.o.sessionId, chunk);
     if (chunk.bytes > this.cap) {
       this.drop(chunk);
       return;
     }
-    await this.makeRoom(chunk.bytes);
+    if (!(await this.makeRoom(chunk))) {
+      // Only protected first chunks are left and the cap is still exceeded: drop the incoming
+      // chunk and say so; the buffer never grows past the cap silently.
+      this.drop(chunk);
+      this.report();
+      return;
+    }
     let stored = false;
     const now = Date.now();
     const probe =
@@ -208,45 +287,120 @@ export class UploadQueue {
     this.droppedBytes += c.bytes;
   }
 
-  private async makeRoom(incoming: number): Promise<void> {
-    while (this.bytesPending() + incoming > this.cap) {
-      // Oldest first: keys sort by stream, segment, seq; pick the smallest not in flight.
-      const victim = [...this.pending.keys()].sort().find((k) => !this.inFlight.has(k));
-      if (!victim) return;
+  /**
+   * Make room for `incoming` by dropping the OLDEST chunks that are not uploading. A segment's
+   * first chunk is never a victim (without it the whole segment is unplayable). Returns false when
+   * the cap cannot be met because only protected or uploading chunks remain; an incoming first
+   * chunk is then admitted anyway (flagged), any other is dropped by the caller.
+   */
+  private async makeRoom(incoming: ChunkRef): Promise<boolean> {
+    while (this.bytesPending() + incoming.bytes > this.cap) {
+      // Oldest first: keys sort by stream, segment, seq.
+      const victim = [...this.pending.keys()]
+        .sort()
+        .find((k) => !this.inFlight.has(k) && !this.pending.get(k)?.first);
+      if (!victim) {
+        if (incoming.first) {
+          if (!this.capExceeded) {
+            this.capExceeded = true;
+            this.o.onCapExceeded?.();
+          }
+          return true;
+        }
+        return false;
+      }
       const ref = this.pending.get(victim);
       this.pending.delete(victim);
+      this.presigns.delete(victim);
       this.dropMemory(victim);
       await this.o.store.delete(STORES.chunks, victim).catch(() => undefined);
       if (ref) this.drop(ref);
     }
+    return true;
+  }
+
+  private backoffMs(attempt: number): number {
+    const exp = Math.min(this.maxMs, this.baseMs * 2 ** Math.max(0, attempt - 1));
+    return exp * (1 - this.jitter * Math.random());
+  }
+
+  private schedule(at: number): void {
+    if (this.wake) return;
+    this.wake = setTimeout(
+      () => {
+        this.wake = null;
+        this.pump();
+      },
+      Math.max(0, at - Date.now()),
+    );
   }
 
   private pump(): void {
-    if (!this.running) return;
+    if (!this.running || this.ended) return;
     const now = Date.now();
     let nextWake: number | null = null;
+    const wakeAt = (t: number): void => {
+      nextWake = nextWake === null ? t : Math.min(nextWake, t);
+    };
+    // Connection down: no presigns. Probe when due; without a probe let ONE chunk through.
+    let probeSlot = false;
+    if (this.offline) {
+      if (now < this.nextProbeAt) {
+        wakeAt(this.nextProbeAt);
+        if (nextWake !== null) this.schedule(nextWake);
+        this.report();
+        return;
+      }
+      if (this.o.probe) {
+        void this.runProbe();
+        this.report();
+        return;
+      }
+      probeSlot = this.inFlight.size === 0;
+      if (!probeSlot) {
+        this.report();
+        return;
+      }
+    }
     for (const key of [...this.pending.keys()].sort()) {
       if (this.inFlight.size >= this.concurrency) break;
       if (this.inFlight.has(key)) continue;
-      const at = this.notBefore.get(key) ?? 0;
+      const ref = this.pending.get(key);
+      const at = Math.max(
+        this.notBefore.get(key) ?? 0,
+        ref ? (this.streamHold.get(ref.stream) ?? 0) : 0,
+      );
       if (at > now) {
-        nextWake = nextWake === null ? at : Math.min(nextWake, at);
+        wakeAt(at);
         continue;
       }
       this.inFlight.add(key);
       // Detached on purpose: uploads never block the caller.
       setTimeout(() => void this.upload(key), 0);
+      if (probeSlot) break;
     }
-    if (nextWake !== null && !this.wake) {
-      this.wake = setTimeout(
-        () => {
-          this.wake = null;
-          this.pump();
-        },
-        Math.max(0, nextWake - now),
-      );
-    }
+    if (nextWake !== null) this.schedule(nextWake);
     this.report();
+  }
+
+  private async runProbe(): Promise<void> {
+    if (this.probing) return;
+    this.probing = true;
+    let ok: boolean;
+    try {
+      ok = (await this.o.probe?.()) === true;
+    } catch {
+      ok = false;
+    }
+    this.probing = false;
+    if (ok) {
+      this.offline = false;
+      this.offlineAttempts = 0;
+    } else {
+      this.offlineAttempts++;
+      this.nextProbeAt = Date.now() + this.backoffMs(this.offlineAttempts);
+    }
+    this.pump();
   }
 
   private async upload(key: string): Promise<void> {
@@ -261,17 +415,45 @@ export class UploadQueue {
         this.pending.delete(key);
         return;
       }
-      // Fresh presign every attempt: URLs live 60 s, a retry after an outage needs a new one.
-      const { url, headers } = await this.o.api.presign(ref);
-      const status = await this.put(url, stored.data, {
-        'Content-Type': ref.contentType,
-        ...headers,
-      });
-      if (status < 200 || status >= 300) {
-        // 4xx on the object store (expired URL, clock skew) is retried with a new presign.
-        throw new MediaApiError('RETRY', `PUT failed with ${status}`);
+      let put = this.presigns.get(key);
+      if (put && (put.expiresAtMs ?? 0) - PRESIGN_REUSE_MARGIN_MS <= Date.now()) {
+        this.presigns.delete(key);
+        put = undefined;
       }
-      await this.o.api.confirm(ref);
+      let alreadyUploaded = false;
+      if (!put) {
+        // Lazy: one chunk, right before its PUT. Every presign request counts against the quota.
+        const r = await this.o.api.presign(ref);
+        if (r.alreadyUploaded === true) alreadyUploaded = true;
+        else {
+          put = { ...r, expiresAtMs: r.expiresAtMs ?? Date.now() + 30_000 };
+          this.presigns.set(key, put);
+        }
+      }
+      if (put && !alreadyUploaded) {
+        let status: number;
+        try {
+          status = await this.put(put.url, stored.data, {
+            'Content-Type': contentTypeFor(ref.stream),
+            ...put.headers, // exactly what the presign returned wins (it signs Content-Type)
+          });
+        } catch {
+          throw new MediaApiError('NETWORK', 'network');
+        }
+        if (status === 412) {
+          // If-None-Match: the object is already stored (a retry after a lost answer): confirm it.
+        } else if (status < 200 || status >= 300) {
+          const transient = status === 408 || status === 429 || status >= 500;
+          if (!transient) this.presigns.delete(key); // expired or refused URL: presign again
+          throw new MediaApiError(
+            transient ? 'RETRY' : 'REPRESIGN',
+            `PUT failed with ${String(status)}`,
+          );
+        }
+        await this.o.api.confirm(ref);
+      }
+      this.presigns.delete(key);
+      this.blocked.delete(key);
       this.dropMemory(key);
       await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
       this.pending.delete(key);
@@ -280,29 +462,89 @@ export class UploadQueue {
       this.lastOk = Date.now();
       void this.touch.touch();
       this.failures = 0;
+      this.offline = false;
+      this.offlineAttempts = 0;
     } catch (err) {
-      if (err instanceof MediaApiError && err.kind === 'FATAL') {
-        // The server will never take this chunk (session over, chunk not allowed).
-        this.dropMemory(key);
-        await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
-        if (ref) this.drop(ref);
-        this.pending.delete(key);
-      } else {
-        const n = (this.attempts.get(key) ?? 0) + 1;
-        this.attempts.set(key, n);
-        const exp = Math.min(this.maxMs, this.baseMs * 2 ** (n - 1));
-        this.notBefore.set(key, Date.now() + exp * (1 - this.jitter * Math.random()));
-        this.failures++;
-      }
+      await this.onFailure(key, ref, err);
     } finally {
       this.inFlight.delete(key);
       this.pump();
     }
   }
 
+  private async onFailure(key: string, ref: ChunkRef | undefined, err: unknown): Promise<void> {
+    const e = err instanceof MediaApiError ? err : new MediaApiError('RETRY', 'unexpected');
+    const n = (this.attempts.get(key) ?? 0) + 1;
+    const backoff = (min = 0): number => Date.now() + Math.max(min, this.backoffMs(n));
+    switch (e.kind) {
+      case 'NETWORK':
+        this.attempts.set(key, n);
+        this.failures++;
+        this.offline = true;
+        this.offlineAttempts++;
+        this.nextProbeAt = Date.now() + this.backoffMs(this.offlineAttempts);
+        return;
+      case 'RETRY':
+        this.attempts.set(key, n);
+        this.failures++;
+        this.notBefore.set(key, backoff(e.retryAfterMs ?? 0));
+        return;
+      case 'REPRESIGN':
+        this.presigns.delete(key);
+        this.attempts.set(key, n);
+        this.failures++;
+        this.notBefore.set(key, backoff());
+        return;
+      case 'REUPLOAD':
+        this.attempts.set(key, n);
+        this.failures++;
+        this.notBefore.set(key, backoff());
+        return;
+      case 'QUOTA': {
+        // Never drop for a quota: wait for it, for the whole stream (every presign counts).
+        const until = Date.now() + Math.max(1000, e.retryAfterMs ?? 30_000);
+        if (ref) this.streamHold.set(ref.stream, until);
+        this.notBefore.set(key, until);
+        return;
+      }
+      case 'ENDED':
+        // The session is over: stop uploading, keep the chunks, tell the app (transport hardening
+        // purges or drains as it decides).
+        if (!this.ended) {
+          this.ended = true;
+          this.o.onEnded?.(e.code ? { code: e.code } : {});
+        }
+        return;
+      case 'FATAL':
+        if (ref?.first) {
+          // A segment's first chunk is never dropped: keep it, retry slowly, flag it.
+          if (!this.blocked.has(key)) {
+            this.blocked.add(key);
+            this.o.onChunkBlocked?.({
+              ...(e.code ? { code: e.code } : {}),
+              stream: ref.stream,
+              segment: ref.segment,
+            });
+          }
+          this.attempts.set(key, n);
+          this.notBefore.set(key, Date.now() + BLOCKED_RETRY_MS);
+          return;
+        }
+        this.presigns.delete(key);
+        this.dropMemory(key);
+        await this.o.store.delete(STORES.chunks, key).catch(() => undefined);
+        if (ref) this.drop(ref);
+        this.pending.delete(key);
+        return;
+    }
+  }
+
   /** Retry everything now, for the browser `online` event. */
   retryNow(): void {
     this.notBefore.clear();
+    this.streamHold.clear();
+    this.offline = false; // the browser says it is online again: try, do not wait for a probe
+    this.offlineAttempts = 0;
     this.pump();
   }
 
@@ -325,6 +567,11 @@ export class UploadQueue {
       storageDegraded: this.storageDegraded,
       memoryBytes: this.memoryBytes(),
       bytesPendingByStream: byStream,
+      ended: this.ended,
+      offline: this.offline,
+      quotaWait: [...this.streamHold.values()].some((t) => t > Date.now()),
+      blockedChunks: this.blocked.size,
+      capExceeded: this.capExceeded,
     };
   }
 
@@ -369,6 +616,8 @@ export class UploadQueue {
     this.memBytes = 0;
     this.attempts.clear();
     this.notBefore.clear();
+    this.presigns.clear();
+    this.blocked.clear();
     await this.o.store.deletePrefix(STORES.chunks, this.prefix()).catch(() => 0);
     this.report();
     return bytes;

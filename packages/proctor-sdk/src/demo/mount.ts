@@ -6,7 +6,7 @@ import type { EvidenceApi } from '../detectors/evidence';
 import { VisionMonitor } from '../detectors/vision-monitor';
 import { VoiceMonitor, createVadWebFactory } from '../detectors/voice-monitor';
 import { RecordingPipeline } from '../recording/pipeline';
-import { MediaApiError, type ChunkRef, type MediaApi } from '../recording/types';
+import { createFetchMediaApi } from '../recording/media-api';
 import { resolveModelUrls } from '../detectors/config';
 
 /**
@@ -15,7 +15,7 @@ import { resolveModelUrls } from '../detectors/config';
  * really cuts the traffic (TC-063). The "simulate network drop" checkbox does the same from inside
  * the page. Not for production use.
  *
- * The demo's injected adapters (heartbeat body, media API, evidence API, identity re-check) speak the
+ * The demo's injected adapters (heartbeat body, evidence API, identity re-check) speak the
  * wire format of ADR 0013 (Proposed, PR #39), provisional. SDK core is unchanged: where the core
  * differs from the ADR, the adapter bridges it and says so below.
  */
@@ -67,64 +67,6 @@ export interface DemoHandle {
 
 /** Fixed question id for the demo's single editor. */
 const DEMO_QUESTION_ID = '8f14e45f-ceea-467a-9575-1b2a7c3d4e5f';
-const ALREADY_UPLOADED = 'already-uploaded:';
-
-async function problemCode(res: Response): Promise<string> {
-  const j = (await res.json().catch(() => null)) as { code?: unknown } | null;
-  return typeof j?.code === 'string' ? j.code : '';
-}
-
-/**
- * Media API adapter for ADR 0013 section 5.5. Bridges two differences from SDK core (both listed in
- * docs/followups/proctor-sdk.md): the ADR wants `startedAt`, `durationMs` and a bare `video/webm`
- * content type, and a per-stream unique `seq` (the SDK restarts `seq` at 0 in every segment), so the
- * adapter sends `segment * 100000 + seq`.
- */
-function createAdrMediaApi(apiBase: string, token: string, f: typeof fetch): MediaApi {
-  const wireSeq = (c: ChunkRef): number => c.segment * 100_000 + c.seq;
-  const post = async (path: string, body: unknown): Promise<Response> => {
-    let res: Response;
-    try {
-      res = await f(`${apiBase}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      });
-    } catch {
-      throw new MediaApiError('RETRY', 'network');
-    }
-    if (res.ok) return res;
-    const code = await problemCode(res);
-    const fatal = res.status === 400 || code === 'SEQ_CONFLICT' || code === 'SESSION_NOT_ACTIVE';
-    // 404 CHUNK_NOT_PRESIGNED, 409 UPLOAD_NOT_FOUND, 422 UPLOAD_MISMATCH, 429, 5xx: presign again.
-    throw new MediaApiError(fatal ? 'FATAL' : 'RETRY', code || `status ${res.status}`);
-  };
-  return {
-    async presign(c) {
-      const contentType = c.stream === 'AUDIO' ? 'audio/webm' : 'video/webm';
-      const res = await post('/media/presign', {
-        stream: c.stream,
-        segment: c.segment,
-        seq: wireSeq(c),
-        bytes: c.bytes,
-        contentType,
-        startedAt: new Date(Date.now() - 10_000).toISOString(),
-        durationMs: 10_000,
-      });
-      const j = (await res.json()) as {
-        url?: string;
-        alreadyUploaded?: boolean;
-        headers?: Record<string, string>;
-      };
-      if (j.alreadyUploaded) return { url: ALREADY_UPLOADED };
-      if (typeof j.url !== 'string') throw new MediaApiError('RETRY', 'bad presign response');
-      return { url: j.url, headers: { 'Content-Type': contentType, ...j.headers } };
-    },
-    async confirm(c) {
-      await post('/media/confirm', { stream: c.stream, segment: c.segment, seq: wireSeq(c) });
-    },
-  };
-}
 
 export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHandle {
   container.innerHTML = `
@@ -252,7 +194,13 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         heartbeatPath: '/heartbeat',
         keystrokesPath: '/keystrokes',
       });
-      const media = createAdrMediaApi(o.apiBase, token, demoFetch);
+      const media = createFetchMediaApi({
+        baseUrl: o.apiBase,
+        getToken: () => token,
+        fetchFn: demoFetch,
+        presignPath: '/media/presign',
+        confirmPath: '/media/confirm',
+      });
       pipeline = new RecordingPipeline({
         sessionId: o.sessionId,
         api: media,
@@ -260,9 +208,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
           if (!consented) throw new Error('consent required');
         },
         put: async (url, body, headers) =>
-          url === ALREADY_UPLOADED
-            ? 200
-            : (await demoFetch(url, { method: 'PUT', body, headers })).status,
+          (await demoFetch(url, { method: 'PUT', body, headers })).status,
         onCapability: (f) => {
           recordingCaps.push(`${f.id}: ${f.status}${f.detail ? ` (${f.detail})` : ''}`);
           renderCaps(recordingCaps);

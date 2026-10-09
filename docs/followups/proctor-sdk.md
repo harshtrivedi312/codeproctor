@@ -309,3 +309,20 @@ Filed
 - `sweepStaleSessions` runs twice per session start (once per queue); harmless, could be done once by the session.
 - `keystrokes.test.ts` imports the API's `signature.ts` directly (`apps/api/src/proctor-events/signature`): a deliberate coupling to test the real verification path; replace with a shared fixture if the API file moves.
 - A 409 `KEY_EPOCH_STALE` still maps to REJECTED (the batch is dropped) in both transports; ADR 0013 says re-sign and retry. Deferred until ADR 0013 is accepted; the same applies to `SESSION_NOT_ACTIVE`.
+## Media alignment with ADR 0013 5.5 (PR fe/sdk-media-align; FR-701, FR-702, TC-063, TC-070)
+Done
+- Seq is unique per (session, stream) across segments (hub answer, matches the built `proctor-key` counters): per-stream `MediaCounters` persisted in IndexedDB under `<sid>:media:<STREAM>` before a chunk is stored, lifted from chunks still waiting and from `pipeline.seedCounters()` (server `counters.media`, `max(local, server)`). A recorder restart or reload no longer reuses seq 0, which used to give 409 `SEQ_CONFLICT` and a dropped segment. The app's old seeding of `<sid>:segment:<STREAM>` (last segment used) is still read.
+- Presign sends the bare `video/webm` or `audio/webm` (never the recorder's codecs string), `startedAt` and `durationMs` per chunk (measured from the recorder); the PUT sends exactly the headers the presign returned; `alreadyUploaded` skips PUT and confirm; 412 on the conditional PUT goes to confirm.
+- Quota-aware: presign lazily, one chunk right before its PUT, the URL cached and reused for retries until 5 s before it expires; nothing is presigned while the connection is down (probe via `probe`, or one chunk as the probe; the browser `online` event ends the quiet period); 429 PRESIGN_QUOTA_EXCEEDED holds that stream for Retry-After and keeps the chunk.
+- Errors by RFC 7807 `code` first (SESSION_NOT_ACTIVE stops uploading, keeps the chunks and raises `recording-ended` plus `onEnded`; CHUNK_NOT_PRESIGNED and UPLOAD_MISMATCH re-presign; UPLOAD_NOT_FOUND re-uploads; SEQ_CONFLICT and 4xx are FATAL), per-request AbortController timeouts (presign and confirm 15 s, PUT 30 s).
+- The first chunk of each segment is never dropped: not by the 200 MB drop-oldest, not by a FATAL answer (kept, flagged `recording-blocked`, retried every 5 min). If only protected chunks remain, an ordinary incoming chunk is dropped and counted, an incoming first chunk is admitted above the cap and flagged (`recording-buffer`).
+- `/dev/proctor` mock: PRESIGN_QUOTA_EXCEEDED after 140 presigns per stream (repeats count, a confirmed chunk is free), `If-None-Match: *` with 412 on a second PUT, segments up to 9999, the demo uses the real `createFetchMediaApi` (no seq bridge).
+
+For Frontend (apps/web `candidate-test/proctor/media-api.ts`, not touched here)
+- The SDK types stay compatible with your bridge (`ChunkRef` new fields are optional, `PresignedPut.headers` and `expiresAtMs` optional, `alreadyUploaded` is a flag on `PresignedPut`; `MediaApiError` kinds are a superset). You can now drop the `segment * 100000 + seq` bridge and the `ALREADY_UPLOADED_URL` marker and use `createFetchMediaApi` (or map the same codes) with the real `seq`; seed the pipeline with `pipeline.seedCounters(counters.media)` instead of writing `<sid>:segment:<STREAM>`.
+
+Open
+- `probe` is not wired to the session heartbeat yet (heartbeat PR); until then one chunk is let through as the probe.
+- Transport hardening still has to purge or drain on `recording-ended` (the queue only stops and keeps the chunks).
+- The cap (`presignCap`) is cumulative per stream and session on the server; a very long session or many restarts can exhaust it. The SDK only waits (Retry-After), it cannot get more.
+- A new device restarts local counters at 0 until `seedCounters` is called with the `proctor-key` answer.

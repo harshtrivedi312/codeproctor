@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionTouch } from './sweep';
+import { chunkRef, okPresign } from '../test/media-helpers';
 import { TEST_KEY_B64 } from '../test/helpers';
 import { EventQueue, type SignedBatch } from './event-queue';
 import { importSessionKey } from './hmac';
@@ -251,17 +252,14 @@ describe('review blockers (FR-702, FR-601, TC-065)', () => {
       store,
       put: () => Promise.resolve(200),
       api: {
-        presign: () => Promise.resolve({ url: 'https://store.invalid/x' }),
+        presign: () => Promise.resolve(okPresign('https://store.invalid/x')),
         confirm: () => Promise.resolve(),
       },
     });
     await uq.start();
     expect(near(await store.get('meta', 'lastseen:uu'), T + 2 * MIN)).toBe(true);
     vi.setSystemTime(T + 4 * MIN);
-    await uq.add(
-      { stream: 'WEBCAM', segment: 0, seq: 0, bytes: 5, contentType: 'video/webm' },
-      new ArrayBuffer(5),
-    );
+    await uq.add(chunkRef(0, 5, 'WEBCAM'), new ArrayBuffer(5));
     await vi.waitFor(async () =>
       expect(near(await store.get('meta', 'lastseen:uu'), T + 4 * MIN)).toBe(true),
     );
