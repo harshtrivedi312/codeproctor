@@ -35,6 +35,8 @@ export interface DemoHandle {
   stop(): Promise<void>;
 }
 
+/** Fixed question id for the demo's single editor. */
+const DEMO_QUESTION_ID = '8f14e45f-ceea-467a-9575-1b2a7c3d4e5f';
 const ALREADY_UPLOADED = 'already-uploaded:';
 
 async function problemCode(res: Response): Promise<string> {
@@ -217,6 +219,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         fetchFn: demoFetch,
         eventsPath: '/events',
         heartbeatPath: '/heartbeat',
+        keystrokesPath: '/keystrokes',
       });
       const media = createAdrMediaApi(o.apiBase, token, demoFetch);
       pipeline = new RecordingPipeline({
@@ -299,7 +302,7 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
               },
               queue: {
                 pendingEventBatches: q?.unsentBatches ?? 0,
-                pendingKeystrokeBatches: 0,
+                pendingKeystrokeBatches: session.getKeystrokeStats()?.unsentBatches ?? 0,
                 rejectedBatches: q?.rejectedBatches ?? 0,
               },
             }),
@@ -315,8 +318,45 @@ export function mountProctorDemo(container: HTMLElement, o: DemoOptions): DemoHa
         root,
         consent: { recordedAt: new Date().toISOString() },
         detectors: [...Object.values(monitors), vision, voice],
-        transport: { sendBatch: (b) => transport.sendBatch(b), heartbeat },
+        transport: {
+          sendBatch: (b) => transport.sendBatch(b),
+          sendKeystrokeBatch: (b) => transport.sendKeystrokeBatch(b),
+          heartbeat,
+        },
       });
+      // Editor recording (FR-608): the demo textarea stands in for Monaco. Its input events are
+      // turned into one EDIT each (common prefix and suffix), never raw key events (NFR-05).
+      const keystrokes = session.keystrokes;
+      const editor = root.querySelector('textarea');
+      if (keystrokes && editor) {
+        let previous = editor.value;
+        keystrokes.reset(DEMO_QUESTION_ID, 'python', previous);
+        editor.addEventListener('input', () => {
+          const next = editor.value;
+          let start = 0;
+          while (start < previous.length && start < next.length && previous[start] === next[start])
+            start++;
+          let endPrev = previous.length;
+          let endNext = next.length;
+          while (
+            endPrev > start &&
+            endNext > start &&
+            previous[endPrev - 1] === next[endNext - 1]
+          ) {
+            endPrev--;
+            endNext--;
+          }
+          keystrokes.recordChange({
+            offset: start,
+            deleteLength: endPrev - start,
+            text: next.slice(start, endNext),
+          });
+          previous = next;
+        });
+        editor.addEventListener('select', () =>
+          keystrokes.recordSelection(editor.selectionStart, editor.selectionEnd),
+        );
+      }
       if (stopped) return teardownLate();
       statusEl.textContent = ' running';
       o.onStarted?.({ session, vision });

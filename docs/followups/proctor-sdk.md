@@ -283,3 +283,21 @@ Nits (filed)
 - N6 `UploadQueue` `memory.set` on an existing key double-counts bytes.
 - N7 `EventQueue.finished` is never reset in `start()`: document the queue as single-use.
 - N8 a vacuous `expect(worker).toBeDefined()` in the attach test.
+
+## Keystroke recording (PR fe/sdk-keystrokes; FR-608, FR-802, TC-062)
+Shipped: `KeystrokeRecorder` (`session.keystrokes`), `KeystrokeQueue`, `editsFromMonaco`, `sendKeystrokeBatch` in `createFetchTransport`. The event queue is now a thin subclass of a generic `BatchQueue`; the keystroke queue reuses all of it (signing, IndexedDB outbox, backoff, finish and stop-in-flight guarantees, the #70 sequence-safety work with its own counter `nextKeystrokeSeq` and backup `codeproctor:keystrokeseq:`). The two streams share the IndexedDB store: event batches are keyed `<sid>:<seq>`, keystroke batches `<sid>:ks:<seq>`, and each queue loads and deletes only its own keys.
+
+Public API (small and stable)
+- `session.keystrokes: KeystrokeRecorder | null` (null before `start()` or when the transport has no `sendKeystrokeBatch`; the `keystrokes` capability says UNSUPPORTED then).
+- `reset(sessionQuestionId, language, text): boolean` (RESET: load, restore after reload, reset to starter, language switch, switching question), `recordChange({ offset, deleteLength, text })`, `recordChanges(EditorChange[])`, `recordCursor(offset, selectionLength?)`, `recordSelection(startOffset, endOffset)`, `stats()`.
+- `editsFromMonaco(e.changes)` converts a Monaco `onDidChangeModelContent` event (descending offsets) without importing monaco. The app converts cursor positions with `model.getOffsetAt`.
+- Transport: `sendKeystrokeBatch(batch)` next to `sendBatch` (injectable; ADR 0013 Proposed keeps `X-Signature` over the exact body).
+
+Open
+- RESET over 100 000 characters: ADR 0010 and the schema give RESET a 100 000-character limit and no truncation or chunking rule. The recorder refuses it (returns false), reports `TEXT_TOO_LONG` through the `keystroke-unrepresentable` capability (reason only, never text) and skips edits of that question until a shorter reset. Same for an EDIT with offset, length or text over 100 000. This matches the 100 000-character source limit for runs; if longer models must be supported the schema needs a chunked RESET. Needs a hub decision.
+- The app must call `reset()` whenever it sets the model (first load, restore from a draft, reload, language switch, question switch) and must call `recordChange` for every model change in order; a missed change makes replay diverge silently. `/dev/proctor` uses a textarea with a prefix/suffix diff as a stand-in.
+- Timestamps use the client clock (made non-decreasing); the server clamps `startedAt`. Cursor moves within 250 ms of each other are coalesced; edits never are.
+- A batch holds one question only, so a quick switch back and forth creates several small batches; fine for replay.
+- The demo mock shows keystroke batches in the shared accepted/duplicate counts (no separate panel row).
+- Multiple tabs of one session would each write their own keystroke sequence; not handled (same as events).
+- ADR 0013 server counters (`keystrokeSeqStart`) will replace the local counter and backup for a new device; until then the cross-device restart-at-0 caveat of the event queue applies to keystrokes too.

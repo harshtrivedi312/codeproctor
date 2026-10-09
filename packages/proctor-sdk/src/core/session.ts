@@ -4,7 +4,11 @@ import type {
   EventPayload,
   ProctorDetector,
 } from '@codeproctor/shared';
+import type { BatchQueueStats } from './batch-queue';
 import { EventQueue, type EventQueueStats, type EventTransport } from './event-queue';
+import type { SendResult, SignedBatch } from './event-queue';
+import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
+import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
 import { Heartbeat } from './heartbeat';
 import { importSessionKey } from './hmac';
 import { IdbStore } from './idb';
@@ -30,7 +34,15 @@ export interface ProctorSessionConfig {
   root: HTMLElement;
   /** Nothing touches camera, microphone or screen until this is set (D-17). */
   consent: { recordedAt: string } | null;
-  transport: EventTransport & { heartbeat(): Promise<boolean> };
+  transport: EventTransport & {
+    heartbeat(): Promise<boolean>;
+    /**
+     * Sends one signed keystroke batch (POST /candidate/session/keystrokes). Without it the session
+     * has no keystroke recorder (`session.keystrokes` is null) and says so with the `keystrokes`
+     * capability flag.
+     */
+    sendKeystrokeBatch?(batch: SignedBatch): Promise<SendResult>;
+  };
   /** Detectors the accommodations switched off (FR-106). They never start. */
   disabledDetectors?: readonly ProctorDetector[];
   detectors: readonly Detector[];
@@ -76,14 +88,34 @@ export class ProctorSession {
     connection: new Set(),
   };
   private queue: EventQueue | null = null;
+  private keystrokeQueue: KeystrokeQueue | null = null;
+  private keystrokeRecorder: KeystrokeRecorder | null = null;
   private heartbeat: Heartbeat | null = null;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
   private config: ProctorSessionConfig | null = null;
   private capabilities = new Map<string, CapabilityFlag>();
   private locks = new Map<string, boolean>();
-  private readonly onPageHide = (): void => void this.queue?.flush();
-  private readonly onOnline = (): void => this.queue?.retryNow();
+  private readonly onPageHide = (): void => {
+    void this.queue?.flush();
+    void this.keystrokeQueue?.flush();
+  };
+  private readonly onOnline = (): void => {
+    this.queue?.retryNow();
+    this.keystrokeQueue?.retryNow();
+  };
+
+  /**
+   * Editor change recorder for replay (FR-608, TC-062), or null before start() or when the
+   * transport cannot send keystroke batches. Flushed by stop() and purged by finish() like events.
+   */
+  get keystrokes(): KeystrokeRecorder | null {
+    return this.keystrokeRecorder;
+  }
+
+  getKeystrokeStats(): BatchQueueStats | null {
+    return this.keystrokeQueue?.stats() ?? null;
+  }
 
   on<K extends keyof SessionEvents>(name: K, handler: Handler<K>): () => void {
     this.handlers[name].add(handler);
@@ -106,11 +138,12 @@ export class ProctorSession {
     this.config = config;
     const metrics = (this.metrics = new MetricsCollector());
     const key = await importSessionKey(config.hmacKeyBase64);
+    const store = config.store ?? new IdbStore(); // shared by the event and keystroke queues
     const queue = (this.queue = new EventQueue({
       sessionId: config.sessionId,
       key,
       transport: config.transport,
-      store: config.store ?? new IdbStore(),
+      store,
       ...(config.flushIntervalMs === undefined ? {} : { flushIntervalMs: config.flushIntervalMs }),
       ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
       onSeqUntrusted: () =>
@@ -133,6 +166,49 @@ export class ProctorSession {
         }),
     }));
     await queue.start();
+    const send = config.transport.sendKeystrokeBatch?.bind(config.transport);
+    if (send) {
+      const ks = (this.keystrokeQueue = new KeystrokeQueue({
+        sessionId: config.sessionId,
+        key,
+        transport: { sendBatch: send },
+        store,
+        ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
+        onSeqUntrusted: () =>
+          this.fire('capability', {
+            id: 'keystroke-seq',
+            status: 'UNVERIFIABLE',
+            detail: 'The keystroke batch counter could not be read; sequence numbers jump ahead.',
+          }),
+        onStorageDegraded: () =>
+          this.fire('capability', {
+            id: 'keystroke-storage',
+            status: 'UNVERIFIABLE',
+            detail: 'IndexedDB problem: keystroke batches are kept in memory only.',
+          }),
+        onStorageRecovered: () =>
+          this.fire('capability', { id: 'keystroke-storage', status: 'SUPPORTED' }),
+      }));
+      await ks.start();
+      this.keystrokeRecorder = new KeystrokeRecorder(
+        ks,
+        Date.now,
+        (reason: UnrepresentableReason) =>
+          // Reasons only, never editor text.
+          this.fire('capability', {
+            id: 'keystroke-unrepresentable',
+            status: 'UNVERIFIABLE',
+            detail: `An editor change could not be recorded (${reason}); replay of this question may diverge.`,
+          }),
+      );
+      this.fire('capability', { id: 'keystrokes', status: 'SUPPORTED' });
+    } else {
+      this.fire('capability', {
+        id: 'keystrokes',
+        status: 'UNSUPPORTED',
+        detail: 'The transport cannot send keystroke batches; editor changes are not recorded.',
+      });
+    }
 
     const disabled = new Set(config.disabledDetectors ?? []);
     const ctx: DetectorContext = {
@@ -269,28 +345,36 @@ export class ProctorSession {
     }
     this.started = [];
     let lostBatches = 0;
-    if (purgeDrainMs === null) await this.queue?.stop();
-    else {
-      const unsent = this.queue?.stats().unsentBatches ?? 0;
+    if (purgeDrainMs === null) {
+      await this.queue?.stop();
+      await this.keystrokeQueue?.stop();
+    } else {
+      // cut batches and events not yet cut both still have to go out
+      const countUnsent = (st: BatchQueueStats | undefined): number =>
+        (st?.unsentBatches ?? 0) + (st?.pendingItems ?? 0);
+      const unsent = countUnsent(this.queue?.stats()) + countUnsent(this.keystrokeQueue?.stats());
       if (unsent > 0) {
         // Tell the UI before data is discarded so the candidate can stay online.
         this.fire('capability', {
           id: 'finish-pending',
           status: 'UNVERIFIABLE',
-          detail: `${unsent} event batches are still being sent: stay online.`,
+          detail: `${unsent} batches (events and editor changes) are still being sent: stay online.`,
         });
       }
       lostBatches = (await this.queue?.finish(purgeDrainMs))?.lostBatches ?? 0;
+      lostBatches += (await this.keystrokeQueue?.finish(purgeDrainMs))?.lostBatches ?? 0;
       if (lostBatches > 0) {
         this.fire('capability', {
           id: 'finish-lost',
           status: 'UNVERIFIABLE',
-          detail: `${lostBatches} event batches could not be sent.`,
+          detail: `${lostBatches} batches (events and editor changes) could not be sent.`,
         });
       }
     }
     this.metrics?.stop();
     this.queue = null;
+    this.keystrokeQueue = null;
+    this.keystrokeRecorder = null;
     this.config = null;
     return { lostBatches };
   }
