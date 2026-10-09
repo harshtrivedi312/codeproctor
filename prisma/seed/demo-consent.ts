@@ -13,8 +13,16 @@
 import type { Prisma } from '../../apps/api/src/generated/prisma/client';
 import { ID } from './ids';
 
-/** The version string, used as the natural key with the org (consent_texts @@unique([orgId, version])). */
-export const DEMO_APPROVED_CONSENT_VERSION = '0.2-local-demo';
+/** The version string, used as the natural key with the org (consent_texts @@unique([orgId, version])).
+ * Bumped for the M1 compliance-review edits (2026-10-08): a body change needs a new version (FU-DB-285). */
+export const DEMO_APPROVED_CONSENT_VERSION = '0.3-local-demo';
+
+/**
+ * A footer marker the signed-consent PDF should carry for this version, so a printed copy is unmistakably a
+ * demo (M1). Exported for the consent-PDF renderer (candidate track) to append for this version; the seed
+ * does not render PDFs.
+ */
+export const DEMO_APPROVED_CONSENT_PDF_FOOTER = '(development demo, synthetic data)';
 
 /** The first line of the body, and the human label the owner decision named. */
 export const DEMO_APPROVED_CONSENT_TITLE = 'Local demo consent (synthetic data, development only)';
@@ -27,7 +35,7 @@ export const DEMO_APPROVED_CONSENT_APPROVED_AT = new Date('2026-01-01T00:00:00.0
 
 export const DEMO_APPROVED_CONSENT_BODY_MD = `${DEMO_APPROVED_CONSENT_TITLE}
 
-This consent document is synthetic content for the local development demo. It is approved for use only on a developer's machine with synthetic data, and it is never shown to real candidates or used in staging, pilot or production. By continuing you agree to the terms below for this practice session.
+This consent document is synthetic content for the local development demo. It is approved for use only on a developer's machine with synthetic data, and it is never shown to real candidates or used in staging, pilot or production. By continuing you agree to the terms below for this practice session. THIS IS NOT A REAL CONSENT. DEVELOPMENT DEMO ONLY.
 
 ## What is recorded
 
@@ -47,7 +55,7 @@ Your score and the reviewer's outcome are shared with the hiring team to inform 
 
 ## Retention and deletion
 
-Recordings and results are kept for ninety days and then removed. You may ask the talent team to delete your data sooner.
+Recordings and results are kept for ninety days and then removed. You may ask the talent team to delete your data sooner. The periods stated here are for the demo and are not the real retention rules.
 
 ## Who can access the data
 

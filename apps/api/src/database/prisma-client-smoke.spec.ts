@@ -119,7 +119,7 @@ describe('generated Prisma client under the Nest build (ADR 0009 P14)', () => {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     expect(JSON.parse(output.trim().split('\n').pop() ?? '{}')).toEqual({
-      models: 31,
+      models: 32,
       role: 'app_user',
       orgs: 0,
       refusedWithoutContext: true,

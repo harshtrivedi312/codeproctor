@@ -10,12 +10,15 @@
 // foreign keys of class RULE_I below are exactly the ones rule (i) applies to
 // (RULE_I_REFERENCES). Module tests and code review use that list.
 //
-// All 59 foreign keys of the schema, one class each:
-//   ORG_ID      9   the org_id column of a model with its own org (to organizations)
+// All 62 foreign keys of the schema, one class each:
+//   ORG_ID     10   the org_id column of a model with its own org (to organizations)
 //   SCOPE_HOP  21   the first hop of a path model's scope path (its own parent)
-//   COMPOSITE   3   (id, org_id) keys on invitations and sessions (ADR 0006 section 2 ii)
-//   RULE_I     26   rule (i) references: 13 staff (to users) and 13 cross-chain
-// (SCOPE_HOP + COMPOSITE + RULE_I is 50; the 9 ORG_ID keys make 59.)
+//   COMPOSITE   4   (id, org_id) keys on invitations, sessions and scheduled_windows (ADR 0006 section 2 ii)
+//   RULE_I     27   rule (i) references: 14 staff (to users) and 13 cross-chain
+// (SCOPE_HOP + COMPOSITE + RULE_I is 52; the 10 ORG_ID keys make 62.)
+// ADR 0017 section 4.7 (C-53) added three: scheduled_windows.org_id (ORG_ID), the composite
+// (invitation_id, org_id) to invitations (COMPOSITE) and scheduled_windows.requested_by (RULE_I, staff).
+// 59 before it.
 import type { ModelName } from './org-scope-map';
 
 export type FkClass =
@@ -62,7 +65,7 @@ const fk = (
 });
 
 export const FK_CLASSES: readonly ForeignKey[] = [
-  // ORG_ID (9): every model with `org_id` has a foreign key to organizations. The scope filters on
+  // ORG_ID (10): every model with `org_id` has a foreign key to organizations. The scope filters on
   // it; a create is stamped with it.
   fk('User', 'org', 'Organization', 'users', 'ORG_ID'),
   fk('AuditLog', 'org', 'Organization', 'auditLogs', 'ORG_ID'),
@@ -73,6 +76,8 @@ export const FK_CLASSES: readonly ForeignKey[] = [
   fk('Session', 'org', 'Organization', 'sessions', 'ORG_ID'),
   fk('ConsentText', 'org', 'Organization', 'consentTexts', 'ORG_ID'),
   fk('WebhookEndpoint', 'org', 'Organization', 'webhookEndpoints', 'ORG_ID'),
+  // ADR 0017 section 4.7 (C-53).
+  fk('ScheduledWindow', 'org', 'Organization', 'scheduledWindows', 'ORG_ID'),
 
   // SCOPE_HOP (21): the first hop of a scope path (ORG_SCOPE), the child's own parent. The scope reaches the org
   // through it, so a row cannot be read or changed outside its parent's org. Creating a row under a
@@ -105,13 +110,17 @@ export const FK_CLASSES: readonly ForeignKey[] = [
   fk('Appeal', 'sessionReview', 'SessionReview', 'appeal', 'SCOPE_HOP'),
   fk('WebhookDelivery', 'endpoint', 'WebhookEndpoint', 'deliveries', 'SCOPE_HOP'),
 
-  // COMPOSITE (3): composite foreign keys (ADR 0006 section 2 ii). (id, org_id) makes the database
+  // COMPOSITE (4): composite foreign keys (ADR 0006 section 2 ii). (id, org_id) makes the database
   // refuse a delivery-chain row whose parent is in another org.
   fk('Invitation', 'test', 'Test', 'invitations', 'COMPOSITE'),
   fk('Invitation', 'candidate', 'Candidate', 'invitations', 'COMPOSITE'),
   fk('Session', 'invitation', 'Invitation', 'sessions', 'COMPOSITE'),
+  // ADR 0017 section 4.7 (C-53): the SLOT row of an invitation. The key is (invitation_id, org_id), so the
+  // database refuses an invitation of another org. The column is nullable (a REVIEW row has none) and the key
+  // is MATCH SIMPLE, so a REVIEW row is not checked.
+  fk('ScheduledWindow', 'invitation', 'Invitation', 'scheduledWindows', 'COMPOSITE'),
 
-  // RULE_I, staff (13): a reference to a user. A user of any org can be named. Load the user
+  // RULE_I, staff (14): a reference to a user. A user of any org can be named. Load the user
   // through the scoped client first.
   fk('AuditLog', 'actor', 'User', 'auditLogs', 'RULE_I', 'staff'),
   fk('Question', 'createdBy', 'User', 'createdQuestions', 'RULE_I', 'staff'),
@@ -135,6 +144,9 @@ export const FK_CLASSES: readonly ForeignKey[] = [
   fk('FlagDecision', 'reviewer', 'User', 'flagDecisions', 'RULE_I', 'staff'),
   fk('Appeal', 'assignedTo', 'User', 'assignedAppeals', 'RULE_I', 'staff'),
   fk('WebhookEndpoint', 'createdBy', 'User', 'createdWebhookEndpoints', 'RULE_I', 'staff'),
+  // ADR 0017 section 4.7 (C-53): the reviewer who requested a REVIEW window. Not org-composite, so the
+  // service loads the user through the scoped client first (as for reviewer_id).
+  fk('ScheduledWindow', 'requestedBy', 'User', 'requestedScheduledWindows', 'RULE_I', 'staff'),
 
   // RULE_I, cross-chain (13): references into another chain, or to a second parent. The scope
   // cannot see a mismatch. Load the target through the scoped client first.

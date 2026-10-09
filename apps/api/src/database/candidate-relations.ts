@@ -23,7 +23,7 @@
 // checked here BEFORE those are added, so they never trip this check. Nested relation WRITES are
 // refused for every scope by org-scope-nested.ts (ADR 0006 section 8.2), not here.
 //
-// A relation is any field in the relation table of org-scope-relations.ts (both sides of all 59
+// A relation is any field in the relation table of org-scope-relations.ts (both sides of all 62
 // foreign keys, checked against schema.prisma), whatever its value: `false`, `null` and `{}` are
 // refused too. Messages name the model, the field and the vector, never a value. The table is the
 // one list: a new foreign key (ADR 0015 added `identity_checks.video_check_by`, so
