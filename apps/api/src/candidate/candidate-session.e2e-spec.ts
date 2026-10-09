@@ -3317,11 +3317,38 @@ describe('Candidate session (FR-106, FR-401, FR-505, FR-609, ADR 0002, ADR 0013)
       expect(res.headers['cache-control']).toBe('no-store');
     });
 
-    it("FR-305: a candidate with no accommodation gets the empty projection, and another session cannot be read (the session is the token's)", async () => {
+    it("FR-305, CS-3: a candidate with no accommodation gets the empty projection even when another session has some (the session is the token's); no token is 401", async () => {
       const a = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await invite({
+        status: 'CONSENTED',
+        session: { authEpoch: 1 },
+        accommodations: { extraTimePct: 75, disabledDetectors: ['GAZE'] },
+      });
       const res = await authed('get', '/accommodations', tokenFor(a)).expect(200);
-      expect(res.body).toMatchObject({ extraTimePct: 0, identityCheckWaived: false });
+      expect(res.body).toEqual({
+        extraTimePct: 0,
+        disabledDetectors: [],
+        allowedAssistiveTools: [],
+        identityCheckWaived: false,
+        faceDetectorsOff: false,
+      });
       await request(server()).get(`${API}/accommodations`).expect(401);
+    });
+
+    it('ADR 0015 section 3: a WAIVED identity row alone (no jsonb waiver) reports the waiver, and a malformed stored value is the empty projection, not a 500', async () => {
+      const waived = await invite({ status: 'CONSENTED', session: { authEpoch: 1 } });
+      await owner.identityCheck.create({
+        data: { sessionId: waived.sessionId, attempt: 1, status: 'WAIVED' },
+      });
+      const res = await authed('get', '/accommodations', tokenFor(waived)).expect(200);
+      expect(res.body).toMatchObject({ identityCheckWaived: true });
+      const bad = await invite({
+        status: 'CONSENTED',
+        session: { authEpoch: 1 },
+        accommodations: { disabledDetectors: 'FACE', allowedAssistiveTools: 7 },
+      });
+      const out = await authed('get', '/accommodations', tokenFor(bad)).expect(200);
+      expect(out.body).toMatchObject({ disabledDetectors: [], allowedAssistiveTools: [] });
     });
   });
 });

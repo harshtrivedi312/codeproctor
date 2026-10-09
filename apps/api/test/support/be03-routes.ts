@@ -1606,6 +1606,8 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   { key: 'POST /candidate/session/consent/sign', permission: 'candidate_consent:sign' },
   { key: 'POST /candidate/session/consent/decline', permission: 'candidate_consent:decline' },
   { key: 'GET /candidate/session', permission: 'candidate_session:read' },
+  // Accommodations projection (Backend B, PR #344).
+  { key: 'GET /candidate/session/accommodations', permission: 'candidate_session:read' },
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
   { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },

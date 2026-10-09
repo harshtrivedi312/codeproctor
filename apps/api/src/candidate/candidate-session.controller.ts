@@ -19,6 +19,7 @@ import { CandidateSessionService } from './candidate-session.service';
 import type { SessionStateView } from './candidate-session.service';
 import { ConsentService } from './consent.service';
 import {
+  AccommodationsProjectionDto,
   ConsentDeclinedDto,
   ConsentDocumentDto,
   ConsentSignedDto,
@@ -79,7 +80,7 @@ export class CandidateSessionController {
     description:
       'The candidate-safe projection: extra time, disabled detectors, allowed assistive tools, whether the identity check is waived and faceDetectorsOff. Never the reason code, the reason note or the notes.',
   })
-  @ApiOkResponse({ description: 'AccommodationsProjection' })
+  @ApiOkResponse({ type: AccommodationsProjectionDto })
   async getAccommodations(@Candidate() ctx: CandidateContext): Promise<AccommodationsProjection> {
     await this.limiter.hit('accommodations', ctx.sessionId, 30, 60);
     return this.accommodations.projection(ctx);

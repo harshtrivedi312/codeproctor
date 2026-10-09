@@ -9,7 +9,7 @@
 import { Injectable } from '@nestjs/common';
 import { PROCTOR_DETECTORS } from '@codeproctor/shared';
 import { PrismaService } from '../database/prisma.service';
-import { MAX_EXTRA_TIME_PCT, readExtraTime } from '../session/accommodations';
+import { readExtraTime } from '../session/accommodations';
 import { CandidateScope } from './candidate-scope';
 import type { CandidateContext } from './candidate.types';
 
@@ -54,7 +54,7 @@ export function projectAccommodations(
     : [];
   const waiver = acc.identityCheckWaiver;
   return {
-    extraTimePct: Math.min(readExtraTime(stored).pct, MAX_EXTRA_TIME_PCT),
+    extraTimePct: readExtraTime(stored).pct,
     disabledDetectors,
     allowedAssistiveTools,
     // The reason is never returned: only the fact. `identityCheckWaived: true` is what erasure and
@@ -81,7 +81,8 @@ export class AccommodationsProjectionService {
           where: { id: ctx.invitationId },
           select: { accommodations: true },
         }),
-        // WAIVED is compared as a string: the authoritative row of ADR 0015 section 3.
+        // The WAIVED row is authoritative (ADR 0015 section 3); the jsonb signals are the fallback
+        // the identity gate also uses (FU-BEB-155).
         this.prisma.client.identityCheck.findFirst({
           where: { sessionId: ctx.sessionId },
           select: { status: true },
@@ -90,7 +91,7 @@ export class AccommodationsProjectionService {
       ]);
       return projectAccommodations(
         invitation?.accommodations ?? {},
-        firstCheck !== null && String(firstCheck.status) === 'WAIVED',
+        firstCheck?.status === 'WAIVED',
       );
     });
   }

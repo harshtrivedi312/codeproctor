@@ -34,7 +34,7 @@ describe('Accommodations projection (ADR 0013 CS-4.4, ADR 0015 section 3; FR-305
     expect(JSON.stringify(view)).not.toMatch(/secret|MEDICAL|REFUSED/);
   });
 
-  it('ADR 0015 section 7: the server-only identityCheckWaived leftover and a WAIVED row both mean waived', () => {
+  it('ADR 0015 sections 5 and 6: the server-only identityCheckWaived leftover and a WAIVED row both mean waived', () => {
     expect(projectAccommodations({ identityCheckWaived: true }, false).identityCheckWaived).toBe(
       true,
     );

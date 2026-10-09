@@ -205,3 +205,21 @@ export class ProctorKeyDto {
   @ApiProperty() keyEpoch!: number;
   @ApiProperty({ type: CountersDto }) counters!: CountersDto;
 }
+
+/** GET /candidate/session/accommodations (ADR 0013 CS-4.4): never the reason, its code or the notes. */
+export class AccommodationsProjectionDto {
+  @ApiProperty({ minimum: 0, maximum: 300 })
+  extraTimePct!: number;
+
+  @ApiProperty({ type: [String], description: 'Detector names the recruiter switched off' })
+  disabledDetectors!: string[];
+
+  @ApiProperty({ type: [String] })
+  allowedAssistiveTools!: string[];
+
+  @ApiProperty()
+  identityCheckWaived!: boolean;
+
+  @ApiProperty({ description: 'FACE is among the disabled detectors (derived; C-34)' })
+  faceDetectorsOff!: boolean;
+}
