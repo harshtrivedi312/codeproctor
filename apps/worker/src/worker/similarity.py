@@ -251,9 +251,8 @@ def _peer_finding(target: Submission, other_session_id: str, c: Comparison) -> F
             "sessionQuestionId": target.session_question_id,
             "similarity": c.similarity,
             "matchedSessionId": other_session_id,
-            "matchedLines": _flat(c.matched_lines),
         },
-        details={"sharedFingerprints": c.shared},
+        details={"sharedFingerprints": c.shared, "matchedLines": _flat(c.matched_lines)},
     )
 
 
@@ -367,9 +366,8 @@ def find_ai_likeness(
                 "sessionQuestionId": submission.session_question_id,
                 "similarity": c.similarity,
                 "aiReferenceSolutionId": ref.id,
-                "matchedLines": _flat(c.matched_lines),
             },
-            details={"sharedFingerprints": c.shared},
+            details={"sharedFingerprints": c.shared, "matchedLines": _flat(c.matched_lines)},
         )
     ]
 

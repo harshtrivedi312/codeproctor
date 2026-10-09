@@ -34,6 +34,7 @@ from worker.config import IntegrityConfig
 from worker.events import EventType
 
 LEGACY_RISK_KEYS: Final = frozenset({"fastReviewBands", "fast_review_bands"})
+MAX_EXACT_INT: Final = 2**53
 LEGACY_CODE: Final = "ORG_SETTINGS_LEGACY_KEY"
 INVALID_CODE: Final = "ORG_SETTINGS_INVALID"
 
@@ -64,7 +65,7 @@ ORG_BOUNDS: Final[dict[str, dict[str, Bound | MapBound]]] = {
         "capOverrides": MapBound(_EVENT_TYPES, Bound("int", 0, 20)),
         "weightByType": MapBound(_EVENT_TYPES, Bound("float", 0, 5)),
         "mediumMinScore": Bound("float", 1, 100),
-        "highMinScore": Bound("float", 1, 200),
+        "highMinScore": Bound("float", 1, 100),
     },
     "keystrokes": {
         "burstMinChars": Bound("int", 20, 2000),
@@ -123,9 +124,9 @@ class OrgSettingsError(Exception):
 def _name(key: object, path: str) -> str:
     """The path of a refused key. Only names the worker itself defines are shown; others are `*`."""
     text = str(key)
-    known = (
-        text in INTERNAL_ONLY_KEYS or text.upper().startswith("FACE_") or text in LEGACY_RISK_KEYS
-    )
+    if text.upper().startswith("FACE_"):
+        return f"{path}.FACE_*"  # the rest of the name is the caller's own text
+    known = text in INTERNAL_ONLY_KEYS or text in LEGACY_RISK_KEYS
     return f"{path}.{text}" if known else f"{path}.*"
 
 
@@ -138,6 +139,8 @@ def _number_ok(value: object, bound: Bound) -> bool:
         return False
     if bound.kind == "int" and not isinstance(value, int):
         return False
+    if isinstance(value, int) and abs(value) > MAX_EXACT_INT:
+        return False  # a huge int would overflow the float comparisons below
     if not math.isfinite(value):
         return False
     return (bound.lo is None or value >= bound.lo) and (bound.hi is None or value <= bound.hi)
@@ -200,6 +203,11 @@ def integrity_config_from_org_settings(
     raw: dict[str, Any] = {}
     integrity = settings.get("integrity")
     if isinstance(integrity, Mapping):
+        # `integrity` carries analyzer thresholds only. A `risk` or `disabledEventTypes` inside it
+        # would overwrite the real ones when merged, so it is refused (422), not merged.
+        nested = [f"integrity.{k}" for k in ("risk", "disabledEventTypes") if k in integrity]
+        if nested:
+            raise OrgSettingsError(INVALID_CODE, nested)
         raw.update(integrity)
     risk = settings.get("risk")
     if isinstance(risk, Mapping):

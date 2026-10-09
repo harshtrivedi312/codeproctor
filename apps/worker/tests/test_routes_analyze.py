@@ -365,3 +365,85 @@ def test_adr0014_6_2_risk_requires_the_contract_fields_and_rejects_unknown_ones(
     assert send(a, "/v1/risk", {**ok, "events": [{"type": "TAB_SWITCH"}]}).status_code == 400
     too_many = {**ok, "events": [{"type": "RIGHT_CLICK", "source": "CLIENT"}] * 100_001}
     assert send(a, "/v1/risk", too_many).status_code == 400
+
+
+def test_adr0014_5_2_the_band_comes_from_the_integer_score_even_with_a_fractional_threshold() -> (
+    None
+):
+    """Score 30.75 is stored as 30, so with mediumMinScore 30.5 the band is LOW, not MEDIUM."""
+    cfg = {"risk": {"severityPoints": {"LOW": 10.25}, "mediumMinScore": 30.5}}
+    out = _risk(["RIGHT_CLICK"] * 3, config=cfg)
+    assert out["score"] == 30 and out["band"] == "LOW"
+    cfg2 = {"risk": {"severityPoints": {"LOW": 10.5}, "mediumMinScore": 30.5}}
+    out2 = _risk(["RIGHT_CLICK"] * 3, config=cfg2)  # 31.5 -> 31 >= 30.5
+    assert out2["score"] == 31 and out2["band"] == "MEDIUM"
+    assert out2["reviewPath"] == "full" and out["reviewPath"] == "fast"
+
+
+def test_adr0010_matched_lines_are_evidence_in_details_not_in_the_payload() -> None:
+    body = {
+        "target": TARGET,
+        "corpus": [{"sessionId": "s-o", "language": "python", "code": CODE_A}],
+    }
+    (f,) = send(make_app(), "/v1/analyze/similarity", body).json()["findings"]
+    assert "matchedLines" not in f["payload"]
+    assert f["details"]["matchedLines"] and f["details"]["sharedFingerprints"] > 0
+    ai_body = {
+        **body,
+        "corpus": [],
+        "aiReferences": [{"id": "r", "language": "python", "code": CODE_A}],
+    }
+    (g,) = send(make_app(), "/v1/analyze/similarity", ai_body).json()["findings"]
+    assert "matchedLines" not in g["payload"] and g["details"]["matchedLines"]
+
+
+def test_adr0014_6_1_request_fields_are_camel_case_only() -> None:
+    a = make_app()
+    ok = {"events": [], "identityReviewPending": False, "shortAnswerPending": False}
+    snake = {"events": [], "identity_review_pending": False, "short_answer_pending": False}
+    assert send(a, "/v1/risk", ok).status_code == 200
+    assert send(a, "/v1/risk", snake).status_code == 400
+    assert (
+        send(a, "/v1/analyze/similarity", {"target": TARGET, "ai_references": []}).status_code
+        == 400
+    )
+    snake_target = {"target": {**TARGET, "session_id": "x"}}
+    assert send(a, "/v1/analyze/similarity", snake_target).status_code == 400
+
+
+def test_adr0014_6_6_the_semaphore_is_released_when_an_analyzer_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import worker.routes_analyze as ra
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("secret-detail")
+
+    a = make_app(audio=FakeAudio(tone(130, 4)), vad_backend=EnergyVadBackend())
+    monkeypatch.setattr(ra, "analyze_question", boom)
+    monkeypatch.setattr(ra, "find_target_similarity", boom)
+    monkeypatch.setattr(ra, "analyze_audio", boom)
+    ks = _kbody([edit(0, "a")])
+    sim = {"target": TARGET}
+    for path, body in (
+        ("/v1/analyze/keystrokes", ks),
+        ("/v1/analyze/similarity", sim),
+        ("/v1/analyze/vad", VAD_BODY),
+    ):
+        r = send(a, path, body)
+        assert r.status_code == 500 and r.json()["code"] == "INTERNAL"
+        assert "secret-detail" not in r.text
+    sem = a.state.analysis_runtime.semaphore
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)  # both slots are free
+    sem.release()
+    sem.release()
+
+
+def test_adr0014_6_6_the_semaphore_is_released_when_the_vad_backend_raises() -> None:
+    def bad_backend() -> EnergyVadBackend:
+        raise RuntimeError("model gone")
+
+    a = make_app(audio=FakeAudio(tone(130, 4)), vad_backend=bad_backend)
+    assert send(a, "/v1/analyze/vad", VAD_BODY).status_code == 500
+    sem = a.state.analysis_runtime.semaphore
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)

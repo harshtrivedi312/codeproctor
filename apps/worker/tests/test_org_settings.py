@@ -242,3 +242,40 @@ def test_fr805_dl18_adapter_surfaces_the_legacy_key_instead_of_stripping_it() ->
 def test_fr804_org_error_never_carries_the_value() -> None:
     e = OrgSettingsError("ORG_SETTINGS_INVALID", ["a", "a", "b"])
     assert e.fields == ["a", "b"] and str(e) == "ORG_SETTINGS_INVALID"
+
+
+def test_adr0004_a_face_key_is_refused_without_echoing_the_callers_key_name() -> None:
+    sentinel = "FACE_SENTINEL_9f3a"
+    for config in ({sentinel: 1}, {"risk": {sentinel: 1}}, {"vad": {sentinel: 1}}):
+        r = post_config(config)
+        assert r.status_code == 422 and sentinel not in r.text and "SENTINEL" not in r.text
+        assert any(f.endswith(".FACE_*") for f in r.json()["fields"])
+
+
+def test_fr804_huge_ints_are_a_422_not_an_overflow_500() -> None:
+    for config in (
+        {"risk": {"capPerType": 10**400}},
+        {"keystrokes": {"burstMinChars": -(10**400)}},
+        {"vad": {"minSpeechMs": 2**53 + 1}},
+        {"risk": {"weightByType": {"TAB_SWITCH": 10**400}}},
+    ):
+        body = refused(config)
+        assert body["code"] == "ORG_SETTINGS_INVALID"
+
+
+def test_fr804_high_min_score_bound_matches_the_internal_rule() -> None:
+    spec = ORG_BOUNDS["risk"]["highMinScore"]
+    assert isinstance(spec, Bound) and spec.hi == 100
+    refused({"risk": {"highMinScore": 100.5}})
+
+
+def test_fr804_risk_and_disabled_types_inside_the_integrity_block_are_refused() -> None:
+    for key in ("risk", "disabledEventTypes"):
+        with pytest.raises(OrgSettingsError) as e:
+            integrity_config_from_org_settings(
+                {"integrity": {key: {"capPerType": 5} if key == "risk" else ["NO_FACE"]}}
+            )
+        assert e.value.code == "ORG_SETTINGS_INVALID" and e.value.fields == [f"integrity.{key}"]
+    # The real places still work.
+    cfg = integrity_config_from_org_settings({"risk": {"capPerType": 5}}, ["NO_FACE"])
+    assert cfg.risk.cap_per_type == 5 and cfg.disabled_event_types == {"NO_FACE"}

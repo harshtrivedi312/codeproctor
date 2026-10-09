@@ -36,6 +36,7 @@ from worker.events import (
     Finding,
     KeystrokeBatch,
     RiskBand,
+    risk_band_for_score,
 )
 from worker.keystrokes import analyze_question
 from worker.org_settings import validate_org_config
@@ -63,8 +64,8 @@ OrgConfig = Annotated[IntegrityConfig, BeforeValidator(validate_org_config)]
 
 class _Camel(BaseModel):
     model_config = ConfigDict(
-        extra="forbid", alias_generator=to_camel, populate_by_name=True, frozen=True
-    )
+        extra="forbid", alias_generator=to_camel, populate_by_name=False, frozen=True
+    )  # camelCase only (ADR 0014 6.1): a snake_case field name is an unknown field
 
 
 class _Out(BaseModel):
@@ -83,7 +84,7 @@ class FindingOut(BaseModel):
     confidence: float
     payload: dict[str, str | int | float | bool | list[int]]
     excerpt: str | None = None
-    details: dict[str, str | int | float | bool] | None = None
+    details: dict[str, str | int | float | bool | list[int]] | None = None
 
     @classmethod
     def of(cls, f: Finding) -> FindingOut:
@@ -348,12 +349,17 @@ def vad(body: VadRequest, request: Request) -> VadResponse | Response:
 def risk(body: RiskRequest, request: Request) -> RiskResponse:
     """FR-804, FR-805, TC-075, TC-076. Cheap, so it is not behind the analysis semaphore."""
     result = calculate_risk([e.type for e in body.events], body.config)
-    routing = route_for_review(result.band, body.identity_review_pending, body.short_answer_pending)
-    log.info("analyze route=risk outcome=OK band=%s", result.band)
+    # Floor, not round: 29.6 is band LOW, so it must not read as 30. The band comes from the
+    # INTEGER score the API stores, so score and band never disagree (ADR 0014 5.2).
+    score = min(100, max(0, math.floor(result.score)))
+    band = risk_band_for_score(
+        score, body.config.risk.medium_min_score, body.config.risk.high_min_score
+    )
+    routing = route_for_review(band, body.identity_review_pending, body.short_answer_pending)
+    log.info("analyze route=risk outcome=OK band=%s", band)
     return RiskResponse(
-        # Floor, not round: a score of 29.6 is band LOW, so it must not read as 30.
-        score=min(100, max(0, math.floor(result.score))),
-        band=result.band,
+        score=score,
+        band=band,
         review_path=routing.review_path,
         queue_rank=routing.queue_rank,
         reasons=routing.reasons,

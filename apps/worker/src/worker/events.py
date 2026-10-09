@@ -243,4 +243,4 @@ class Finding(BaseModel):
     excerpt: str | None = None
     # Extra numbers for the reviewer (for example interval statistics). Not part of the shared
     # payload schema, so the API stores them next to the event only if a contract allows it.
-    details: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    details: dict[str, str | int | float | bool | list[int]] = Field(default_factory=dict)
