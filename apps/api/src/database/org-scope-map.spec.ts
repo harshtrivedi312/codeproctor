@@ -25,7 +25,7 @@ describe('org scope map (NFR-04, FR-103)', () => {
     );
     expect(Object.keys(generated).sort()).toEqual([...names].sort());
     expect(Object.keys(schema).sort()).toEqual([...names].sort());
-    expect(names).toHaveLength(31);
+    expect(names).toHaveLength(32);
     for (const [name, model] of Object.entries(generated)) {
       expect(model.fields.map((f) => f.name).sort()).toEqual(
         Object.keys(schema[name] ?? {}).sort(),
@@ -48,6 +48,7 @@ describe('org scope map (NFR-04, FR-103)', () => {
       AuditLog: 'orgId',
       ConsentText: 'orgId',
       WebhookEndpoint: 'orgId',
+      ScheduledWindow: 'orgId',
       RefreshToken: 'user.orgId',
       QuestionVersion: 'question.orgId',
       TestCase: 'questionVersion.question.orgId',
@@ -83,10 +84,10 @@ describe('org scope map (NFR-04, FR-103)', () => {
       ]),
     );
     expect(actual).toEqual(EXPECTED);
-    expect(Object.keys(EXPECTED)).toHaveLength(31);
+    expect(Object.keys(EXPECTED)).toHaveLength(32);
   });
 
-  it('TC-008 the nine models with an org_id column are exactly the direct entries (ADR 0006 section 5)', async () => {
+  it('TC-008 the ten models with an org_id column are exactly the direct entries (ADR 0006 section 5; scheduled_windows from ADR 0017 4.7, C-53)', async () => {
     const metas = await readModelMetas();
     const withColumn = Object.values(metas)
       .filter((m) => m.fields.some((f) => f.dbName === 'org_id'))
@@ -103,6 +104,7 @@ describe('org scope map (NFR-04, FR-103)', () => {
       'ConsentText',
       'Invitation',
       'Question',
+      'ScheduledWindow',
       'Session',
       'Test',
       'User',

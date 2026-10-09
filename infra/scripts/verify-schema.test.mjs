@@ -105,11 +105,11 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
     for (const n of named) assert.ok(db.includes(n), `not in the database: ${n}`);
   });
 
-  it('every table in the document exists, and nothing else is in public (31 tables)', () => {
+  it('every table in the document exists, and nothing else is in public (32 tables)', () => {
     const db = rows(
       "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations' ORDER BY 1",
     );
-    assert.equal(doc.tables.size, 31);
+    assert.equal(doc.tables.size, 32);
     assert.deepEqual(db, [...doc.tables.keys()].sort());
   });
 
@@ -141,18 +141,18 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
     assert.ok(checked > 250, `only ${checked} columns compared`);
   });
 
-  it('every enum has the values of the document in the same order (20 enums)', () => {
+  it('every enum has the values of the document in the same order (22 enums)', () => {
     const db = new Map(
       rows(
         "SELECT t.typname || '|' || string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder) FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' GROUP BY t.typname",
       ).map((l) => l.split('|')),
     );
-    assert.equal(doc.enums.size, 20);
+    assert.equal(doc.enums.size, 22);
     assert.deepEqual([...db.keys()].sort(), [...doc.enums.keys()].sort());
     for (const [name, values] of doc.enums) assert.equal(db.get(name), values.join(','), name);
   });
 
-  it('the non-unique indexes match the document, with their WHERE predicates (25)', () => {
+  it('the non-unique indexes match the document, with their WHERE predicates (26)', () => {
     const wanted = doc.indexes
       .map((i) => `${i.table}|${norm(i.columns)}|${i.predicate ?? ''}`)
       .sort();
@@ -167,16 +167,16 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
       })
       .sort();
     // 24 + audit_logs_retention_marker_idx (ADR 0004 §9.2, #91).
-    assert.equal(wanted.length, 25);
+    assert.equal(wanted.length, 26);
     assert.equal(wanted.filter((w) => !w.endsWith('|')).length, 3, 'three partial indexes');
     assert.deepEqual(have, wanted);
   });
 
-  it('the 20 uniques have the document columns, and are unique indexes, not constraints (FU-DB-03)', () => {
+  it('the 21 uniques have the document columns, and are unique indexes, not constraints (FU-DB-03)', () => {
     const have = rows(
       "SELECT c.relname || '|' || (SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM unnest(i.indkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum) FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid WHERE c.relnamespace = 'public'::regnamespace AND i.indisunique AND NOT i.indisprimary AND c.relname <> '_prisma_migrations'",
     ).sort();
-    assert.equal(doc.uniques.size, 20);
+    assert.equal(doc.uniques.size, 21);
     assert.deepEqual(have, [...doc.uniques].sort());
     assert.equal(
       q(
@@ -209,8 +209,8 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
     assert.equal(have.filter((l) => l.endsWith('|SET NULL')).length, 1);
     assert.equal(
       have.filter((l) => l.split('|')[1].includes(',')).length,
-      3,
-      '3 composite foreign keys',
+      4,
+      '4 composite foreign keys (C-53 adds scheduled_windows -> invitations)',
     );
   });
 
@@ -226,8 +226,9 @@ describe('DB-08 schema against docs/database.md (FR-105)', { skip }, () => {
     }
   });
 
-  it('the trigger set is exactly users_set_updated_at', () => {
-    assert.deepEqual(rows('SELECT tgname FROM pg_trigger WHERE NOT tgisinternal'), [
+  it('the trigger set is exactly scheduled_windows_set_updated_at and users_set_updated_at', () => {
+    assert.deepEqual(rows('SELECT tgname FROM pg_trigger WHERE NOT tgisinternal ORDER BY 1'), [
+      'scheduled_windows_set_updated_at',
       'users_set_updated_at',
     ]);
   });
@@ -290,6 +291,16 @@ describe('DB-08 CHECK constraints and cascades on real rows (FR-105, NFR-05)', {
     identity_checks_attempt_check: ['UPDATE identity_checks SET attempt = 3'],
     identity_checks_check: ["UPDATE identity_checks SET status = 'REVIEWED'"],
     // ADR 0015 section 4: a WAIVED row is the first attempt and holds no identity data.
+    // C-53 (ADR 0017 4.7): a window ends after it starts and its ceiling after its end; a SLOT names an
+    // invitation and no reviewer, a REVIEW names a reviewer and no invitation.
+    scheduled_windows_times_check: [
+      `INSERT INTO scheduled_windows (org_id, kind, requested_by, starts_at, ends_at, ceiling_at, status) VALUES ('${ORG}', 'REVIEW', (SELECT id FROM users LIMIT 1), now(), now(), now() + interval '2 hours', 'SCHEDULED')`,
+      `INSERT INTO scheduled_windows (org_id, kind, requested_by, starts_at, ends_at, ceiling_at, status) VALUES ('${ORG}', 'REVIEW', (SELECT id FROM users LIMIT 1), now(), now() + interval '1 hour', now() + interval '1 hour', 'SCHEDULED')`,
+    ],
+    scheduled_windows_kind_refs_check: [
+      `INSERT INTO scheduled_windows (org_id, kind, starts_at, ends_at, ceiling_at, status) VALUES ('${ORG}', 'SLOT', now(), now() + interval '1 hour', now() + interval '3 hours', 'SCHEDULED')`,
+      `INSERT INTO scheduled_windows (org_id, kind, starts_at, ends_at, ceiling_at, status) VALUES ('${ORG}', 'REVIEW', now(), now() + interval '1 hour', now() + interval '3 hours', 'SCHEDULED')`,
+    ],
     identity_checks_waived_check: ["UPDATE identity_checks SET status = 'WAIVED'"],
     // The video check is all or nothing, and only a WAIVED row can carry one.
     identity_checks_video_check_check: [
@@ -306,13 +317,13 @@ describe('DB-08 CHECK constraints and cascades on real rows (FR-105, NFR-05)', {
   });
   after(() => pg?.stop());
 
-  it('the schema holds exactly the 14 named CHECK constraints this suite exercises', () => {
+  it('the schema holds exactly the 16 named CHECK constraints this suite exercises', () => {
     const names = q(
       "SELECT conname FROM pg_constraint WHERE contype = 'c' AND connamespace = 'public'::regnamespace ORDER BY 1",
     )
       .split('\n')
       .filter((l) => l !== '');
-    assert.equal(names.length, 14);
+    assert.equal(names.length, 16);
     assert.deepEqual(names, Object.keys(CHECKS).sort());
   });
 
@@ -513,7 +524,7 @@ describe('DB-08 app_user role (ADR 0006 sections 7 and 8.8, FR-105, D-35)', { sk
     const tables = asOwner("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1")
       .split('\n')
       .filter((l) => l !== '');
-    assert.ok(tables.length >= 31);
+    assert.ok(tables.length >= 32);
     for (const t of tables) {
       assert.equal(
         grants.get(t),

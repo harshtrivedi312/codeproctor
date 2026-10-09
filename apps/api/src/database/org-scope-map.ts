@@ -38,7 +38,10 @@ export const ORG_SCOPE: Readonly<Record<ModelName, OrgScopeRule>> = {
   Organization: { kind: 'self' },
 
   // Models with an org_id column (ADR 0006 section 5): users, questions, tests, candidates,
-  // invitations, sessions, audit_logs, consent_texts and webhook_endpoints.
+  // invitations, sessions, audit_logs, consent_texts and webhook_endpoints, and, from ADR 0017 section 4.7
+  // (C-53), scheduled_windows. Its org scope is the usual one: reads and writes in an org scope see the
+  // caller's org only. The one cross-organisation read of it is the system-scope reason SCHEDULE_CAPACITY
+  // (org-context.ts, schedule-capacity.ts), an exception that ADR 0006 does not list yet (FU-DB-272).
   User: direct,
   Question: direct,
   Test: direct,
@@ -48,6 +51,7 @@ export const ORG_SCOPE: Readonly<Record<ModelName, OrgScopeRule>> = {
   AuditLog: direct,
   ConsentText: direct,
   WebhookEndpoint: direct,
+  ScheduledWindow: direct,
 
   // Identity
   RefreshToken: via('user'),

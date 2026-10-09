@@ -2,7 +2,7 @@ import { render, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MOCK_TOKENS } from '@/mocks/candidate/handlers';
 import { clearCandidateCredentials, getInvitationToken, hasUrlFragment } from './session-store';
-import { FragmentHandoff, TokenHandoff } from './token-handoff';
+import { EmailLinkEntry, FragmentHandoff, TokenHandoff } from './token-handoff';
 
 const replace = vi.fn();
 let routeToken: string | string[] | undefined = MOCK_TOKENS.open;
@@ -64,5 +64,46 @@ describe('fragment detection (FR-401)', () => {
     expect(hasUrlFragment()).toBe(false);
     window.history.replaceState(null, '', `/t/link#${MOCK_TOKENS.open}`);
     expect(hasUrlFragment()).toBe(true);
+  });
+});
+
+describe('email link entry /t#<token> (FR-401, ADR 0003; link format per FR-407)', () => {
+  it('FR-401: forwards /t#<token> to /t/start#<token> with a full document load, token only in the fragment', async () => {
+    window.history.replaceState(null, '', `/t#${MOCK_TOKENS.open}`);
+    const replaceLocation = vi.fn();
+    render(<EmailLinkEntry replaceLocation={replaceLocation} />);
+    await waitFor(() => expect(replaceLocation).toHaveBeenCalledTimes(1));
+    expect(replaceLocation).toHaveBeenCalledWith(`/t/start#${MOCK_TOKENS.open}`);
+    // Nothing is stored here and the soft router is not used: the next document takes over.
+    expect(getInvitationToken()).toBeNull();
+    expect(replace).not.toHaveBeenCalled();
+    expect(String(replaceLocation.mock.calls[0]?.[0])).not.toContain('?');
+  });
+
+  it('FR-401: also accepts #token=<token>, still forwarding as a plain fragment', async () => {
+    window.history.replaceState(null, '', `/t#token=${MOCK_TOKENS.open}`);
+    const replaceLocation = vi.fn();
+    render(<EmailLinkEntry replaceLocation={replaceLocation} />);
+    await waitFor(() =>
+      expect(replaceLocation).toHaveBeenCalledWith(`/t/start#${MOCK_TOKENS.open}`),
+    );
+  });
+
+  it('FR-401: a bare /t goes to /t/start with no fragment (the stepper then shows the invalid-link state)', async () => {
+    window.history.replaceState(null, '', '/t');
+    const replaceLocation = vi.fn();
+    render(<EmailLinkEntry replaceLocation={replaceLocation} />);
+    await waitFor(() => expect(replaceLocation).toHaveBeenCalledWith('/t/start'));
+  });
+
+  it('FR-401: an odd or empty fragment, or a query string, is never carried over', async () => {
+    for (const url of ['/t#', '/t#nope', `/t?token=${MOCK_TOKENS.open}`, '/t#<script>']) {
+      window.history.replaceState(null, '', url);
+      const replaceLocation = vi.fn();
+      const view = render(<EmailLinkEntry replaceLocation={replaceLocation} />);
+      await waitFor(() => expect(replaceLocation).toHaveBeenCalledWith('/t/start'));
+      expect(replaceLocation).toHaveBeenCalledTimes(1);
+      view.unmount();
+    }
   });
 });
