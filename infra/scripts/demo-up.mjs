@@ -141,7 +141,8 @@ export function summary({ invite, appsStarted, workerStatus = 'skipped' }) {
     '    node infra/scripts/demo-totp.mjs <the manual key shown on the page>',
     '  Use Chrome or Firefox, and open the web app as http://localhost:3000.',
     '  Local use only: APP_ENV=development is for this machine (localhost). Never expose it on a LAN or the',
-    "  internet: the refresh cookie isn't Secure there, so tokens travel in cleartext over plain HTTP.",
+    '  internet: it serves plain HTTP with development secrets and seeded accounts, so passwords and tokens',
+    '  travel in cleartext over plain HTTP.',
   ];
   if (invite.trim() !== '') {
     lines.push(

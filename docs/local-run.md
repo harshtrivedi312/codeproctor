@@ -139,7 +139,8 @@ Redis `up`. The API log may repeat `Job consent-pdf failed` for seeded consents 
 "File uploads" row in section 6 says what was checked.
 
 **Local use only**: `APP_ENV=development` is for single-machine localhost use only. Never expose it on a LAN
-or the internet: the refresh cookie isn't `Secure` there, so tokens travel in cleartext over plain HTTP.
+or the internet: it serves plain HTTP with development secrets and seeded accounts, so passwords and tokens
+travel in cleartext (and once FU-BE-222 / #398 is merged, the refresh cookie is not `Secure` there either).
 
 **Browser**: use **Chrome or Firefox**, and always open the web app as `http://localhost:3000` (not
 `127.0.0.1`: the API's allowed web origin is exactly that). Safari does not keep the staff sign-in
