@@ -420,3 +420,11 @@ describe('FR-102, demo:up summary wording (D-70, D-84)', () => {
     assert.doesNotMatch(text, /must enrol/i);
   });
 });
+
+describe('demo:up summary: local use only (#398 security review)', () => {
+  it('warns that APP_ENV=development must not be exposed on a LAN or the internet', () => {
+    const text = summary({ invite: '', appsStarted: true });
+    assert.match(text, /Never expose it on a LAN or the\s+internet/);
+    assert.match(text, /cleartext over plain HTTP/);
+  });
+});

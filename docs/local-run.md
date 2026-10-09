@@ -138,6 +138,9 @@ Check the API: <http://localhost:4000/api/v1/health> answers `{"status":"ok", ..
 Redis `up`. The API log may repeat `Job consent-pdf failed` for seeded consents that have no PDF; the
 "File uploads" row in section 6 says what was checked.
 
+**Local use only**: `APP_ENV=development` is for single-machine localhost use only. Never expose it on a LAN
+or the internet: the refresh cookie isn't `Secure` there, so tokens travel in cleartext over plain HTTP.
+
 **Browser**: use **Chrome or Firefox**, and always open the web app as `http://localhost:3000` (not
 `127.0.0.1`: the API's allowed web origin is exactly that). Safari does not keep the staff sign-in
 cookie over plain `http://localhost` (it is `Secure`), so staff sign-in and refresh break there until the
@@ -175,9 +178,10 @@ Mailpit at <http://localhost:8025>.
 The local demo uses your real camera and microphone. Recordings, the ID photo and the selfie are stored
 only in the local MinIO and PostgreSQL containers, on this Mac. To remove them, run `pnpm demo:down
 --infra`, then delete the Docker volumes (`docker volume rm codeproctor-demo_minio_data
-codeproctor-demo_postgres_data`; a stack started by hand with `pnpm dev:infra` and no
+codeproctor-demo_postgres_data codeproctor-demo_redis_data`; a stack started by hand with `pnpm dev:infra` and no
 `COMPOSE_PROJECT_NAME` uses `codeproctor_minio_data` and `codeproctor_postgres_data` instead; a person
-runs this, it deletes all local data). Use a synthetic candidate
+runs this, it deletes all local data; `docker volume ls` shows the names if you set your own
+`COMPOSE_PROJECT_NAME`). Use a synthetic candidate
 name and the seeded test mailbox (Mailpit), and never upload a real ID document.
 
 ## 5. No backend: mock mode
