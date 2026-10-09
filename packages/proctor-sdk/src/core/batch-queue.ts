@@ -206,6 +206,7 @@ export class BatchQueue<TItem> {
   /** No usable key: retrying cannot help until the app provides one. */
   private keyBlocked = false;
   private keyStaleRounds = 0;
+  private providerTimeouts = 0;
   private auth401 = 0;
   /** 3 consecutive 401: stopped until resume(). */
   private authHold = false;
@@ -427,8 +428,15 @@ export class BatchQueue<TItem> {
       // refresh after KEY_EPOCH_STALE): sign again with the current one before it joins the outbox.
       // No await sits between the last check and the push.
       while (usedKey !== this.key && !this.closed) {
-        usedKey = this.key;
-        signature = await signHex(usedKey, body);
+        const newer = this.key;
+        try {
+          signature = await signHex(newer, body);
+        } catch {
+          // Keep the batch: it joins the outbox with its old signature and key, and the head check
+          // signs it again on the next KEY_EPOCH_STALE.
+          break;
+        }
+        usedKey = newer;
         batch = { seq, body, signature };
         this.signedWith.set(batch, usedKey);
         if (!this.storageDegraded) {
@@ -507,7 +515,7 @@ export class BatchQueue<TItem> {
             await this.endSession(out.reason);
             return;
           case 'KEY_STALE': {
-            if (await this.handleKeyStale()) continue; // re-signed: try the head again at once
+            if (await this.handleKeyStale(head)) continue; // re-signed: try the head again at once
             return;
           }
           case 'KEY_UNAVAILABLE':
@@ -554,9 +562,8 @@ export class BatchQueue<TItem> {
   private async resignOutbox(): Promise<boolean> {
     for (let pass = 0; pass < 3; pass++) {
       const k = this.key;
-      for (let i = 0; i < this.outbox.length && !this.ended; i++) {
-        const b = this.outbox[i];
-        if (!b || this.signedWith.get(b) === k) continue;
+      for (const b of [...this.outbox]) {
+        if (this.ended || this.signedWith.get(b) === k) continue;
         let signature: string;
         try {
           signature = await signHex(k, b.body);
@@ -567,7 +574,8 @@ export class BatchQueue<TItem> {
         const again: SignedBatch = { seq: b.seq, body: b.body, signature };
         this.signedWith.set(again, k);
         const at = this.outbox.indexOf(b);
-        if (at >= 0) this.outbox[at] = again;
+        if (at < 0) continue; // acknowledged while signing: it must not come back (memory or disk)
+        this.outbox[at] = again;
         if (!this.storageDegraded) {
           await this.opts.store
             .put(STORES.eventBatches, this.batchKey(again.seq), again)
@@ -586,9 +594,9 @@ export class BatchQueue<TItem> {
    * Only when a batch signed with the CURRENT key is itself stale is a newer key requested.
    * Nothing is ever dropped here. Returns true when the head should be retried right away.
    */
-  private async handleKeyStale(): Promise<boolean> {
-    const head = this.outbox[0];
-    if (head && this.signedWith.get(head) !== this.key) {
+  private async handleKeyStale(sent: SignedBatch): Promise<boolean> {
+    // Decide from the batch that was actually SENT: setKey() may have replaced outbox[0] meanwhile.
+    if (this.signedWith.get(sent) !== this.key) {
       const ok = await this.resignOutbox();
       if (!ok) this.scheduleRetry();
       return ok && !this.ended && !this.finished;
@@ -599,13 +607,34 @@ export class BatchQueue<TItem> {
       this.holdForKey('STALE_NO_KEY');
       return false;
     }
-    let fresh: CryptoKey | null;
+    const askedWith = this.key;
+    let fresh: CryptoKey | null = null;
+    let failed: 'TIMEOUT' | 'ERROR' | null = null;
     try {
-      fresh = await this.withTimeout(provider(this.key), this.opts.keyProviderTimeoutMs ?? 10_000);
-    } catch {
-      this.scheduleRetry(); // transient (network, hung provider): not a verdict on the key
+      fresh = await this.withTimeout(provider(askedWith), this.opts.keyProviderTimeoutMs ?? 10_000);
+    } catch (err) {
+      failed = err instanceof Error && err.message === 'timeout' ? 'TIMEOUT' : 'ERROR';
+    }
+    if (this.ended || this.finished) return false;
+    if (this.key !== askedWith) {
+      // setKey() delivered a key while we waited: ignore this answer (null, error or another key)
+      // and sign again with what the app set. No hold, no flag.
+      const ok = await this.resignOutbox();
+      if (!ok) this.scheduleRetry();
+      return ok && !this.ended && !this.finished;
+    }
+    if (failed) {
+      // Transient (network, hung provider); three timeouts in a row count as "no key".
+      this.providerTimeouts = failed === 'TIMEOUT' ? this.providerTimeouts + 1 : 0;
+      if (this.providerTimeouts >= 3) {
+        this.providerTimeouts = 0;
+        this.holdForKey('STALE_NO_KEY');
+        return false;
+      }
+      this.scheduleRetry();
       return false;
     }
+    this.providerTimeouts = 0;
     if (!fresh) {
       this.holdForKey('STALE_NO_KEY');
       return false;
@@ -637,6 +666,10 @@ export class BatchQueue<TItem> {
   async setKey(k: CryptoKey): Promise<void> {
     if (this.ended || this.closed) return;
     this.keyStaleRounds = 0;
+    this.providerTimeouts = 0;
+    // A new key means the OTP resume happened and the app holds a fresh token: lift the 401 hold.
+    this.auth401 = 0;
+    this.authHold = false;
     this.setKeyInternal(k);
     await this.resignOutbox();
     this.retryNow();

@@ -54,6 +54,8 @@ export interface ProctorSessionConfig {
   };
   /** Optional: how to get a new signing key after KEY_EPOCH_STALE (see KeyProvider). */
   keyProvider?: KeyProvider;
+  /** A hung `keyProvider.getKey()` is given up after this long (default 10 s). */
+  keyProviderTimeoutMs?: number;
   /** Consecutive 401 answers before sending stops and `onReauthRequired` is raised (default 3). */
   authLostAfter?: number;
   /**
@@ -116,6 +118,9 @@ export class ProctorSession {
     ended: new Set(),
   };
   private currentKey: CryptoKey | null = null;
+  /** Bumped by setKey(): a provider answer that started earlier must not overwrite it. */
+  private keyGen = 0;
+  private reauthSignalled = false;
   private keyRefresh: Promise<CryptoKey | null> | null = null;
   private endedFired = false;
   private queuesEnded = false;
@@ -198,6 +203,8 @@ export class ProctorSession {
       },
       onEnded: (reason: EndReason) => this.handleEnded(reason, 'batch'),
       onReauthRequired: (reason: 'TOKEN_EXPIRED' | 'UNAUTHENTICATED') => {
+        if (this.reauthSignalled) return; // once per episode, not once per queue
+        this.reauthSignalled = true;
         try {
           config.onReauthRequired?.(reason);
         } catch {
@@ -424,15 +431,27 @@ export class ProctorSession {
     const provider = this.config?.keyProvider;
     if (!provider) return Promise.resolve(null);
     if (this.currentKey && this.currentKey !== stale) return Promise.resolve(this.currentKey);
+    const gen = this.keyGen;
+    const ms = this.config?.keyProviderTimeoutMs ?? 10_000;
     this.keyRefresh ??= (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         // `.then` so a synchronous throw of getKey() becomes a rejection after the promise is stored.
-        const b64 = await Promise.resolve().then(() => provider.getKey());
+        const b64 = await Promise.race([
+          Promise.resolve().then(() => provider.getKey()),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('timeout')), ms);
+          }),
+        ]);
+        if (gen !== this.keyGen) return this.currentKey; // setKey() won the race
         if (!b64) return null;
-        this.currentKey = await importSessionKey(b64);
-        return this.currentKey;
+        const key = await importSessionKey(b64);
+        if (gen !== this.keyGen) return this.currentKey;
+        this.currentKey = key;
+        return key;
       } finally {
-        this.keyRefresh = null;
+        clearTimeout(timer);
+        this.keyRefresh = null; // a hung provider must not block later refreshes
       }
     })();
     return this.keyRefresh;
@@ -447,11 +466,14 @@ export class ProctorSession {
     if (!this.config) return;
     const key = await importSessionKey(hmacKeyBase64);
     this.currentKey = key;
+    this.keyGen++;
+    this.reauthSignalled = false; // a fresh key comes with a fresh token (OTP resume)
     await Promise.all([this.queue?.setKey(key), this.keystrokeQueue?.setKey(key)]);
   }
 
   /** The app refreshed the candidate token after `onReauthRequired`: send again. */
   resume(): void {
+    this.reauthSignalled = false;
     this.queue?.resume();
     this.keystrokeQueue?.resume();
   }
@@ -481,7 +503,8 @@ export class ProctorSession {
           detail: `${lost} batches (events and editor changes) were discarded when the session ended.`,
         });
       }
-      if (reason === 'TAKEN_OVER') {
+      if (reason === 'TAKEN_OVER' && !this.reauthSignalled) {
+        this.reauthSignalled = true;
         try {
           this.config.onReauthRequired?.('SESSION_TAKEN_OVER');
         } catch {
@@ -562,6 +585,7 @@ export class ProctorSession {
     this.endedFired = false;
     this.queuesEnded = false;
     this.stopping = false;
+    this.reauthSignalled = false;
     this.currentKey = null;
     this.keyRefresh = null;
     this.eventRejected = 0;

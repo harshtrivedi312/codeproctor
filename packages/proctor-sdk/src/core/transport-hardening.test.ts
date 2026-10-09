@@ -36,7 +36,10 @@ const ksItem = (k: number) => ({
 
 let db = 0;
 const newStore = (): IdbStore => new IdbStore(indexedDB, `hard-${++db}`);
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 /** A scripted transport: answers come from `script` in order, the last one repeats. */
 function scripted(script: SendResult[]) {
@@ -666,17 +669,38 @@ describe('re-sign uses the key each batch was signed with (ADR 0013 section 2; F
     release();
     await Promise.all([flushing, swapped]);
     await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
-    vi.restoreAllMocks();
     expect(calls[0]?.signature).toBe(hmacHex(KEY2_B64, calls[0]?.body ?? ''));
     await q.stop();
   });
 
-  it('(c) a signing failure halfway through the re-sign leaves nothing dropped and every batch ends up valid', async () => {
+  it('(c) a signing failure halfway through the re-sign: every batch still goes out signed with K2, no provider call, nothing lost', async () => {
     const key2 = await importSessionKey(KEY2_B64);
-    const { q, calls } = await eventQueue(
-      [{ kind: 'RETRY' }, { kind: 'RETRY' }, { kind: 'RETRY' }, 'OK'],
-      { backoffBaseMs: 600_000, backoffMaxMs: 600_000 },
-    );
+    let asked = 0;
+    let unavailable = 0;
+    const sentSigned: SignedBatch[] = [];
+    let live = false; // batches are cut and wait (offline) before the key is replaced
+    const { q } = await eventQueue([], {
+      backoffBaseMs: 600_000,
+      backoffMaxMs: 600_000,
+      onKeyStale: () => {
+        asked++;
+        return Promise.resolve(null);
+      },
+      onKeyUnavailable: () => unavailable++,
+      transport: {
+        sendBatch: (b) => {
+          if (!live) return Promise.resolve('RETRY');
+          if (b.signature !== hmacHex(KEY2_B64, b.body)) {
+            return Promise.resolve(
+              sentSigned.length === 0 && b.seq === 99 ? 'RETRY' : { kind: 'KEY_STALE' },
+            );
+          }
+          sentSigned.push(b);
+          return Promise.resolve('OK');
+        },
+      },
+    });
+    // Hold the transport (all KEY_STALE) while three batches are cut with K1, then fail one re-sign.
     for (let i = 0; i < 3; i++) {
       q.enqueue(ev(i));
       await q.flush();
@@ -687,14 +711,182 @@ describe('re-sign uses the key each batch was signed with (ADR 0013 section 2; F
       if (++n === 2) return Promise.reject(new Error('boom'));
       return real(...a);
     });
+    live = true;
     await q.setKey(key2); // seq 0 re-signed, seq 1 fails
-    vi.restoreAllMocks();
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(3), { timeout: 3000 });
+    expect(sentSigned.map((b) => b.seq)).toEqual([0, 1, 2]);
+    expect(asked).toBe(0);
+    expect(unavailable).toBe(0);
+    expect(q.stats().lostBatches).toBe(0);
+    await q.stop();
+  });
+
+  it('B-1 case 1: setKey() while a K1 batch is in flight and answered KEY_STALE: no provider call, no hold, sent with K2', async () => {
+    const key2 = await importSessionKey(KEY2_B64);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let asked = 0;
+    let unavailable = 0;
+    let calls = 0;
+    const { q } = await eventQueue([], {
+      onKeyStale: () => {
+        asked++;
+        return Promise.resolve(null);
+      },
+      onKeyUnavailable: () => unavailable++,
+      transport: {
+        sendBatch: async (b): Promise<SendResult> => {
+          calls++;
+          if (b.signature === hmacHex(KEY2_B64, b.body)) return 'OK';
+          await gate; // the K1 bytes are in flight while setKey runs
+          return { kind: 'KEY_STALE' };
+        },
+      },
+    });
+    q.enqueue(ev(1));
+    const f = q.flush();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await q.setKey(key2);
+    release();
+    await f;
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1), { timeout: 3000 });
+    expect(asked).toBe(0);
+    expect(unavailable).toBe(0);
+    await q.stop();
+  });
+
+  it('B-1 case 2: setKey() while the provider call is pending: its null answer causes no hold and its key does not overwrite the new one', async () => {
+    for (const answer of ['null', 'key3'] as const) {
+      const key2 = await importSessionKey(KEY2_B64);
+      const key3 = await importSessionKey(
+        btoa(String.fromCharCode(...Array.from({ length: 32 }, (_, i) => 50 + i))),
+      );
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let asked = 0;
+      let unavailable = 0;
+      const seen: SignedBatch[] = [];
+      const { q } = await eventQueue([], {
+        onKeyStale: async () => {
+          asked++;
+          await gate;
+          return answer === 'null' ? null : key3;
+        },
+        onKeyUnavailable: () => unavailable++,
+        transport: {
+          sendBatch: (b) => {
+            seen.push(b);
+            return Promise.resolve(
+              b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' },
+            );
+          },
+        },
+      });
+      q.enqueue(ev(1));
+      void q.flush(); // do not await: the drain waits for the pending provider call
+      await vi.waitFor(() => expect(asked).toBe(1));
+      await q.setKey(key2); // the app delivered the key while the provider call is pending
+      release();
+      await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1), { timeout: 3000 });
+      expect(unavailable).toBe(0);
+      expect(seen[seen.length - 1]?.signature).toBe(
+        hmacHex(KEY2_B64, seen[seen.length - 1]?.body ?? ''),
+      );
+      await q.stop();
+    }
+  });
+
+  it('S-1: a batch acknowledged while it is being signed again does not come back into IndexedDB', async () => {
+    const key2 = await importSessionKey(KEY2_B64);
+    let releaseSend!: () => void;
+    const sendGate = new Promise<void>((r) => (releaseSend = r));
+    let calls = 0;
+    const { q, store } = await eventQueue([], {
+      transport: {
+        sendBatch: async (): Promise<SendResult> => {
+          calls++;
+          await sendGate;
+          return 'OK';
+        },
+      },
+    });
+    q.enqueue(ev(1));
+    const f = q.flush();
+    await vi.waitFor(() => expect(calls).toBe(1));
+    const real = crypto.subtle.sign.bind(crypto.subtle);
+    let releaseSign!: () => void;
+    const signGate = new Promise<void>((r) => (releaseSign = r));
+    vi.spyOn(crypto.subtle, 'sign').mockImplementation(async (...a) => {
+      await signGate;
+      return real(...a);
+    });
+    const swapped = q.setKey(key2); // re-signing, held on the gate
+    await new Promise((r) => setTimeout(r, 20));
+    releaseSend(); // OK arrives while the re-sign is mid-signing
+    await f;
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1));
+    releaseSign();
+    await swapped;
+    expect(await stored(store)).toEqual([]);
+    expect(q.stats().unsentBatches).toBe(0);
+    await q.stop();
+  });
+
+  it('S-2: if signing again fails after a key change the batch still joins the outbox and heals on the next KEY_EPOCH_STALE', async () => {
+    const key2 = await importSessionKey(KEY2_B64);
+    const real = crypto.subtle.sign.bind(crypto.subtle);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let n = 0;
+    vi.spyOn(crypto.subtle, 'sign').mockImplementation(async (...a) => {
+      n++;
+      if (n === 1) {
+        await gate;
+        return real(...a);
+      }
+      if (n === 2) throw new Error('boom');
+      return real(...a);
+    });
+    const { q } = await eventQueue([], {
+      transport: {
+        sendBatch: (b) =>
+          Promise.resolve(b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' }),
+      },
+    });
+    q.enqueue(ev(1));
+    const flushing = q.flush();
+    await new Promise((r) => setTimeout(r, 20));
+    const swapped = q.setKey(key2);
+    release();
+    await Promise.all([flushing, swapped]);
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1), { timeout: 3000 });
+    expect(q.stats().lostBatches).toBe(0);
+    await q.stop();
+  });
+
+  it('S-4: setKey() lifts the 401 hold (OTP resume then setKey)', async () => {
+    const key2 = await importSessionKey(KEY2_B64);
+    let n = 0;
+    const { q } = await eventQueue([], {
+      authLostAfter: 1,
+      onReauthRequired: () => undefined,
+      transport: {
+        sendBatch: (b) =>
+          Promise.resolve(
+            ++n === 1
+              ? { kind: 'AUTH' }
+              : b.signature === hmacHex(KEY2_B64, b.body)
+                ? 'OK'
+                : 'RETRY',
+          ),
+      },
+    });
+    q.enqueue(ev(1));
+    await q.flush();
+    await vi.waitFor(() => expect(n).toBe(1));
     expect(q.stats().sentBatches).toBe(0);
-    // The server rejects whatever is still signed with the old key; the head check re-signs the rest.
-    q.retryNow();
-    await new Promise((r) => setTimeout(r, 50));
-    expect(q.stats().rejectedBatches).toBe(0);
-    expect(calls.length).toBeGreaterThan(3);
+    await q.setKey(key2);
+    await vi.waitFor(() => expect(q.stats().sentBatches).toBe(1), { timeout: 3000 });
     await q.stop();
   });
 
@@ -924,16 +1116,176 @@ describe('session wiring (FR-601, FR-609, FR-702, TC-063)', { timeout: 15_000 },
     await s.stop();
   });
 
-  it('a late takeover after stop() leaves the kept outbox alone and fires nothing', async () => {
+  it('a heartbeat answer that arrives after stop() leaves the kept outbox alone and fires nothing', async () => {
     const r = rig();
+    let release!: (v: { ended: 'TAKEN_OVER' }) => void;
+    r.heartbeat.mockImplementation(() => new Promise((res) => (release = res as typeof release)));
     const s = new ProctorSession();
     const ended: string[] = [];
+    const reauth: string[] = [];
+    r.cfg.onReauthRequired = (x) => reauth.push(x);
     s.on('ended', (e) => ended.push(e.reason));
     await s.start(r.cfg);
+    await vi.waitFor(() => expect(r.heartbeat).toHaveBeenCalled());
     await s.stop();
-    r.heartbeat.mockImplementation(() => Promise.resolve({ ended: 'TAKEN_OVER' as const }));
+    release({ ended: 'TAKEN_OVER' }); // the in-flight heartbeat answers after stop()
     await new Promise((x) => setTimeout(x, 100));
     expect(ended).toEqual([]);
+    expect(reauth).toEqual([]);
+  });
+
+  it('OTP resume (hub ruling S-7): stop() first, then a NEW session with setKey() re-signs both persisted outboxes, same seqs, nothing purged', async () => {
+    const store = new IdbStore(indexedDB, `resume-${++db}`);
+    const em = emitter();
+    const first: SignedBatch[] = [];
+    const firstKs: SignedBatch[] = [];
+    const offline = rig({ store, detectors: [em.detector] });
+    offline.cfg.transport.sendBatch = (b) => {
+      first.push(b);
+      return Promise.resolve('RETRY');
+    };
+    offline.cfg.transport.sendKeystrokeBatch = (b) => {
+      firstKs.push(b);
+      return Promise.resolve('RETRY');
+    };
+    const s1 = new ProctorSession();
+    await s1.start(offline.cfg);
+    em.fire();
+    s1.keystrokes?.reset(Q1, 'python', 'a');
+    await s1.stop(); // the app stops the SDK BEFORE the OTP: queues persist, nothing is purged
+    expect(first.length).toBeGreaterThan(0);
+    expect(firstKs.length).toBeGreaterThan(0);
+
+    // After the OTP: new session, new token; the key arrives with setKey().
+    const em2 = emitter();
+    const r2 = rig({ store, detectors: [em2.detector] });
+    const ok =
+      (sent: SignedBatch[]) =>
+      (b: SignedBatch): Promise<SendResult> => {
+        if (b.signature !== hmacHex(KEY2_B64, b.body))
+          return Promise.resolve({ kind: 'KEY_STALE' });
+        sent.push(b);
+        return Promise.resolve('OK');
+      };
+    r2.cfg.transport.sendBatch = ok(r2.sent);
+    r2.cfg.transport.sendKeystrokeBatch = ok(r2.ksSent);
+    const s2 = new ProctorSession();
+    const ended: string[] = [];
+    s2.on('ended', (e) => ended.push(e.reason));
+    await s2.start(r2.cfg);
+    await s2.setKey(KEY2_B64);
+    await vi.waitFor(
+      () => {
+        expect(r2.sent.length).toBeGreaterThan(0);
+        expect(r2.ksSent.length).toBeGreaterThan(0);
+      },
+      { timeout: 8000 },
+    );
+    expect(r2.sent[0]?.seq).toBe(first[0]?.seq);
+    expect(r2.sent[0]?.body).toBe(first[0]?.body); // same stored body
+    expect(r2.ksSent[0]?.seq).toBe(firstKs[0]?.seq);
+    expect(r2.ksSent[0]?.body).toBe(firstKs[0]?.body);
+    expect(ended).toEqual([]);
+    expect(s2.getQueueStats()?.lostBatches).toBe(0);
+    expect(s2.getKeystrokeStats()?.lostBatches).toBe(0);
+    await s2.stop();
+  });
+
+  it('OTP resume without stop() (rules 1 and 4): the old-token batch gets SESSION_TAKEN_OVER, both outboxes are purged, the loss is counted and re-authentication is requested', async () => {
+    const store = new IdbStore(indexedDB, `taken-${++db}`);
+    const em = emitter();
+    const reauth: string[] = [];
+    let taken = false;
+    const r = rig(
+      { store, detectors: [em.detector], onReauthRequired: (x) => reauth.push(x) },
+      () => (taken ? { kind: 'ENDED', reason: 'TAKEN_OVER' } : 'RETRY'),
+    );
+    const s = new ProctorSession();
+    const ended: { reason: string; lostBatches: number }[] = [];
+    s.on('ended', (e) => ended.push(e));
+    await s.start(r.cfg);
+    em.fire();
+    s.keystrokes?.reset(Q1, 'python', 'a');
+    await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    await vi.waitFor(() => expect(r.ksSent.length).toBeGreaterThan(0), { timeout: 6000 });
+    taken = true; // the epoch moved on (OTP resume on another device, or on this one without stop())
+    await vi.waitFor(() => expect(ended).toHaveLength(1), { timeout: 6000 });
+    expect(ended[0]?.reason).toBe('TAKEN_OVER');
+    expect(ended[0]?.lostBatches).toBeGreaterThanOrEqual(1);
+    expect(reauth).toEqual(['SESSION_TAKEN_OVER']);
+    expect((s.getQueueStats()?.lostBatches ?? 0) + (s.getKeystrokeStats()?.lostBatches ?? 0)).toBe(
+      ended[0]?.lostBatches,
+    );
+    expect(await store.keys(STORES.eventBatches, 'sess:')).toEqual([]);
+    await s.stop();
+  });
+
+  it('S-5: onReauthRequired runs once per episode even though both queues hit 401, and again after resume()', async () => {
+    const em = emitter();
+    const reasons: string[] = [];
+    const r = rig(
+      { detectors: [em.detector], authLostAfter: 1, onReauthRequired: (x) => reasons.push(x) },
+      () => ({ kind: 'AUTH' }),
+    );
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    em.fire();
+    s.keystrokes?.reset(Q1, 'python', 'a');
+    await vi.waitFor(() => expect(r.sent.length).toBeGreaterThan(0), { timeout: 6000 });
+    await vi.waitFor(() => expect(r.ksSent.length).toBeGreaterThan(0), { timeout: 6000 });
+    await new Promise((x) => setTimeout(x, 100));
+    expect(reasons).toEqual(['UNAUTHENTICATED']);
+    s.resume();
+    await vi.waitFor(() => expect(reasons).toHaveLength(2), { timeout: 3000 });
+    await s.stop();
+  });
+
+  it('S-3: a hung getKey() times out, the next stale answer asks again; three timeouts count as "no key" (onKeyStale)', async () => {
+    const em = emitter();
+    let asked = 0;
+    const r = rig({
+      detectors: [em.detector],
+      keyProviderTimeoutMs: 40,
+      keyProvider: {
+        getKey: () => {
+          asked++;
+          return asked === 1
+            ? new Promise<string | null>(() => undefined)
+            : Promise.resolve(KEY2_B64);
+        },
+      },
+    });
+    r.cfg.transport.sendBatch = (b) => {
+      r.sent.push(b);
+      return Promise.resolve(
+        b.signature === hmacHex(KEY2_B64, b.body) ? 'OK' : { kind: 'KEY_STALE' },
+      );
+    };
+    const s = new ProctorSession();
+    await s.start(r.cfg);
+    em.fire();
+    await vi.waitFor(() => expect(s.getQueueStats()?.sentBatches).toBe(1), { timeout: 8000 });
+    expect(asked).toBe(2);
+    await s.stop();
+
+    const em2 = emitter();
+    let staleRaised = 0;
+    const r2 = rig({
+      detectors: [em2.detector],
+      keyProviderTimeoutMs: 20,
+      keyProvider: { getKey: () => new Promise<string | null>(() => undefined) },
+      onKeyStale: () => staleRaised++,
+    });
+    r2.cfg.transport.sendBatch = (b) => {
+      r2.sent.push(b);
+      return Promise.resolve({ kind: 'KEY_STALE' });
+    };
+    const s2 = new ProctorSession();
+    await s2.start(r2.cfg);
+    em2.fire();
+    await vi.waitFor(() => expect(staleRaised).toBe(1), { timeout: 8000 });
+    expect(s2.getQueueStats()?.unsentBatches).toBe(1);
+    await s2.stop();
   });
 
   it('repeated 401 raises onReauthRequired; rejected batches raise counted flags without content', async () => {
