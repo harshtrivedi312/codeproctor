@@ -1609,6 +1609,8 @@ const KNOWN_CANDIDATE_ROUTES: readonly CandidateRoute[] = [
   // Render projection (Backend B): the running test's layout and one question of the open section.
   { key: 'GET /candidate/session/test', permission: 'candidate_session:read' },
   { key: 'GET /candidate/questions/:questionId', permission: 'candidate_session:read' },
+  // BE-08 accommodations projection (Backend A, PR #339): read-only, reuses the session read permission.
+  { key: 'GET /candidate/session/accommodations', permission: 'candidate_session:read' },
   { key: 'POST /candidate/session/test/start', permission: 'candidate_session:start' },
   { key: 'POST /candidate/session/heartbeat', permission: 'candidate_session:heartbeat' },
   { key: 'POST /candidate/session/proctor-key', permission: 'candidate_session:key' },
