@@ -381,3 +381,22 @@ Filed, not fixed
 - `idb`: the ADR's name for our `event-storage` and `recording-storage` flags; map or rename.
 - #345 emits `keystrokes`, `keystroke-unrepresentable`, `keystroke-rejected` today; add `keystroke-seq-reset`.
 - Add a conformity test over every flag id the SDK can emit (regex and detail length).
+
+## Transport hardening (PR fe/sdk-transport-hardening; FR-601, FR-609, FR-701, TC-063, TC-065)
+
+Done
+
+- Every `createFetchTransport` call (event batch, keystroke batch, heartbeat) has an AbortController plus a race against a timer, and the timer is cleared only after the body is read (batch 20 s, heartbeat 8 s, both configurable). A fetch that ignores the abort signal is bounded too. `finish()` and the queue head can no longer hang on one request.
+- Errors map by RFC 7807 `code` first, then status (`classifyAnswer`). `SendResult` is now the old strings or a `SendOutcome` object: RETRY with `retryAfterMs` (429, 503 BUSY, Retry-After seconds or date, capped at 5 min), REJECTED with `code` (SEQ_CONFLICT, SIGNATURE_INVALID, 400, 403, 413, 415: dropped and counted), KEY_STALE, KEY_UNAVAILABLE, ENDED (SESSION_NOT_ACTIVE or TAKEN_OVER), AUTH (401). Plain strings still work, so the web app's own transport needs no change.
+- `BatchQueue` (events and keystrokes): `onKeyStale(staleKey)` returns the new key and every unsent batch is signed again from its stored body (same body, same seq, new signature, re-persisted) and retried at once; no provider or a null answer holds and keeps the batches and calls `onKeyUnavailable` once; a provider that keeps returning a stale key stops after 3 rounds. `ProctorSessionConfig.keyProvider.getKey()` (base64) is the session side; one refresh serves both queues. The real provider (proctor-key route) is the next PR.
+- ENDED: the queue stops, drops pending items, purges its stored batches at once (FR-702; the unsent ones are counted in `lostBatches` and `finish-lost`), refuses new items and calls `onEnded(reason)` once. The session fires `ended` once, stops the heartbeat, closes the keystroke recorder and ends the other queue. A heartbeat answered with SESSION_NOT_ACTIVE or SESSION_TAKEN_OVER does the same.
+- 401: after `finish()` began, TOKEN_EXPIRED is a lost tail (no retry, counted, purged; relies on the invariant token TTL / 2 >= ingestion grace 300 s). While live, `authLostAfter` (default 3) consecutive 401 fire `onAuthLost` once (session event `auth-lost`); retries continue with backoff because the app can refresh the token.
+- Flags: `signing-key` (held, no key), `event-rejected` and `keystroke-rejected` now carry counts only.
+
+Open
+
+- The heartbeat PR must map these flag ids to the ADR names (`keystroke-seq-reset`, `idb`, ...), see the heartbeat note above.
+- `SESSION_NOT_ACTIVE`/`TAKEN_OVER` stop the SDK senders only. The app must call `session.stop()` (or `finish()`), stop the recording pipeline (`recording-ended` is raised by the media API errors) and show the end screen on the `ended` event.
+- Media PUT timeouts live in `UploadQueue` (#366); the evidence PUT (`uploadEvidence`) is bounded by a race but its fetch is not aborted.
+- The web app's own transport (`candidate-test/proctor/transport.ts`) still maps by status; it should switch to `classifyAnswer` or return the same outcomes (Frontend's file).
+- The key provider is asked at most once per stale epoch; if the server keeps answering KEY_EPOCH_STALE the queue holds and re-asks only after a restart of the session (3 rounds per hold episode are reset by any acknowledged batch).

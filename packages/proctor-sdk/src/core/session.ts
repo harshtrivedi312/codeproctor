@@ -4,7 +4,7 @@ import type {
   EventPayload,
   ProctorDetector,
 } from '@codeproctor/shared';
-import type { BatchQueueStats } from './batch-queue';
+import type { BatchQueueStats, EndReason } from './batch-queue';
 import { EventQueue, type EventQueueStats, type EventTransport } from './event-queue';
 import type { SendResult, SignedBatch } from './batch-queue';
 import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
@@ -22,6 +22,15 @@ import {
   type LockState,
 } from './types';
 
+/**
+ * Supplies a new signing key after the server answered 409 KEY_EPOCH_STALE (ADR 0013). The real
+ * provider (proctor-key route) comes with a later change; without one, stale batches are held and
+ * kept, never dropped. Returns the key as base64, or null when none can be had.
+ */
+export interface KeyProvider {
+  getKey(): Promise<string | null>;
+}
+
 export interface ProctorSessionConfig {
   sessionId: string;
   /**
@@ -35,7 +44,7 @@ export interface ProctorSessionConfig {
   /** Nothing touches camera, microphone or screen until this is set (D-17). */
   consent: { recordedAt: string } | null;
   transport: EventTransport & {
-    heartbeat(): Promise<boolean>;
+    heartbeat(): Promise<boolean | { ended: EndReason }>;
     /**
      * Sends one signed keystroke batch (POST /candidate/session/keystrokes). Without it the session
      * has no keystroke recorder (`session.keystrokes` is null) and says so with the `keystrokes`
@@ -43,6 +52,10 @@ export interface ProctorSessionConfig {
      */
     sendKeystrokeBatch?(batch: SignedBatch): Promise<SendResult>;
   };
+  /** Optional: how to get a new signing key after KEY_EPOCH_STALE (see KeyProvider). */
+  keyProvider?: KeyProvider;
+  /** Consecutive 401 answers before the `auth-lost` event (default 3). */
+  authLostAfter?: number;
   /** Detectors the accommodations switched off (FR-106). They never start. */
   disabledDetectors?: readonly ProctorDetector[];
   detectors: readonly Detector[];
@@ -61,6 +74,10 @@ export interface SessionEvents {
   lock: LockState;
   capability: CapabilityFlag;
   connection: { online: boolean };
+  /** The server says the session is over (or taken over). Sending has stopped and unsent batches were purged. */
+  ended: { reason: EndReason };
+  /** Repeated 401 answers while live: the app must refresh the candidate token (retries continue slowly). */
+  'auth-lost': { stream: 'event' | 'keystroke' };
 }
 type Handler<K extends keyof SessionEvents> = (payload: SessionEvents[K]) => void;
 
@@ -86,7 +103,14 @@ export class ProctorSession {
     lock: new Set(),
     capability: new Set(),
     connection: new Set(),
+    ended: new Set(),
+    'auth-lost': new Set(),
   };
+  private currentKey: CryptoKey | null = null;
+  private keyRefresh: Promise<CryptoKey | null> | null = null;
+  private endedReason: EndReason | null = null;
+  private eventRejected = 0;
+  private keystrokeRejected = 0;
   private queue: EventQueue | null = null;
   private keystrokeQueue: KeystrokeQueue | null = null;
   private keystrokeRecorder: KeystrokeRecorder | null = null;
@@ -139,12 +163,38 @@ export class ProctorSession {
     this.config = config;
     const metrics = (this.metrics = new MetricsCollector());
     const key = await importSessionKey(config.hmacKeyBase64);
+    this.currentKey = key;
+    // Hooks both queues share: key rotation, end of session, lost authentication.
+    const shared = (stream: 'event' | 'keystroke') => ({
+      ...(config.keyProvider ? { onKeyStale: (stale: CryptoKey) => this.refreshKey(stale) } : {}),
+      ...(config.authLostAfter === undefined ? {} : { authLostAfter: config.authLostAfter }),
+      onKeyUnavailable: (why: 'STALE_NO_KEY' | 'ALREADY_ISSUED') =>
+        this.fire('capability', {
+          id: 'signing-key',
+          status: 'UNVERIFIABLE',
+          detail:
+            why === 'ALREADY_ISSUED'
+              ? 'The signing key could not be obtained again: batches are held, not dropped.'
+              : 'The signing key was rotated and no new key is available: batches are held, not dropped.',
+        }),
+      onEnded: (reason: EndReason) => this.handleEnded(reason),
+      onAuthLost: () => this.fire('auth-lost', { stream }),
+    });
     const store = (this.store = config.store ?? new IdbStore()); // shared by the event and keystroke queues
     const queue = (this.queue = new EventQueue({
       sessionId: config.sessionId,
       key,
       transport: config.transport,
       store,
+      ...shared('event'),
+      onRejected: () => {
+        this.eventRejected++;
+        this.fire('capability', {
+          id: 'event-rejected',
+          status: 'UNVERIFIABLE',
+          detail: `${this.eventRejected} event batches were refused by the server.`,
+        });
+      },
       ...(config.flushIntervalMs === undefined ? {} : { flushIntervalMs: config.flushIntervalMs }),
       ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
       onSeqUntrusted: () =>
@@ -174,6 +224,7 @@ export class ProctorSession {
         key,
         transport: { sendBatch: send },
         store,
+        ...shared('keystroke'),
         ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
         onSeqUntrusted: () =>
           this.fire('capability', {
@@ -189,14 +240,15 @@ export class ProctorSession {
           }),
         onStorageRecovered: () =>
           this.fire('capability', { id: 'keystroke-storage', status: 'SUPPORTED' }),
-        onRejected: () =>
-          // The server refused a keystroke batch for good: say so (no content in the flag).
+        onRejected: () => {
+          // The server refused a keystroke batch for good: say so (a count, no content).
+          this.keystrokeRejected++;
           this.fire('capability', {
             id: 'keystroke-rejected',
             status: 'UNVERIFIABLE',
-            detail:
-              'The server refused a batch of editor changes; replay of this period is incomplete.',
-          }),
+            detail: `${this.keystrokeRejected} batches of editor changes were refused by the server; replay of this period is incomplete.`,
+          });
+        },
       }));
       await ks.start();
       this.keystrokeRecorder = new KeystrokeRecorder(
@@ -245,6 +297,7 @@ export class ProctorSession {
       () => config.transport.heartbeat(),
       config.heartbeatIntervalMs ?? 10_000,
       (online) => this.fire('connection', { online }),
+      (reason) => this.handleEnded(reason),
     );
     this.heartbeat.start();
     globalThis.addEventListener?.('pagehide', this.onPageHide);
@@ -337,6 +390,39 @@ export class ProctorSession {
     return this.shutdown(drainTimeoutMs);
   }
 
+  /**
+   * One key refresh at a time, shared by both queues: a queue whose batches were signed with a key
+   * that has already been replaced gets the current key without asking the provider again (the
+   * server issues a key only once per epoch).
+   */
+  private refreshKey(stale: CryptoKey): Promise<CryptoKey | null> {
+    const provider = this.config?.keyProvider;
+    if (!provider) return Promise.resolve(null);
+    if (this.currentKey && this.currentKey !== stale) return Promise.resolve(this.currentKey);
+    this.keyRefresh ??= (async () => {
+      try {
+        const b64 = await provider.getKey();
+        if (!b64) return null;
+        this.currentKey = await importSessionKey(b64);
+        return this.currentKey;
+      } finally {
+        this.keyRefresh = null;
+      }
+    })();
+    return this.keyRefresh;
+  }
+
+  /** The server said the session is over: stop everything that sends, tell the UI once. */
+  private handleEnded(reason: EndReason): void {
+    if (this.endedReason) return;
+    this.endedReason = reason;
+    this.heartbeat?.stop();
+    this.keystrokeRecorder?.close();
+    void this.queue?.end(reason);
+    void this.keystrokeQueue?.end(reason);
+    this.fire('ended', { reason });
+  }
+
   async stop(): Promise<void> {
     await this.shutdown(null);
   }
@@ -396,6 +482,11 @@ export class ProctorSession {
       }
     }
     this.metrics?.stop();
+    this.endedReason = null;
+    this.currentKey = null;
+    this.keyRefresh = null;
+    this.eventRejected = 0;
+    this.keystrokeRejected = 0;
     this.queue = null;
     this.keystrokeQueue = null;
     this.keystrokeRecorder = null;
