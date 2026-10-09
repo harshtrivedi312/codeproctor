@@ -5,6 +5,12 @@ export const PROBLEM_CODES = [
   'REAUTH_FAILED',
   'SETTINGS_CONFLICT',
   'VARIANT_HAS_AI_REFERENCES',
+  // Reviewer decisions (BE-13, api-contract section 7). MANUAL_PENDING: the verdict is blocked while
+  // a short answer still waits for a manual decision (TC-099).
+  'ANSWER_NOT_MANUAL',
+  'SESSION_NOT_UNDER_REVIEW',
+  'VERDICT_ALREADY_SET',
+  'MANUAL_PENDING',
   // The 503 for database lock contention (DL-37); only ProblemFilter's lock path sets it.
   'BUSY',
 ] as const;
