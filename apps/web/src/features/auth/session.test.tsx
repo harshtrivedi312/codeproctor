@@ -802,6 +802,21 @@ describe('sign-out that the server did not confirm', () => {
     expect(getAccessToken()).toBeNull();
   });
 
+  it('FR-104 TC-098: a 429 on refresh (auth rate limit) keeps the session, it is not a sign-out', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <Who />
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    server.use(http.post('*/v1/auth/refresh', () => new HttpResponse(null, { status: 429 })));
+    expect(await refreshSession()).toBeNull();
+    expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
+    expect(getAccessToken()).not.toBeNull();
+  });
+
   it('FR-104: the pending marker holds no token', async () => {
     renderWithAuth(
       <>

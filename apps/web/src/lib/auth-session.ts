@@ -346,6 +346,9 @@ async function sendRefresh(canSend: () => boolean): Promise<RefreshOutcome | nul
     }
     if (!canSend()) return null;
     if (await isBusyResponse(response)) return { kind: 'busy' };
+    // 429: the auth rate limit (shared by everyone behind one address) refused the call before it
+    // ran, so the refresh token was not rotated. The session stands; this is not a sign-out.
+    if (response.status === 429) return { kind: 'busy' };
     if (!response.ok) return { kind: 'signed-out' };
     return { kind: 'session', session: (await response.json()) as AuthSession };
   } catch {
