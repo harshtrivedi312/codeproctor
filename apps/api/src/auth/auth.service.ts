@@ -753,7 +753,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       if (phase.started && phase.finished && !clean) {
         // D-76: a silent turn-off would hide a takeover, so settle the outcome with a locking
         // re-read (api-contract section 8) and mail only if the change definitely landed.
-        if (await this.disableDefinitelyCommitted(user.id)) {
+        if (await this.disableDefinitelyCommitted(user.id, user.orgId)) {
           await this.notifyTwoFactorChange(user, user.id, 'two-factor-disabled', ctx);
         }
         throw new OutcomeUnknownError('auth.2fa.disable');
@@ -773,6 +773,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    */
   private async lockedReread(
     userId: string,
+    orgId: string,
     proof?: (tx: Db) => Promise<boolean>,
   ): Promise<{ totpEnabled: boolean; proof: boolean | null } | null> {
     let out: { totpEnabled: boolean; proof: boolean | null } | null = null;
@@ -784,13 +785,18 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         );
         const rows = await this.raw('locking re-read of the 2FA flag after an unknown commit', () =>
           tx.$queryRaw<{ totp_enabled: boolean }[]>(Prisma.sql`
-            SELECT totp_enabled FROM users WHERE id = ${userId}::uuid FOR UPDATE`),
+            SELECT totp_enabled FROM users WHERE id = ${userId}::uuid AND org_id = ${orgId}::uuid FOR UPDATE`),
         );
         const flag = rows[0]?.totp_enabled;
         if (rows.length !== 1 || flag === undefined) return;
         out = { totpEnabled: flag, proof: null };
         if (proof) {
           try {
+            // The proof lookup is bounded too; a timeout leaves it unreadable (fallback rule).
+            await this.raw(
+              'SET LOCAL statement_timeout so the audit lookup stays small and bounded',
+              () => tx.$executeRaw`SET LOCAL statement_timeout = '2000ms'`,
+            );
             out = { totpEnabled: flag, proof: await proof(tx) };
           } catch {
             out = { totpEnabled: flag, proof: null };
@@ -798,15 +804,14 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
         }
       });
     } catch {
-      // A timeout or any error before the flag was read is null; after it, the read stands.
-      return out;
+      // A timeout or any error before the flag was read leaves null; after it, the read stands.
     }
     return out;
   }
 
   /** True only when the locked re-read shows 2FA off; any error or doubt is false (no mail). */
-  private async disableDefinitelyCommitted(userId: string): Promise<boolean> {
-    const read = await this.lockedReread(userId);
+  private async disableDefinitelyCommitted(userId: string, orgId: string): Promise<boolean> {
+    const read = await this.lockedReread(userId, orgId);
     return read?.totpEnabled === false;
   }
 
@@ -911,6 +916,8 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
     const notify: { holder: Pick<User, 'id' | 'orgId' | 'email'> | null } = { holder: null };
     // Names this request's audit row, so an unknown commit outcome can be settled (D-76).
     const requestRef = randomUUID();
+    // Lower bound for the audit lookup (index range stays tiny), with room for clock skew.
+    const startedAt = new Date(Date.now() - 5_000);
     const phase: TxPhase = { started: false, finished: false };
     try {
       await this.prisma.client.$transaction(async (tx) => {
@@ -983,7 +990,7 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
       // and a retry would be a no-op reset that never mails the holder (D-76).
       const clean = isCleanRollback(phase, e, (err) => err instanceof ServiceUnavailableException);
       if (!clean && phase.started && phase.finished && notify.holder) {
-        await this.mailIfResetLanded(notify.holder, actor.id, requestRef, ctx);
+        await this.mailIfResetLanded(notify.holder, actor.id, requestRef, startedAt, ctx);
       }
       throw e;
     }
@@ -997,18 +1004,24 @@ export class AuthService implements BeforeApplicationShutdown, OnApplicationShut
    * Unknown commit outcome of a reset whose target had 2FA on: mail only if the locked re-read
    * proves THIS request's reset landed (its AUTH_2FA_RESET_BY_ADMIN row exists); if the audit
    * lookup cannot be read, fall back to 2FA being off now (it was on before the transaction).
+   * The fallback can mail in the rare case that the account's 2FA was turned off by someone else
+   * meanwhile (a concurrent self-disable or a concurrent reset) while this reset rolled back: the
+   * holder then gets a notice for a change they may have made themselves. Accepted: the notice
+   * never withholds a real turn-off, and it names no actor.
    */
   private async mailIfResetLanded(
     holder: Pick<User, 'id' | 'orgId' | 'email'>,
     actorId: string,
     requestRef: string,
+    startedAt: Date,
     ctx: RequestContext,
   ): Promise<void> {
-    const read = await this.lockedReread(holder.id, async (tx) => {
+    const read = await this.lockedReread(holder.id, holder.orgId, async (tx) => {
       const row = await tx.auditLog.findFirst({
         where: {
           action: 'AUTH_2FA_RESET_BY_ADMIN',
           entityId: holder.id,
+          createdAt: { gte: startedAt },
           metadata: { path: ['requestRef'], equals: requestRef },
         },
         select: { id: true },

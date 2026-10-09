@@ -373,15 +373,75 @@ describe('Two-factor change emails (D-76, FR-107, FR-102, TC-003)', () => {
       const target = await createUser({ totp: true });
       jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
       const token = await accessFor(admin.id);
+      const reread = jest.spyOn(
+        authService as unknown as { lockedReread: () => Promise<unknown> },
+        'lockedReread',
+      );
       commitThenFail();
       await reset(token, target.id).expect(503);
-      expect(await totpOn(target.id)).toBe(false);
+      // The proof path answered (this request's audit row was found), not the fallback.
+      expect(await reread.mock.results[0]?.value).toEqual({ totpEnabled: false, proof: true });
+      const notices = await noticeRows(target.id);
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.actorId).toBe(admin.id);
+      expect(notices[0]?.metadata).toEqual({ template: 'two-factor-reset', outcome: 'queued' });
       expect(jobs).toHaveLength(1);
       expect(jobs[0]).toMatchObject({ template: 'two-factor-reset', to: target.email });
       expect(jobs[0]?.to).not.toBe(admin.email);
       // The admin's retry is a no-op reset and sends nothing more.
       await reset(token, target.id).expect(204);
       expect(jobs).toHaveLength(1);
+    });
+
+    it('FR-107, D-76, TC-003: a rolled-back reset while someone else turns 2FA off meanwhile sends none: the proof lookup answers false, the fallback is not used', async () => {
+      const admin = await createAdmin();
+      const target = await createUser({ totp: true });
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      const reread = jest.spyOn(
+        authService as unknown as { lockedReread: () => Promise<unknown> },
+        'lockedReread',
+      );
+      const other = new Client({ connectionString: process.env.DATABASE_URL });
+      await other.connect();
+      const client = appPrisma.client;
+      const real = client.$transaction.bind(client) as TxRun;
+      jest.spyOn(client, '$transaction').mockImplementationOnce((async (fn: TxFn, o?: unknown) => {
+        await real(async (tx) => {
+          await fn(tx);
+          throw p2028();
+        }, o).catch(() => undefined);
+        // A concurrent self-disable lands after this reset rolled back.
+        await other.query('UPDATE users SET totp_enabled = false WHERE id = $1', [target.id]);
+        throw p2028();
+      }) as unknown as typeof client.$transaction);
+      try {
+        await reset(await accessFor(admin.id), target.id).expect(503);
+      } finally {
+        await other.end();
+      }
+      expect(await reread.mock.results[0]?.value).toEqual({ totpEnabled: false, proof: false });
+      expect(jobs).toHaveLength(0);
+    });
+
+    it('FR-107, D-76: each reset audit row carries its own requestRef, a UUID v4', async () => {
+      const admin = await createAdmin();
+      const t1 = await createUser({ totp: true });
+      const t2 = await createUser({ totp: true });
+      jest.spyOn(validity, 'invalidateIssuedTokens').mockResolvedValue(undefined);
+      const token = await accessFor(admin.id);
+      await reset(token, t1.id).expect(204);
+      await reset(token, t2.id).expect(204);
+      const refs: string[] = [];
+      for (const t of [t1, t2]) {
+        const row = await prisma.auditLog.findFirstOrThrow({
+          where: { action: 'AUTH_2FA_RESET_BY_ADMIN', entityId: t.id },
+        });
+        refs.push((row.metadata as { requestRef: string }).requestRef);
+      }
+      for (const r of refs) {
+        expect(r).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      }
+      expect(refs[0]).not.toBe(refs[1]);
     });
 
     it('FR-107, D-76, TC-003: a reset whose commit did NOT land (P2028 at COMMIT, rolled back) sends none', async () => {
