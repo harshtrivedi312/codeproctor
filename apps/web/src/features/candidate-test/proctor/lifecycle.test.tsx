@@ -397,9 +397,11 @@ describe('a device granted late writes nothing after a purge or a finish (candid
     await starting;
     // The device is released and nothing is presigned or confirmed for it. Whether the SDK keeps a
     // chunk the late recorder flushed (older SDK) or never starts that recorder (the pipeline
-    // refuses devices once it is closing, SDK BL-4/BL-2) is the SDK's business: a remount builds
+    // refuses devices once it is closing, SDK #366) is the SDK's business: a remount builds
     // a new controller and pipeline, so nothing here depends on a late recorder after stop().
     expect(devices.userStreams[0]?.stops).toHaveBeenCalled();
+    // Uploads are asynchronous: give a wrongly sent presign time to arrive before asserting.
+    await wait(150);
     expect(seen.some((q) => /media\/(presign|confirm)/.test(q.url))).toBe(false);
   });
 });
