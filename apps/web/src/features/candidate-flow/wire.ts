@@ -1,6 +1,6 @@
 import { codeLanguageSchema } from '@codeproctor/shared';
 import { z } from 'zod';
-import { mockingEnabled } from '@/lib/env';
+import { isAllowedUploadUrl } from './upload-url';
 
 /**
  * PROVISIONAL wire contract for the candidate pre-test routes (contract not final).
@@ -119,13 +119,11 @@ export interface SystemCheckBody {
  * its path here is PROVISIONAL.
  */
 export const presignSchema = z.object({
-  // Real uploads are https only. Plain http is accepted with mocks on (localhost mock upload).
+  // https only; plain http only for localhost in a development build (see upload-url.ts).
   url: z
     .string()
     .url()
-    .refine((u) => u.startsWith('https://') || (mockingEnabled && u.startsWith('http://')), {
-      message: 'Upload URL must be https',
-    }),
+    .refine((u) => isAllowedUploadUrl(u), { message: 'Upload URL not allowed' }),
   method: z.literal('PUT'),
   headers: z.record(z.string(), z.string()),
   evidenceKey: z.string().min(1),
@@ -151,13 +149,13 @@ export const testStartedSchema = z.object({
 });
 
 /** ADR 0013 section 5.5: presign and confirm for recorded media. Room scan is stream ROOM_SCAN. */
-const httpsOrMock = (u: string): boolean =>
-  u.startsWith('https://') || (mockingEnabled && u.startsWith('http://'));
-
 export const mediaPresignSchema = z.union([
   z.object({ alreadyUploaded: z.literal(true) }),
   z.object({
-    url: z.string().url().refine(httpsOrMock, { message: 'Upload URL must be https' }),
+    url: z
+      .string()
+      .url()
+      .refine((u) => isAllowedUploadUrl(u), { message: 'Upload URL not allowed' }),
     method: z.literal('PUT'),
     headers: z.record(z.string(), z.string()),
     expiresAt: z.string(),
