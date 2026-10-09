@@ -3,6 +3,7 @@ import { StorageModule } from '../media/storage.module';
 import { StorageService } from '../media/storage.service';
 import { MailModule } from '../mail/mail.module';
 import { SessionModule } from '../session/session.module';
+import { CandidateAccommodationsController } from './candidate-accommodations.controller';
 import { CandidateAuthController } from './candidate-auth.controller';
 import { CandidateAuthService } from './candidate-auth.service';
 import { CandidateMailPort } from './candidate-mail.port';
@@ -25,7 +26,11 @@ import { TestStartService } from './test-start.service';
 // see mail-backed-candidate-mail.port.ts). The storage port is the StorageService (BE-09).
 @Module({
   imports: [SessionModule, StorageModule, MailModule],
-  controllers: [CandidateAuthController, CandidateSessionController],
+  controllers: [
+    CandidateAuthController,
+    CandidateSessionController,
+    CandidateAccommodationsController,
+  ],
   providers: [
     CandidateTokenService,
     CandidateScope,

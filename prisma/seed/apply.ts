@@ -344,12 +344,16 @@ export async function applyApprovedDemoConsent(
     create: row,
     update: {},
   });
-  // Point the org at the demo text, but only when it still points at the placeholder (or nothing): never
-  // move it off a text someone set deliberately. A no-op once it already points at the demo row.
+  // Point the org at the demo text, but only when it points at the placeholder, nothing, or a prior demo
+  // text this bump supersedes (M1): never move it off a text someone set deliberately. A no-op once it
+  // already points at the current demo row.
   const { count } = await client.organization.updateMany({
     where: {
       id: ID.org,
-      OR: [{ currentConsentTextId: ID.consentText }, { currentConsentTextId: null }],
+      OR: [
+        { currentConsentTextId: { in: [ID.consentText, ...ID.supersededDemoConsentTexts] } },
+        { currentConsentTextId: null },
+      ],
     },
     data: { currentConsentTextId: ID.approvedConsentText },
   });
