@@ -158,6 +158,8 @@ export class ProctorSession {
   private keyGen = 0;
   /** The key was purged (finish, taken over, session over): nothing may store it again. */
   private keyPurged = false;
+  /** Monotonic (never reset): a put that started before a purge deletes its row afterwards. */
+  private purgeGen = 0;
   private keyStore: KeyStore | null = null;
   private touch: SessionTouch | null = null;
   private reauthSignalled = false;
@@ -277,8 +279,9 @@ export class ProctorSession {
     const store = (this.store = config.store ?? new IdbStore()); // shared by the event and keystroke queues
     this.keyStore = config.keyStore ?? new IdbKeyStore(store);
     this.touch = new SessionTouch(store, config.sessionId);
-    if (config.signingKey?.persisted === false) this.fireIdbUnsupported();
-    if (config.signingKey?.epoch !== undefined) {
+    if (config.signingKey?.persisted === false) {
+      this.fireIdbUnsupported(); // the helper already failed to store it: do not try (and flag) again
+    } else if (config.signingKey?.epoch !== undefined) {
       await this.persistKey(key, config.signingKey.epoch);
     }
     const queue = (this.queue = new EventQueue({
@@ -564,10 +567,12 @@ export class ProctorSession {
     const sid = this.config?.sessionId;
     const ks = this.keyStore;
     if (!sid || !ks || this.keyPurged) return;
+    const gen = this.purgeGen;
     try {
       await ks.put(sid, { key, epoch });
-      // The session was purged while the put ran: take the row out again.
-      if (this.keyPurged) await ks.delete(sid).catch(() => undefined);
+      // The session was purged while the put ran (also across a stop() and a new start()): take
+      // the row out again.
+      if (this.keyPurged || gen !== this.purgeGen) await ks.delete(sid).catch(() => undefined);
     } catch {
       this.fireIdbUnsupported();
     }
@@ -588,6 +593,7 @@ export class ProctorSession {
    */
   private async purgeKey(): Promise<void> {
     this.keyPurged = true;
+    this.purgeGen++;
     const sid = this.config?.sessionId;
     const ks = this.keyStore;
     const provider = this.config?.keyProvider;
@@ -612,6 +618,8 @@ export class ProctorSession {
    * with the epoch, both queues sign their unsent batches again from the stored bodies (same
    * bodies, same seqs), the 401 hold is lifted and sending resumes. Counters raise the event and
    * keystroke sequences to max(local, server); seed the media pipeline with `counters.media`.
+   * After the session was purged (finish, taken over, session over) this does nothing: restart
+   * with `stop()` and a new `start()`.
    */
   async setKey(
     hmacKey: string | CryptoKey,

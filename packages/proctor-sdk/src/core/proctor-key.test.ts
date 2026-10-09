@@ -702,7 +702,7 @@ describe('cross-tab lock and helper nits (ADR 0013 section 2; FR-601, TC-063)', 
     return {
       names,
       locks: {
-        request<T>(name: string, cb: () => Promise<T>): Promise<T> {
+        request<T>(name: string, _o: { signal?: AbortSignal }, cb: () => Promise<T>): Promise<T> {
           names.push(name);
           const run = tail.then(cb);
           tail = run.catch(() => undefined);
@@ -728,6 +728,137 @@ describe('cross-tab lock and helper nits (ADR 0013 section 2; FR-601, TC-063)', 
     expect(ra.source).toBe('NETWORK');
     expect(rb).toMatchObject({ source: 'STORE', epoch: 3 });
     expect(l.names).toEqual(['cp-key:sess', 'cp-key:sess']);
+  });
+
+  it('B1: forget() while the request waits for the Web Lock: no POST, no row', async () => {
+    const store = newStore();
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let tail: Promise<unknown> = held; // another tab holds cp-key:<sid>
+    const locks = {
+      request<T>(_n: string, _o: { signal?: AbortSignal }, cb: () => Promise<T>): Promise<T> {
+        const run = tail.then(cb);
+        tail = run.catch(() => undefined);
+        return run;
+      },
+    };
+    const fetchFn = vi.fn(() => Promise.resolve(reply(200, keyBody())));
+    const { p } = provider(fetchFn, { store, locks });
+    const pending = p.fetchKey().catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    await p.forget(); // finish() / TAKEN_OVER purge while the request is queued
+    release(); // the lock is granted now
+    const err = (await pending) as ProctorKeyError;
+    expect(err).toBeInstanceOf(ProctorKeyError);
+    expect(fetchFn).not.toHaveBeenCalled(); // the one-time issuance is not burned
+    expect(await store.get(STORES.meta, hmacKeyName('sess'))).toBeUndefined();
+  });
+
+  it('the lock is released between attempts (a long Retry-After does not park other tabs)', async () => {
+    const held: boolean[] = [];
+    let inLock = false;
+    const locks = {
+      request<T>(_n: string, _o: { signal?: AbortSignal }, cb: () => Promise<T>): Promise<T> {
+        inLock = true;
+        return cb().finally(() => {
+          inLock = false;
+        });
+      },
+    };
+    let n = 0;
+    const { p } = provider(
+      () =>
+        Promise.resolve(
+          ++n === 1 ? reply(429, { code: 'RATE' }, { 'Retry-After': '9' }) : reply(200, keyBody()),
+        ),
+      {
+        locks,
+        sleep: () => {
+          held.push(inLock);
+          return Promise.resolve();
+        },
+      },
+    );
+    await p.fetchKey();
+    expect(held).toEqual([false]); // the backoff ran outside the lock
+  });
+
+  it("lock: 'none' for a caller that already holds cp-key:<sid>; and a frozen lock holder ends as UNAVAILABLE", async () => {
+    const never = {
+      request<T>(_n: string, o: { signal?: AbortSignal }): Promise<T> {
+        return new Promise<T>((_r, reject) => {
+          o.signal?.addEventListener('abort', () => reject(new DOMException('x', 'AbortError')));
+        });
+      },
+    };
+    const f = (() => Promise.resolve(reply(200, keyBody()))) as unknown as typeof fetch;
+    const inner = provider(f, { locks: never, lock: 'none' }).p;
+    expect((await inner.fetchKey()).epoch).toBe(3); // no nested request, so no deadlock
+    const frozen = provider(f, { locks: never, lockTimeoutMs: 30 }).p;
+    const err = (await frozen.fetchKey().catch((e: unknown) => e)) as ProctorKeyError;
+    expect(err.kind).toBe('UNAVAILABLE');
+  });
+
+  it('S-b: a failed read of the store before the lock is "unknown": a stored key is only taken when it is of the expected epoch', async () => {
+    const store = newStore();
+    const key = await importSessionKey(KEY2_B64);
+    await new IdbKeyStore(store).put('sess', { key, epoch: 1 });
+    let reads = 0;
+    const flaky: KeyStore = {
+      get: (sid) =>
+        ++reads === 1 ? Promise.reject(new Error('idb')) : new IdbKeyStore(store).get(sid),
+      put: (sid, v) => new IdbKeyStore(store).put(sid, v),
+      delete: (sid) => new IdbKeyStore(store).delete(sid),
+    };
+    const fetchFn = vi.fn(() => Promise.resolve(reply(200, keyBody({ keyEpoch: 7 }))));
+    const { p } = provider(fetchFn, { store: flaky });
+    const r = await p.fetchKey(); // no expected epoch: the old row must not be taken
+    expect(r.source).toBe('NETWORK');
+    expect(r.epoch).toBe(7);
+    reads = 0;
+    const fetch2 = vi.fn();
+    const q = provider(fetch2, { store: flaky }).p;
+    await new IdbKeyStore(store).put('sess', { key, epoch: 7 });
+    const r2 = await q.fetchKey(7); // expected epoch matches the stored row
+    expect(r2.source).toBe('STORE');
+    expect(fetch2).not.toHaveBeenCalled();
+  });
+
+  it('S-d: if removing the row after a raced put throws, it is retried and no storage failure is reported', async () => {
+    const real = newStore();
+    const inner = new IdbKeyStore(real);
+    let deletes = 0;
+    const gate = (() => {
+      let r!: () => void;
+      const promise = new Promise<void>((x) => (r = x));
+      return { promise, release: r };
+    })();
+    const store: KeyStore = {
+      get: (sid) => inner.get(sid),
+      put: async (sid, v) => {
+        await gate.promise;
+        return inner.put(sid, v);
+      },
+      delete: async (sid) => {
+        if (++deletes === 1) throw new Error('flaky');
+        return inner.delete(sid);
+      },
+    };
+    let unavailable = 0;
+    const { p } = provider(() => Promise.resolve(reply(200, keyBody())), {
+      store,
+      onStorageUnavailable: () => unavailable++,
+    });
+    const pending = p.fetchKey();
+    await new Promise((r) => setTimeout(r, 30)); // the put is waiting on the gate
+    // forget() bumps the generation, its own delete is the first (failing) one
+    const forgetting = p.forget().catch(() => undefined);
+    gate.release();
+    const res = await pending;
+    await forgetting;
+    expect(res.persisted).toBe(false);
+    expect(unavailable).toBe(0);
+    expect(await real.get(STORES.meta, hmacKeyName('sess'))).toBeUndefined();
   });
 
   it('a getToken() that throws is final (UNAUTHENTICATED), not retried', async () => {
