@@ -1,6 +1,6 @@
 # Owner decision sheet: compliance items for the pilot
 
-Status: **DRAFT for owner decision.** Prepared 2026-10-09 by the compliance reviewer for the Delivery Lead to put to the owner (Harsh Trivedi). One line per decision: the question, my recommendation, and what it unlocks. The reasoning is in [review-2026-10-06.md](review-2026-10-06.md) (section references B1 to S10, M1) and [review-2026-10-08-optional-2fa-and-demo-consent.md](review-2026-10-08-optional-2fa-and-demo-consent.md). IDs C-36 to C-42 are proposed and become real only when the owner decides and the Delivery Lead records them in [decisions.md](decisions.md). The drafts of consent v0.5, retention schedule v0.4 and the privacy notice apply these recommendations and say so; if you decide differently, they change.
+Status: **Accepted by the owner on 2026-10-09, see decisions.md (D-81).** Every recommendation below was accepted (S4: the 4-year option; M1: own hiring only), recorded as C-36 to C-42, the C-02 amendment and C-67 to C-69. Prepared 2026-10-09 by the compliance reviewer for the Delivery Lead to put to the owner (Harsh Trivedi). One line per decision: the question, the recommendation, and what it unlocks. The reasoning is in [review-2026-10-06.md](review-2026-10-06.md) (section references B1 to S10, M1) and [review-2026-10-08-optional-2fa-and-demo-consent.md](review-2026-10-08-optional-2fa-and-demo-consent.md). This file is kept as the record of what was asked; the IDs C-36 to C-42 are the decisions in [decisions.md](decisions.md). The drafts of consent v0.5, retention schedule v0.6 and the privacy notice apply these decisions.
 
 ## A. Decisions that block the first real candidate
 
@@ -47,7 +47,7 @@ Status: **DRAFT for owner decision.** Prepared 2026-10-09 by the compliance revi
 | **M1** | Is the pilot Rysun's own hiring only? | **Yes.** If any other organisation's candidates are tested, Rysun becomes a processor and the consent text is wrong | The controller statements in every document |
 | **Fill-ins** | Real privacy email, company address, recruiter contact | The owner supplies them. `privacy@example.com` is blocked by the consent guard | Consent approval |
 | **C-15 / R-17** | Professional legal review | **Before production, and ideally before the first real EU/UK or Illinois candidate.** I prepare the review pack | Production |
-| **Backups (new)** | Backups can hold a face image for up to 14 days after its 90-day deletion, and longer if backups stall (C-55, C-59). Accept this and state it in the consent and schedule? | **Yes, state it.** BIPA's outer limit is the earlier of the purpose ending or 3 years, so it is lawful. Consent says "90 days, plus up to 14 days while backups rotate" | The wording in consent v0.5 and retention v0.4 |
+| **Backups (new)** | Backups can hold a face image for up to 14 days after its 90-day deletion, and longer if backups stall (C-55, C-59). Accept this and state it in the consent and schedule? | **Yes, state it.** BIPA's outer limit is the earlier of the purpose ending or 3 years, so this appears lawful, pending counsel review (C-15). Consent says "90 days, plus up to 14 days while backups rotate" | The wording in consent v0.5 and retention v0.4 |
 
 ## What happens after you decide
 
