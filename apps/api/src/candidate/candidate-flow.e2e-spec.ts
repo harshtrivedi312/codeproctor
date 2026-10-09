@@ -24,10 +24,14 @@ const API = '/api/v1/candidate';
 
 class FakeMail extends CandidateMailPort {
   readonly copies: Array<ConsentCopyMail & { to: string }> = [];
-  sendOtp(_to: string, _mail: OtpMail): Promise<void> {
+  readonly otps: Array<OtpMail & { to: string }> = [];
+  readonly lockouts: Array<OtpLockoutMail & { to: string }> = [];
+  sendOtp(to: string, mail: OtpMail): Promise<void> {
+    this.otps.push({ ...mail, to });
     return Promise.resolve();
   }
-  sendOtpLockout(_to: string, _mail: OtpLockoutMail): Promise<void> {
+  sendOtpLockout(to: string, mail: OtpLockoutMail): Promise<void> {
+    this.lockouts.push({ ...mail, to });
     return Promise.resolve();
   }
   sendConsentCopy(to: string, mail: ConsentCopyMail): Promise<void> {
@@ -146,9 +150,8 @@ describe('Candidate flow end to end (D-84; FR-106, FR-301, FR-401, FR-402, FR-50
   });
 
   const call = (method: 'get' | 'post' | 'put', path: string, token: string, body?: object) => {
-    const req = request(app.getHttpServer())
-      [method](`${API}${path}`)
-      .set('Authorization', `Bearer ${token}`);
+    const agent = request(app.getHttpServer());
+    const req = agent[method](`${API}${path}`).set('Authorization', `Bearer ${token}`);
     return method === 'get' ? req : req.send(body ?? {});
   };
   const sessionRow = (id: string) => owner.session.findUniqueOrThrow({ where: { id } });
