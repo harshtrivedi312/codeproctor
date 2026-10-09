@@ -12,7 +12,7 @@ Owner: qa-engineer (QA B). Run 2026-10-09. Plan: docs/qa/redteam-plan.md (sectio
 | Deviation from plan rule 1 | rule 1 says staging only, after DEP-01. This run is local, on the owner's request, with the Delivery Lead's approval (message above) |
 | Outcomes | the plan has three outcomes (Blocked, Detected, Undetected). This document adds Not testable (route absent), Blocked-by-env (needs something this run did not have) and Out of scope. The extra three apply only to this dry run, not to the QA-02 report |
 | Data | synthetic demo seed only (Demo Corp, one organisation) |
-| What the run changed | not "nothing": the three staff logins each created a login session (refresh token and audit rows) and the wrong-password call added one to the failed-login count of the demo recruiter. The helper was run three times (a first run and two re-runs after review): the totals below are the final run; each run did the same calls. Everything else was a read, a rejected write or an unknown id |
+| What the run changed | not "nothing": the three staff logins each created a login session (refresh token and audit rows) and the wrong-password call added one to the failed-login count of the demo recruiter. The helper was run four times: a first run (before the events and keystrokes probes existed in it), two re-runs after review, and a final run on the pushed commit. The totals in section 2 are from the final run only; earlier runs differed (the first run had 4 fewer calls, because the events and keystrokes probes came later). Summed over all four runs: `/auth/login` 16 calls (12 successful, 4 wrong-password, spread over more than 60 s between runs, under the 10 a minute limit), `/candidate/session/link` 28 plus one hand-made curl, `/otp` 4, `/start` 4. Everything else was a read, a rejected write or an unknown id |
 | Not done | no start, stop or reset of the stack; no database access (no psql, no Adminer, no seed script); no candidate token existed; the owner's demo link was not used |
 | Secrets | none recorded. The helper prints route, status and problem `code` only (and a few booleans that compare answers) |
 | Rate limits | no 429 in any run; no limit probed more than 10 times. The helper ends the run at the first 429 from any call |
@@ -30,7 +30,7 @@ Final run: 56 calls, all as the docs expect. 3 are setup (the staff logins), 53 
 | Undetected | 0 | 0 |
 | Blocked-by-env (not attempted) | 18: RT-01, 02, 03, 04, 06, 07, 10, 11, 13, 14, 55a, 55b, 60, 61, 65, 67, 69, 70 | 0 |
 | Not testable (route absent) | 2: RT-66, RT-71 | 0 |
-| Out of scope | RT-72 to RT-74, RT-20 to RT-47, RT-50 to RT-54, RT-56 | 0 |
+| Out of scope | RT-09, RT-12, RT-72 to RT-74, RT-20 to RT-47, RT-50 to RT-54, RT-56 | 0 |
 
 The six Blocked rows are partial: what they leave over is in 3.3. No finding, no blocker.
 
@@ -59,7 +59,7 @@ The six Blocked rows are partial: what they leave over is in 3.3. No finding, no
 
 | RT | Reason (checked by listing every `@Controller` in `apps/api/src`) |
 | --- | --- |
-| RT-66 | no report, score, verdict, export or webhook route exists; the review controller has only `queue`, `sessions/:id` and the recording playback |
+| RT-66 (staff half) | no report, score, verdict, export or webhook route exists; the review controller has only `queue`, `sessions/:id` and the recording playback. The candidate half (the state route masks review statuses as SUBMITTED, Q17, C-28) is Blocked-by-env: it needs a candidate token |
 | RT-71 | no Socket.IO gateway or `@SubscribeMessage` in `apps/api/src` (only the BE-08 README mentions one as future) |
 
 ### 3.3 Blocked-by-env: not run, and what each attempted row left over
@@ -83,7 +83,7 @@ Why: no candidate token. The only source of one is the seeded invitation (`node 
 
 ### 3.4 Out of scope for this dry run
 
-RT-72 (browser XSS), RT-73 (Judge0), RT-74 (webhooks), and the browser, device and camera rows RT-20 to RT-47, RT-50 to RT-54 and RT-56 (round 2: need browsers, OBS, cameras).
+RT-72 (browser XSS), RT-73 (Judge0), RT-74 (webhooks), RT-09 (key extraction from the page: browser) and RT-12 (dropping requests at a proxy: proxy and browser), and the browser, device and camera rows RT-20 to RT-47, RT-50 to RT-54 and RT-56 (round 2: need browsers, OBS, cameras).
 
 ## 4. The candidate half of the helper (unverified)
 
@@ -95,7 +95,7 @@ RT_CANDIDATE_URL='http://localhost:3000/t/<token>' RT_CANDIDATE_EMAIL='<address>
   node packages/qa/redteam/round1-local.mjs
 ```
 
-What it does: requests the code, polls Mailpit for the newest message to that address that arrived after the request (it submits nothing if none arrives), and refuses to start if a previous run left a wrong-code attempt less than 30 minutes ago. It then makes one wrong-code check, signs in with the right code, replays the used code, and tries the RT-69 rows that need no consent (test start, presigns, run, heartbeat, proctor-key before start). For the 18+ control (C-30) it first reads the consent document for `consentTextId`, then sends a body with `consentTextId`, `signedName` and varies only `confirmedAge18` (missing, then false), expecting 400 and checking that the answer names `confirmedAge18`. The decline rows (decline, sign after decline expecting 409, test start after decline) run only with `RT_ALLOW_DECLINE=1`.
+What it does: requests the code, polls Mailpit for the newest message to that address that arrived after the request (it submits nothing if none arrives), and refuses to start if a previous run left a wrong-code attempt less than 30 minutes ago. It then makes one wrong-code check, signs in with the right code, replays the used code, and tries the RT-69 rows that need no consent (test start, presigns, run, heartbeat, proctor-key before start). For the 18+ control (C-30) it first reads the consent document for `consentTextId`, then sends a body with `consentTextId`, `signedName` and varies only `confirmedAge18` (missing, then false), expecting 400 for each. SAME needs more than the status: the missing case must carry an `errors[]` entry starting with `confirmedAge18` (the DTO validation), and the false case must carry the problem `code` `AGE_CONFIRMATION_REQUIRED` (it passes the boolean check and is refused by the consent service, so its text does not name the field). These assertions are unrun and unverified. The decline rows (decline, sign after decline expecting 409, test start after decline) run only with `RT_ALLOW_DECLINE=1`.
 
 Side effects on the owner's stack, to know before running it:
 

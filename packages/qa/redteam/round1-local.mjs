@@ -45,8 +45,9 @@ function summary() {
     `\n${results.length} calls, ${results.length - diffs.length} as expected, ${diffs.length} different.`,
   );
 }
-function record(id, method, expected, r) {
-  const ok = expected.includes(r.status);
+// `check` (optional) decides SAME or DIFF instead of the status list alone.
+function record(id, method, expected, r, check) {
+  const ok = check === undefined ? expected.includes(r.status) : check(r);
   results.push({ id, method, status: r.status, code: r.code ?? '-', ok });
   console.log(
     `${ok ? 'SAME ' : 'DIFF '} ${id} | ${method} | ${r.status} ${r.code ?? '-'} | expected ${expected.join('|')}`,
@@ -439,12 +440,25 @@ async function candidateHalf() {
   if (consentTextId === undefined) return;
   const sign = (extra) =>
     post('/candidate/session/consent/sign', { consentTextId, signedName: 'Avery Stone', ...extra });
-  const missing = await sign({});
-  record('RT-69', 'consent/sign, confirmedAge18 missing', [400], missing);
-  console.log(`      400 names confirmedAge18: ${missing.has('confirmedAge18')}`);
-  const falsy = await sign({ confirmedAge18: false });
-  record('RT-69', 'consent/sign, confirmedAge18 false', [400], falsy);
-  console.log(`      answer names confirmedAge18: ${falsy.has('confirmedAge18')}`);
+  // Missing flag: the DTO validation answers 400 with errors[] naming the field (problem.filter.ts).
+  record(
+    'RT-69',
+    'consent/sign, confirmedAge18 missing',
+    [400],
+    await sign({}),
+    (r) =>
+      r.status === 400 &&
+      Array.isArray(r.json?.errors) &&
+      r.json.errors.some((e) => String(e).startsWith('confirmedAge18')),
+  );
+  // False flag: passes the boolean check; the service refuses with code AGE_CONFIRMATION_REQUIRED.
+  record(
+    'RT-69',
+    'consent/sign, confirmedAge18 false',
+    [400],
+    await sign({ confirmedAge18: false }),
+    (r) => r.status === 400 && r.json?.code === 'AGE_CONFIRMATION_REQUIRED',
+  );
   // Decline is final for the invitation: only with RT_ALLOW_DECLINE=1.
   if (process.env.RT_ALLOW_DECLINE === '1') {
     record(
