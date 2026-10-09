@@ -2,7 +2,7 @@
 // verify-session, test start, render, draft, run (local stub), submit, section finish, finish,
 // heartbeat and the pause write gate. Real Postgres, real Redis, real queues; only the mail port,
 // object storage and the Judge0 client (the local stub, as in development) are fakes.
-// FR-106, FR-301, FR-401, FR-402, FR-502, FR-504..FR-506, FR-609, DL-58, TC-024, TC-040.
+// FR-106, FR-301, FR-401, FR-402, FR-502, FR-504..FR-506, FR-609, DL-17, DL-58, TC-040, TC-056.
 import { INestApplication } from '@nestjs/common';
 import { RedisContainer, StartedRedisContainer } from '@testcontainers/redis';
 import { Redis } from 'ioredis';
@@ -48,7 +48,8 @@ async function eventually<T>(
   const deadline = Date.now() + ms;
   for (;;) {
     const value = await read();
-    if (done(value) || Date.now() > deadline) return value;
+    if (done(value)) return value;
+    if (Date.now() > deadline) throw new Error('eventually: the condition was not met in time');
     await new Promise((r) => setTimeout(r, 150));
   }
 }
@@ -156,7 +157,7 @@ describe('Candidate flow end to end (D-84; FR-106, FR-301, FR-401, FR-402, FR-50
   };
   const sessionRow = (id: string) => owner.session.findUniqueOrThrow({ where: { id } });
 
-  it('a candidate goes from OPENED to SUBMITTED through every step of the API, with the local stub', async () => {
+  it('FR-106, FR-401, FR-402, TC-056, FR-301, FR-502, TC-040, DL-58, DL-17, FR-609, FR-505: a candidate goes from OPENED to SUBMITTED through every step of the API, with the local stub', async () => {
     const inv = await createInvitation(owner, tenant, {
       status: 'OPENED',
       session: { authEpoch: 1 },
@@ -167,7 +168,7 @@ describe('Candidate flow end to end (D-84; FR-106, FR-301, FR-401, FR-402, FR-50
     const state0 = await call('get', '/session', token).expect(200);
     expect(state0.body).toMatchObject({ status: 'OPENED' });
 
-    // Consent: read, accommodations projection is not needed here; sign with the typed name.
+    // Consent: read the document, sign with the typed full legal name.
     const consent = await call('get', '/session/consent', token).expect(200);
     const signed = await call('post', '/session/consent/sign', token, {
       consentTextId: (consent.body as { consentTextId: string }).consentTextId,
@@ -227,9 +228,8 @@ describe('Candidate flow end to end (D-84; FR-106, FR-301, FR-401, FR-402, FR-50
     }
     // A question of a section that has not opened is refused.
     const later = layout.sections[1]?.questions[0];
-    if (later !== undefined) {
-      await call('get', `/questions/${later.sessionQuestionId}`, token).expect(409);
-    }
+    expect(later).toBeDefined();
+    await call('get', `/questions/${later?.sessionQuestionId}`, token).expect(409);
 
     // Draft, run (the local stub: nothing runs and it says so), submit.
     const first = open?.questions[0]?.sessionQuestionId as string;
@@ -241,40 +241,65 @@ describe('Candidate flow end to end (D-84; FR-106, FR-301, FR-401, FR-402, FR-50
       code: 'print(42)',
       language: 'python',
     }).expect(200);
-    expect(JSON.stringify(run.body)).toMatch(/stub/i);
-    expect(JSON.stringify(run.body)).not.toMatch(/"passed":\s*true|"status":\s*"passed"/);
-    await call('post', `/answers/${first}/submit`, token, {
+    const results = (run.body as { results: Array<Record<string, unknown>> }).results;
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ verdict: 'LOCAL_STUB', passed: false });
+    expect(String(results[0]?.message)).toMatch(/stub/i);
+    expect(run.body).toMatchObject({ passed: 0, total: 1 });
+    const submitted = await call('post', `/answers/${first}/submit`, token, {
       code: 'print(42)',
       language: 'python',
     }).expect(200);
+    expect(submitted.body).toMatchObject({ accepted: true });
+    expect((submitted.body as { submissionId?: string }).submissionId).toBeDefined();
 
     // Heartbeat while running.
     await call('post', '/session/heartbeat', token, {}).expect(200);
 
-    // Finish the first section; the next one opens when the job runs.
+    // Finish the first section; the next one opens when the job runs (the wait fails if it never does).
     await call('post', '/session/section/finish', token, { position: 1 }).expect(202);
-    await eventually(
+    const after = await eventually(
       async () =>
         (await call('get', '/session/test', token)).body as {
-          sections: Array<{ position: number; startedAt: string | null }>;
+          sections: Array<{
+            position: number;
+            startedAt: string | null;
+            questions: Array<{ sessionQuestionId: string }>;
+          }>;
         },
       (b) => b.sections.some((s) => s.position === 2 && s.startedAt !== null),
     );
+    const second = after.sections.find((s) => s.position === 2)?.questions[0]?.sessionQuestionId;
+    expect(second).toBeDefined();
+    // The first section is closed: its questions are refused, the second one's are served.
+    const closed = await call('put', `/answers/${first}/draft`, token, {
+      code: 'print(0)',
+      language: 'python',
+    }).expect(409);
+    expect(closed.body).toMatchObject({ code: 'SECTION_NOT_OPEN' });
+    await call('get', `/questions/${second}`, token).expect(200);
 
-    // The pause write gate: a proctor pause refuses a write with 409 and reads still work.
+    // The pause write gate (DL-17): a PROCTOR pause (set directly here; the proctor routes are covered
+    // elsewhere) refuses a write to the OPEN section with SESSION_PAUSED and still serves reads;
+    // after the resume the same write is accepted.
     await owner.session.update({
       where: { id: inv.sessionId },
       data: { status: 'PAUSED', pauseReasons: ['PROCTOR'], proctorPausedAt: new Date() },
     });
-    await call('put', `/answers/${first}/draft`, token, {
+    const refused = await call('put', `/answers/${second}/draft`, token, {
       code: 'print(1)',
       language: 'python',
     }).expect(409);
-    await call('get', '/session/test', token).expect(200);
+    expect(refused.body).toMatchObject({ code: 'SESSION_PAUSED' });
+    await call('get', `/questions/${second}`, token).expect(200);
     await owner.session.update({
       where: { id: inv.sessionId },
       data: { status: 'IN_PROGRESS', pauseReasons: [], proctorPausedAt: null },
     });
+    await call('put', `/answers/${second}/draft`, token, {
+      code: 'print(1)',
+      language: 'python',
+    }).expect(200);
 
     // Finish: SUBMITTED, idempotent, and the candidate-visible status is SUBMITTED.
     const done = await call('post', '/session/finish', token).expect(200);
