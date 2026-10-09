@@ -5,6 +5,7 @@ import { CloseSectionService } from './close-section.service';
 import { GradeSessionService } from './grade-session.service';
 import { GradingQueue } from './grading-queue';
 import { GradingWorker } from './grading-worker';
+import { OptionIdService } from './option-ids';
 import { ManualScoringService } from './manual-scoring.service';
 import { SubmitFlowService } from './submit-flow.service';
 
@@ -19,7 +20,14 @@ import { SubmitFlowService } from './submit-flow.service';
     GradeSessionService,
     ManualScoringService,
     GradingWorker,
+    OptionIdService,
   ],
-  exports: [GradingQueue, SubmitFlowService, ManualScoringService, GradeSessionService],
+  exports: [
+    GradingQueue,
+    SubmitFlowService,
+    ManualScoringService,
+    GradeSessionService,
+    OptionIdService,
+  ],
 })
 export class GradingModule {}

@@ -45,6 +45,7 @@ import { systemCheckBodySchema } from './system-check.schema';
 import type { SystemCheckResult } from './system-check.schema';
 import { SystemCheckService } from './system-check.service';
 import { TestStartService } from './test-start.service';
+import type { TestStartView } from './test-start.service';
 import { HEARTBEAT_LIMIT_PER_MINUTE } from './candidate-session.service';
 
 const NO_STORE = 'no-store';
@@ -57,6 +58,21 @@ function stateDto(view: SessionStateView): SessionStateDto {
     deadlineAt: view.deadlineAt?.toISOString() ?? null,
     sectionDeadlineAt: view.sectionDeadlineAt?.toISOString() ?? null,
     pauseReasons: [...view.pauseReasons],
+  };
+}
+
+function startedDto(view: TestStartView): TestStartedDto {
+  return {
+    status: view.status,
+    serverTime: view.serverTime.toISOString(),
+    startedAt: view.startedAt.toISOString(),
+    deadlineAt: view.deadlineAt.toISOString(),
+    sections: view.sections.map((s) => ({
+      ...s,
+      startedAt: s.startedAt?.toISOString() ?? null,
+      deadlineAt: s.deadlineAt?.toISOString() ?? null,
+      questions: [...s.questions],
+    })),
   };
 }
 
@@ -184,6 +200,21 @@ export class CandidateSessionController {
     }
   }
 
+  @CandidateRoute('candidate_session:read')
+  @Get('test')
+  @Header('Cache-Control', NO_STORE)
+  @ApiOperation({
+    summary: "The running test's layout: sections, question ids, points and deadlines (FR-301)",
+    description:
+      'The same outline POST test/start returns, for a reload or a resume. No question content: read each question with GET /candidate/questions/:id. Only a running (IN_PROGRESS or PAUSED) session has one.',
+  })
+  @ApiOkResponse({ type: TestStartedDto })
+  @ApiConflictResponse({ description: 'SESSION_NOT_ACTIVE' })
+  async testLayout(@Candidate() ctx: CandidateContext): Promise<TestStartedDto> {
+    await this.limiter.hit('test-layout', ctx.sessionId, 60, 60);
+    return startedDto(await this.testStart.layout(ctx));
+  }
+
   @CandidateRoute('candidate_session:start')
   @Post('test/start')
   @HttpCode(200)
@@ -202,18 +233,7 @@ export class CandidateSessionController {
     const view = await this.limiter.guarded('test-start', ctx.sessionId, 6, 60, () =>
       this.testStart.start(ctx),
     );
-    return {
-      status: view.status,
-      serverTime: view.serverTime.toISOString(),
-      startedAt: view.startedAt.toISOString(),
-      deadlineAt: view.deadlineAt.toISOString(),
-      sections: view.sections.map((s) => ({
-        ...s,
-        startedAt: s.startedAt?.toISOString() ?? null,
-        deadlineAt: s.deadlineAt?.toISOString() ?? null,
-        questions: [...s.questions],
-      })),
-    };
+    return startedDto(view);
   }
 
   @CandidateRoute('candidate_session:heartbeat')

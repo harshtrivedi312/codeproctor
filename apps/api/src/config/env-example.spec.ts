@@ -73,6 +73,7 @@ describe('.env.example (DL-52, NFR-04)', () => {
           'COOKIE_SECRET',
           'JWT_CANDIDATE_SECRET',
           'OTP_PEPPER',
+          'QUESTION_OPTION_ID_SECRET',
           'ENCRYPTION_KEY',
           `SESSION_KEY_ENC_KEY_${kid}`,
         ];
@@ -114,6 +115,7 @@ describe('.env.example (DL-52, NFR-04)', () => {
       'COOKIE_SECRET',
       'JWT_CANDIDATE_SECRET',
       'OTP_PEPPER',
+      'QUESTION_OPTION_ID_SECRET',
     ]) {
       expect(active[name]).toMatch(/^change-me/);
     }

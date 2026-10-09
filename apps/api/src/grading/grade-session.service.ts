@@ -35,6 +35,7 @@ import {
   toHundredths,
 } from './scoring';
 import { isLocalStub, LOCAL_STUB_NOTE } from './local-stub';
+import { OptionIdService } from './option-ids';
 import { loadCases } from './test-data';
 
 export { GradingInvariantError };
@@ -99,6 +100,7 @@ export class GradeSessionService {
     private readonly execution: ExecutionService,
     private readonly closeSection: CloseSectionService,
     private readonly queue: GradingQueue,
+    private readonly optionIds: OptionIdService,
   ) {}
 
   /** Call from no scope (a job callback). */
@@ -221,7 +223,7 @@ export class GradeSessionService {
     if (q.type === 'MCQ') {
       const spec = mcqAnswerSpecSchema.safeParse(q.answerSpec);
       if (!spec.success) throw new GradingInvariantError('An MCQ question has no valid answer key');
-      const right = mcqCorrect(spec.data, q.answer, sessionId);
+      const right = mcqCorrect(spec.data, q.answer, (id) => this.optionIds.of(sessionId, id));
       return { sessionQuestionId: q.id, score: right ? q.points : 0n, scoring: 'AUTO' };
     }
     if (q.type === 'SHORT_ANSWER') {
