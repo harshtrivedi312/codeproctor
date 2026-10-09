@@ -125,6 +125,52 @@ describe('run results from the answers route (FR-502, DL-58)', () => {
     expect(view.tests.map((t) => t.name)).toEqual(['Sample 1']);
   });
 
+  it("TC-040 FR-502: when the runner failed for every sample that is not the candidate's failure: one message, no rows, no 0 of N", () => {
+    const view = toRunView({
+      ...base,
+      passed: 0,
+      total: 2,
+      results: [
+        sample(1, {
+          verdict: 'INTERNAL_ERROR',
+          passed: false,
+          message: 'The code could not be run. Try again.',
+        }),
+        sample(2, {
+          verdict: 'INTERNAL_ERROR',
+          passed: false,
+          message: 'The code could not be run. Try again.',
+        }),
+      ],
+    });
+    expect(view).toMatchObject({
+      outcome: 'runtime_error',
+      tests: [],
+      stderr: 'The code could not be run. Try again.',
+    });
+  });
+
+  it('TC-040 FR-502: one internal error among real results stays a failed row', () => {
+    const view = toRunView({
+      ...base,
+      passed: 1,
+      total: 2,
+      results: [sample(1), sample(2, { verdict: 'INTERNAL_ERROR', passed: false })],
+    });
+    expect(view.tests.map((t) => t.status)).toEqual(['passed', 'failed']);
+    expect(view.tests[1]?.actualOutput).toBe('The code could not be run. Try again.');
+  });
+
+  it('FR-502: a failed sample with no output says so', () => {
+    const view = toRunView({
+      ...base,
+      passed: 0,
+      total: 1,
+      results: [sample(1, { verdict: 'FAILED', passed: false, stdout: '' })],
+    });
+    expect(view.tests[0]?.actualOutput).toBe('(no output)');
+  });
+
   it('FR-502: a truncated output says it was cut short', () => {
     const view = toRunView({
       ...base,
@@ -179,6 +225,10 @@ describe('output panel (FR-502, DL-58, NFR-06)', () => {
       /local stub, not real execution/i,
     );
     expect(document.body.textContent).not.toMatch(/passed|failed|\d+ of \d+/i);
+    // One announcement: the notice sits in the panel's own live region and is not a second one,
+    // and the API's message (the same sentence) is not repeated for screen readers.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/local stub, not real execution/i)).toHaveLength(1);
   });
 
   it('FR-502: a real run has no stub notice', () => {

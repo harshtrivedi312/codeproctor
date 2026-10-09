@@ -33,15 +33,17 @@ export function OutputPanel({
       {!running && result && (
         <div className="space-y-3">
           {result.stub === true && (
+            // The section is already a polite live region: this is not a second one.
             <p
-              role="status"
               data-testid="run-stub-notice"
               className="rounded-md border border-dashed p-3 font-medium"
             >
               {/* Nothing ran: this is neither a pass nor a fail (DL-58). */}
               Local stub, not real execution. Your code was not run and nothing was checked against
               the sample tests.
-              <span className="sr-only"> ({result.message ?? LOCAL_STUB_LABEL})</span>
+              {result.message && result.message !== LOCAL_STUB_LABEL ? (
+                <span className="sr-only"> ({result.message})</span>
+              ) : null}
             </p>
           )}
           {result.stub !== true && result.outcome !== 'completed' && (

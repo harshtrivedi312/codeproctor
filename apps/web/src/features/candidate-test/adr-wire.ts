@@ -145,6 +145,16 @@ export const runResultDtoSchema = z.object({
 });
 type RunDto = z.infer<typeof runResultDtoSchema>;
 
+/** The API's own sentences for a sample that did not pass (execution.service.ts MESSAGES). */
+const NOT_A_PASS_TEXT: Record<string, string> = {
+  COMPILE_ERROR: 'The code did not compile.',
+  TIME_LIMIT: 'Time limit exceeded.',
+  MEMORY_LIMIT: 'Memory limit exceeded.',
+  OUTPUT_LIMIT: 'Output limit exceeded.',
+  RUNTIME_ERROR: 'The program crashed while running.',
+  INTERNAL_ERROR: 'The code could not be run. Try again.',
+};
+
 /**
  * Maps the real run response to what the output panel shows. Pure; tested.
  *
@@ -170,14 +180,19 @@ export function toRunView(dto: RunDto): z.infer<typeof runResultSchema> {
       message: rs[0]?.message ?? LOCAL_STUB_LABEL,
     };
   }
-  const NOT_A_PASS_TEXT: Record<string, string> = {
-    COMPILE_ERROR: 'The code did not compile.',
-    RUNTIME_ERROR: 'The program crashed.',
-    TIME_LIMIT: 'Time limit exceeded.',
-    MEMORY_LIMIT: 'Memory limit exceeded.',
-    OUTPUT_LIMIT: 'Output limit exceeded.',
-    INTERNAL_ERROR: 'The run could not be completed. Try again.',
-  };
+  // The code could not be run at all (the runner failed for every sample): that is not the
+  // candidate's failure, so no rows and no "0 of N".
+  if (ran.length > 0 && ran.every((r) => r.verdict === 'INTERNAL_ERROR')) {
+    return {
+      outcome: 'runtime_error',
+      tests: [],
+      stdout: '',
+      stderr:
+        ran[0]?.message ??
+        NOT_A_PASS_TEXT.INTERNAL_ERROR ??
+        'The code could not be run. Try again.',
+    };
+  }
   const tests = ran.map((r) => {
     // The verdict decides, never the `passed` flag alone: only PASSED is a pass.
     const status = r.verdict === 'PASSED' ? ('passed' as const) : ('failed' as const);
@@ -190,7 +205,9 @@ export function toRunView(dto: RunDto): z.infer<typeof runResultSchema> {
         ? undefined
         : r.stdoutTruncated
           ? `${r.stdout}\n(output cut short)`
-          : r.stdout;
+          : r.stdout === ''
+            ? '(no output)'
+            : r.stdout;
     return {
       id: `sample-${r.index}`,
       name: `Sample ${r.index}`,
@@ -211,7 +228,7 @@ export function toRunView(dto: RunDto): z.infer<typeof runResultSchema> {
         outcome: 'compile_error',
         tests: [],
         stdout: '',
-        stderr: compile.message ?? NOT_A_PASS_TEXT.COMPILE_ERROR ?? '',
+        stderr: compile.message ?? NOT_A_PASS_TEXT.COMPILE_ERROR ?? 'The code did not compile.',
       }
     : { outcome: 'completed', tests, stdout: printedPassing, stderr: '' };
   // Some samples did not run on the local stub: say so, and never count them.
