@@ -56,6 +56,50 @@ describe('phone step on the computer (FR-405)', () => {
     expect(known).toHaveBeenCalledWith(false);
   });
 
+  it('FR-405: when the server has no side-camera route (404) the step moves on and asks for nothing', async () => {
+    await signIn(MOCK_TOKENS.consented);
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/side-camera`, () =>
+        HttpResponse.json({ code: 'NOT_FOUND' }, { status: 404 }),
+      ),
+    );
+    const onDone = vi.fn();
+    const known = vi.fn();
+    renderWithQuery(<PhoneStep onDone={onDone} onRequiredKnown={known} onSessionEnded={vi.fn()} />);
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+    expect(known).toHaveBeenCalledWith(false);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('FR-405: a server error (500) or a network error still shows the retry, not a silent skip', async () => {
+    await signIn(MOCK_TOKENS.consented);
+    for (const answer of [
+      () => HttpResponse.json({ code: 'INTERNAL' }, { status: 500 }),
+      () => HttpResponse.error(),
+    ]) {
+      server.use(http.get(`${apiBaseUrl}/v1/candidate/session/side-camera`, answer));
+      const onDone = vi.fn();
+      const view = renderWithQuery(<PhoneStep onDone={onDone} onSessionEnded={vi.fn()} />);
+      expect(await screen.findByRole('button', { name: /try again/i })).toBeInTheDocument();
+      expect(onDone).not.toHaveBeenCalled();
+      view.unmount();
+    }
+  });
+
+  it('FR-405: a 401 on the status call still ends the session', async () => {
+    await signIn(MOCK_TOKENS.consented);
+    server.use(
+      http.get(`${apiBaseUrl}/v1/candidate/session/side-camera`, () =>
+        HttpResponse.json({ code: 'UNAUTHENTICATED' }, { status: 401 }),
+      ),
+    );
+    const onDone = vi.fn();
+    const ended = vi.fn();
+    renderWithQuery(<PhoneStep onDone={onDone} onSessionEnded={ended} />);
+    await waitFor(() => expect(ended).toHaveBeenCalled());
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
   it('FR-405: a STRICT test shows a QR code and a text link on request, and waits', async () => {
     await signIn(MOCK_TOKENS.strict);
     const onDone = vi.fn();
