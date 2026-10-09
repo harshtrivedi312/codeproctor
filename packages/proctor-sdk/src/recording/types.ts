@@ -116,6 +116,9 @@ export interface RecorderHealth {
   consecutiveFailures: number;
   droppedChunks: number;
   droppedBytes: number;
+  chunksPendingByStream: Record<RecordingStream, number>;
+  droppedChunksByStream: Record<RecordingStream, number>;
+  droppedBytesByStream: Record<RecordingStream, number>;
   /** True when the last upload attempt failed (offline or server trouble). */
   degraded: boolean;
   bytesPendingByStream: Record<RecordingStream, number>;

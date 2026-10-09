@@ -14,7 +14,15 @@ import {
 import { EventQueue, type EventQueueStats, type EventTransport } from './event-queue';
 import { KeystrokeQueue } from '../keystrokes/keystroke-queue';
 import { KeystrokeRecorder, type UnrepresentableReason } from '../keystrokes/recorder';
+import {
+  FlagReporter,
+  type HeartbeatBody,
+  type HealthSnapshot,
+  type HeartbeatState,
+  type TokenRenewal,
+} from './health';
 import { Heartbeat } from './heartbeat';
+import type { HeartbeatResult } from './transport';
 import { importSessionKey } from './hmac';
 import { IdbStore, STORES } from './idb';
 import { IdbKeyStore, isSigningKey, type KeyStore } from './key-store';
@@ -80,7 +88,7 @@ export interface ProctorSessionConfig {
   /** Nothing touches camera, microphone or screen until this is set (D-17). */
   consent: { recordedAt: string } | null;
   transport: EventTransport & {
-    heartbeat(): Promise<boolean | { ended: EndReason }>;
+    heartbeat(body?: HeartbeatBody): Promise<HeartbeatResult>;
     /**
      * Sends one signed keystroke batch (POST /candidate/session/keystrokes). Without it the session
      * has no keystroke recorder (`session.keystrokes` is null) and says so with the `keystrokes`
@@ -112,6 +120,18 @@ export interface ProctorSessionConfig {
   store?: IdbStore;
   flushIntervalMs?: number;
   heartbeatIntervalMs?: number;
+  /**
+   * Health the app can see and the session cannot (ADR 0013 section 5.3 `getHealth()`): the
+   * recorder block, for example `() => ({ recorder: pipeline.heartbeatHealth() })`. Counts only.
+   */
+  getHealth?: () => HealthSnapshot | null;
+  /**
+   * The server renewed the candidate token on a heartbeat. The SDK passes it through and never
+   * stores or logs it; the app must use it for every later call.
+   */
+  onToken?: (t: TokenRenewal) => void;
+  /** Server state of the latest acknowledged heartbeat (status, deadlines, pause reasons). */
+  onHeartbeat?: (s: HeartbeatState) => void;
   backoffBaseMs?: number;
   /** A detector whose start() takes longer than this is abandoned (default 45 s). */
   detectorStartTimeoutMs?: number;
@@ -177,6 +197,10 @@ export class ProctorSession {
   private keystrokeRecorder: KeystrokeRecorder | null = null;
   private store: IdbStore | null = null;
   private heartbeat: Heartbeat | null = null;
+  private flags: FlagReporter | null = null;
+  /** What each IndexedDB user reports; the single `idb` flag is their worst status (ADR 0013 section 2). */
+  private readonly idbParts = new Map<string, CapabilityFlag>();
+  private idbShown: string | null = null;
   private started: Detector[] = [];
   private metrics: MetricsCollector | null = null;
   private config: ProctorSessionConfig | null = null;
@@ -209,6 +233,7 @@ export class ProctorSession {
   }
 
   private fire<K extends keyof SessionEvents>(name: K, payload: SessionEvents[K]): void {
+    if (name === 'capability') this.flags?.record(payload as CapabilityFlag);
     for (const h of this.handlers[name]) {
       try {
         h(payload);
@@ -223,6 +248,7 @@ export class ProctorSession {
     if (this.config) throw new Error('ProctorSession already started.');
     this.config = config;
     const metrics = (this.metrics = new MetricsCollector());
+    this.flags = new FlagReporter();
     const key =
       config.signingKey?.key ??
       (config.hmacKeyBase64 ? await importSessionKey(config.hmacKeyBase64) : null);
@@ -308,16 +334,14 @@ export class ProctorSession {
           detail:
             'The batch counter could not be read; sequence numbers jump ahead (holes, no collisions).',
         }),
-      onStorageRecovered: () =>
-        this.fire('capability', { id: 'event-storage', status: 'SUPPORTED' }),
+      onStorageRecovered: () => this.setIdb('event', null),
       onStorageDegraded: (reason) =>
-        this.fire('capability', {
-          id: 'event-storage',
-          status: 'UNVERIFIABLE',
+        this.setIdb('event', {
+          status: reason === 'OPEN_FAILED' ? 'UNSUPPORTED' : 'UNVERIFIABLE',
           detail:
             reason === 'OPEN_FAILED'
-              ? 'IndexedDB unavailable: event batches are kept in memory only (a reload loses unsent batches).'
-              : 'IndexedDB writes are failing: event batches are kept in memory only.',
+              ? 'event batches: IndexedDB unavailable'
+              : 'event batches: writes failing',
         }),
     }));
     await queue.start();
@@ -335,18 +359,16 @@ export class ProctorSession {
         ...(config.backoffBaseMs === undefined ? {} : { backoffBaseMs: config.backoffBaseMs }),
         onSeqUntrusted: () =>
           this.fire('capability', {
-            id: 'keystroke-seq',
+            id: 'keystroke-seq-reset',
             status: 'UNVERIFIABLE',
             detail: 'The keystroke batch counter could not be read; sequence numbers jump ahead.',
           }),
         onStorageDegraded: () =>
-          this.fire('capability', {
-            id: 'keystroke-storage',
+          this.setIdb('keystroke', {
             status: 'UNVERIFIABLE',
-            detail: 'IndexedDB problem: keystroke batches are kept in memory only.',
+            detail: 'keystroke batches: IndexedDB problem',
           }),
-        onStorageRecovered: () =>
-          this.fire('capability', { id: 'keystroke-storage', status: 'SUPPORTED' }),
+        onStorageRecovered: () => this.setIdb('keystroke', null),
         onRejected: () => {
           // The server refused a keystroke batch for good: say so (a count, no content).
           this.keystrokeRejected++;
@@ -401,15 +423,30 @@ export class ProctorSession {
 
     // Heartbeat and page listeners first: a slow or hanging detector must not delay them (FR-609).
     this.heartbeat = new Heartbeat(
-      () => {
+      async () => {
         // A live session keeps its retention mark fresh (and so its stored key) through a long
         // outage: another tab's stale sweep must never remove it.
         void this.touch?.touch();
-        return config.transport.heartbeat();
+        const { body, commit } = this.beatBody();
+        const r = await config.transport.heartbeat(body);
+        if (r === true || (typeof r === 'object' && 'ok' in r)) commit(); // acknowledged
+        return r;
       },
       config.heartbeatIntervalMs ?? 10_000,
       (online) => this.fire('connection', { online }),
       (reason) => this.handleEnded(reason, 'heartbeat'),
+      {
+        ...(config.authLostAfter === undefined ? {} : { authLostAfter: config.authLostAfter }),
+        onOk: (r) => {
+          if (r.renewal) config.onToken?.(r.renewal);
+          if (r.state) config.onHeartbeat?.(r.state);
+        },
+        onAuthLost: (code) => {
+          if (this.reauthSignalled) return; // once per episode, not once per route
+          this.reauthSignalled = true;
+          config.onReauthRequired?.(code === 'TOKEN_EXPIRED' ? 'TOKEN_EXPIRED' : 'UNAUTHENTICATED');
+        },
+      },
     );
     this.heartbeat.start();
     globalThis.addEventListener?.('pagehide', this.onPageHide);
@@ -579,11 +616,94 @@ export class ProctorSession {
   }
 
   private fireIdbUnsupported(): void {
+    this.setIdb('key', {
+      status: 'UNSUPPORTED',
+      detail: 'signing key cannot be kept: every reload needs a new sign-in',
+    });
+  }
+
+  /**
+   * One `idb` flag (ADR 0013 section 2) from several users of IndexedDB: UNSUPPORTED if any part
+   * cannot use it at all, UNVERIFIABLE if it only fails to write, SUPPORTED when all recovered.
+   * Parts: event, keystroke, key, recording. Details are reasons only.
+   */
+  private setIdb(
+    part: string,
+    f: { status: CapabilityFlag['status']; detail: string } | null,
+  ): void {
+    if (f) this.idbParts.set(part, { id: 'idb', status: f.status, detail: f.detail });
+    else this.idbParts.delete(part);
+    const flags = [...this.idbParts.values()];
+    const status: CapabilityFlag['status'] =
+      flags.length === 0
+        ? 'SUPPORTED'
+        : flags.some((x) => x.status === 'UNSUPPORTED')
+          ? 'UNSUPPORTED'
+          : 'UNVERIFIABLE';
+    const detail = flags.map((x) => x.detail).join('; ');
+    const shown = `${status}:${detail}`;
+    if (this.idbShown === null && status === 'SUPPORTED') return; // never degraded: nothing to say
+    if (shown === this.idbShown) return;
+    this.idbShown = shown;
     this.fire('capability', {
       id: 'idb',
-      status: 'UNSUPPORTED',
-      detail: 'The signing key cannot be kept in IndexedDB: every page reload needs a new sign-in.',
+      status,
+      ...(detail ? { detail: detail.slice(0, 128) } : {}),
     });
+  }
+
+  /**
+   * The app reports a flag the session cannot see (for example the recording pipeline's
+   * `onCapability`). It is shown to listeners and sent with the next heartbeat. The pipeline's
+   * `recording-storage` flag is folded into the single `idb` flag.
+   */
+  reportCapability(flag: CapabilityFlag): void {
+    if (flag.id === 'recording-storage') {
+      this.setIdb(
+        'recording',
+        flag.status === 'SUPPORTED'
+          ? null
+          : { status: flag.status, detail: 'recording chunks: IndexedDB problem' },
+      );
+      return;
+    }
+    this.capabilities.set(flag.id, flag);
+    this.fire('capability', flag);
+  }
+
+  /**
+   * Reachability probe for the recording pipeline (`probe` option): true when the heartbeat is
+   * getting through. A fresh acknowledged beat answers at once, otherwise one beat is sent now.
+   */
+  async probe(): Promise<boolean> {
+    const hb = this.heartbeat;
+    if (!hb) return false;
+    const fresh =
+      hb.online &&
+      hb.lastOkAt !== null &&
+      Date.now() - hb.lastOkAt < (this.config?.heartbeatIntervalMs ?? 10_000) * 1.5;
+    return fresh ? true : hb.beatNow();
+  }
+
+  /** The body of the next beat: changed flags (or all, every 5 minutes), recorder and queue health. */
+  private beatBody(): { body: HeartbeatBody; commit: () => void } {
+    const body: HeartbeatBody = {};
+    const take = this.flags?.take();
+    if (take && take.flags.length > 0) body.capabilities = take.flags;
+    try {
+      const rec = this.config?.getHealth?.()?.recorder;
+      if (rec) body.recorder = rec;
+    } catch {
+      // a faulty provider must not stop the beat
+    }
+    const ev = this.queue?.stats();
+    const ks = this.keystrokeQueue?.stats();
+    body.queue = {
+      pendingEventBatches: (ev?.unsentBatches ?? 0) + ((ev?.pendingItems ?? 0) ? 1 : 0),
+      pendingKeystrokeBatches: (ks?.unsentBatches ?? 0) + ((ks?.pendingItems ?? 0) ? 1 : 0),
+      rejectedBatches: (ev?.rejectedBatches ?? 0) + (ks?.rejectedBatches ?? 0),
+    };
+    return { body, commit: () => take?.commit() };
   }
 
   /**
@@ -635,6 +755,7 @@ export class ProctorSession {
     this.currentKey = key;
     this.keyGen++;
     this.reauthSignalled = false; // a fresh key comes with a fresh token (OTP resume)
+    this.heartbeat?.resume();
     if (epoch !== undefined) await this.persistKey(key, epoch);
     await this.seedCounters(counters); // before anything is cut with the new key
     await Promise.all([this.queue?.setKey(key), this.keystrokeQueue?.setKey(key)]);
@@ -656,6 +777,7 @@ export class ProctorSession {
   /** The app refreshed the candidate token after `onReauthRequired`: send again. */
   resume(): void {
     this.reauthSignalled = false;
+    this.heartbeat?.resume();
     this.queue?.resume();
     this.keystrokeQueue?.resume();
   }
@@ -774,6 +896,9 @@ export class ProctorSession {
       }
     }
     this.metrics?.stop();
+    this.flags = null;
+    this.idbParts.clear();
+    this.idbShown = null;
     this.endedFired = false;
     this.queuesEnded = false;
     this.stopping = false;

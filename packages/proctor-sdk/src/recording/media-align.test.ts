@@ -1056,6 +1056,35 @@ describe('hold at pipeline level: the recorder keeps recording, devices are rele
     await r.p.stop();
   });
 
+  it('FR-609/FR-701 (ADR 0013 5.3): heartbeatHealth reports segment, last seq, buffered and dropped counts per stream, counts only', async () => {
+    const r = pRig(newStore(), {
+      api: {
+        presign: () => Promise.reject(new MediaApiError('NETWORK', 'offline')),
+        confirm: () => Promise.resolve(),
+      },
+    });
+    expect(r.p.heartbeatHealth().streams).toEqual([]); // nothing recorded yet
+    await r.p.recordWebcam();
+    r.recs[0]?.emit(10);
+    r.recs[0]?.emit(30);
+    await run(1500);
+    const h = r.p.heartbeatHealth();
+    expect(h.streams).toEqual([
+      {
+        stream: 'WEBCAM',
+        segment: 0,
+        lastSeq: 1,
+        bufferedChunks: 2,
+        bufferedBytes: 40,
+        droppedChunks: 0,
+        droppedBytes: 0,
+      },
+    ]);
+    expect(h).toMatchObject({ seqConflicts: 0, staleIdentityLosses: 0, heldStreams: 0 });
+    expect(JSON.stringify(h)).not.toMatch(/https?:|blob:|key/i);
+    await r.p.stop();
+  });
+
   it('FR-702: seedCounters after stop() or after the session ended starts no recorder and releases nothing', async () => {
     const r = pRig(newStore());
     await r.p.recordWebcam();

@@ -163,6 +163,16 @@ export class UploadQueue {
   private failures = 0;
   private droppedChunks = 0;
   private droppedBytes = 0;
+  private readonly droppedChunksBy: Record<RecordingStream, number> = {
+    SCREEN: 0,
+    WEBCAM: 0,
+    AUDIO: 0,
+  };
+  private readonly droppedBytesBy: Record<RecordingStream, number> = {
+    SCREEN: 0,
+    WEBCAM: 0,
+    AUDIO: 0,
+  };
   private running = false;
   private readonly touch: SessionTouch;
   /** Chunks that could not be written to IndexedDB, uploaded from memory. */
@@ -361,6 +371,8 @@ export class UploadQueue {
   private drop(c: ChunkRef): void {
     this.droppedChunks++;
     this.droppedBytes += c.bytes;
+    this.droppedChunksBy[c.stream]++;
+    this.droppedBytesBy[c.stream] += c.bytes;
   }
 
   /** Bytes of first chunks above the cap that are still pending for a stream. */
@@ -732,10 +744,12 @@ export class UploadQueue {
 
   health(): RecorderHealth {
     const byStream: Record<RecordingStream, number> = { SCREEN: 0, WEBCAM: 0, AUDIO: 0 };
+    const chunksByStream: Record<RecordingStream, number> = { SCREEN: 0, WEBCAM: 0, AUDIO: 0 };
     let bytes = 0;
     for (const c of this.pending.values()) {
       bytes += c.bytes;
       byStream[c.stream] += c.bytes;
+      chunksByStream[c.stream]++;
     }
     return {
       bytesPending: bytes,
@@ -745,6 +759,9 @@ export class UploadQueue {
       consecutiveFailures: this.failures,
       droppedChunks: this.droppedChunks,
       droppedBytes: this.droppedBytes,
+      chunksPendingByStream: chunksByStream,
+      droppedChunksByStream: { ...this.droppedChunksBy },
+      droppedBytesByStream: { ...this.droppedBytesBy },
       degraded: this.failures > 0 || this.storageDegraded,
       storageDegraded: this.storageDegraded,
       memoryBytes: this.memoryBytes(),

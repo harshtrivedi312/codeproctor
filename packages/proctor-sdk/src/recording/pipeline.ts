@@ -9,6 +9,7 @@ import {
 import { MediaCounters, type MediaCounter } from './counters';
 import { UploadQueue, type UploadQueueOptions } from './upload-queue';
 import type { CapabilityFlag } from '../core/types';
+import type { HeartbeatRecorderHealth } from '../core/health';
 import {
   RECORDING_STREAMS,
   type DeviceLoss,
@@ -165,6 +166,36 @@ export class RecordingPipeline {
 
   health(): RecorderHealth {
     return this.queue.health();
+  }
+
+  /**
+   * The `recorder` block of the heartbeat (ADR 0013 section 5.3): per stream the current segment,
+   * the last seq handed out, buffered and dropped chunks and bytes. Counts only. Plug it into
+   * `ProctorSessionConfig.getHealth`: `() => ({ recorder: pipeline.heartbeatHealth() })`.
+   */
+  heartbeatHealth(): HeartbeatRecorderHealth {
+    const h = this.queue.health();
+    const streams: HeartbeatRecorderHealth['streams'] = [];
+    for (const stream of RECORDING_STREAMS) {
+      const c = this.counters.snapshot(stream);
+      const started = c.nextSeq > 0 || h.chunksPendingByStream[stream] > 0;
+      if (!started && h.droppedChunksByStream[stream] === 0) continue; // never recorded
+      streams.push({
+        stream,
+        segment: Math.max(0, c.nextSegment - 1),
+        lastSeq: Math.max(0, c.nextSeq - 1),
+        bufferedChunks: h.chunksPendingByStream[stream],
+        bufferedBytes: h.bytesPendingByStream[stream],
+        droppedChunks: h.droppedChunksByStream[stream],
+        droppedBytes: h.droppedBytesByStream[stream],
+      });
+    }
+    return {
+      streams,
+      seqConflicts: h.seqConflicts,
+      staleIdentityLosses: h.staleIdentityLosses,
+      heldStreams: h.heldStreams.length,
+    };
   }
 
   get audioStream(): MediaStream | null {

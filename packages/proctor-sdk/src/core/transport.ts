@@ -1,4 +1,5 @@
 import type { EndReason } from './batch-queue';
+import type { HeartbeatBody, HeartbeatState, TokenRenewal } from './health';
 import type { EventTransport, SendResult, SignedBatch } from './event-queue';
 
 /** Only small bodies use keepalive: the 64 KiB quota is shared by concurrent keepalive fetches. */
@@ -20,13 +21,58 @@ export interface FetchTransportOptions {
 }
 
 /** Heartbeat answer: a plain boolean, or the news that the session is over. */
-export type HeartbeatResult = boolean | { ended: EndReason };
+/**
+ * - `true`/`false`: acknowledged / not reachable (offline).
+ * - `{ ok }`: acknowledged with the server state and, when the server renewed the token, the new
+ *   one (the app gets it through `onToken`; the SDK never stores it).
+ * - `{ ended }`: 409 SESSION_NOT_ACTIVE or SESSION_TAKEN_OVER.
+ * - `{ auth }`: 401 (reachable, but the token is refused); `code` is the problem code.
+ */
+export type HeartbeatResult =
+  | boolean
+  | { ended: EndReason }
+  | { ok: true; state?: HeartbeatState; renewal?: TokenRenewal }
+  | { auth: string };
+
+/** Reads the 200 body of a beat; anything unexpected is ignored (the beat still counts as ok). */
+export function parseHeartbeatAnswer(text: string): {
+  state?: HeartbeatState;
+  renewal?: TokenRenewal;
+} {
+  try {
+    const j = JSON.parse(text) as Record<string, unknown> | null;
+    if (typeof j !== 'object' || j === null) return {};
+    const out: { state?: HeartbeatState; renewal?: TokenRenewal } = {};
+    const status = j['status'];
+    if (status === 'IN_PROGRESS' || status === 'PAUSED') {
+      const state: HeartbeatState = { status };
+      if (typeof j['serverTime'] === 'string') state.serverTime = j['serverTime'];
+      if (typeof j['deadlineAt'] === 'string') state.deadlineAt = j['deadlineAt'];
+      const sd = j['sectionDeadlineAt'];
+      if (typeof sd === 'string' || sd === null) state.sectionDeadlineAt = sd;
+      if (Array.isArray(j['pauseReasons'])) {
+        state.pauseReasons = j['pauseReasons'].filter((r): r is string => typeof r === 'string');
+      }
+      out.state = state;
+    }
+    const tok = j['sessionToken'];
+    const exp = j['sessionTokenExpiresAt'];
+    if (typeof tok === 'string' && tok.length > 0 && typeof exp === 'string') {
+      out.renewal = { sessionToken: tok, sessionTokenExpiresAt: exp };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
 interface Answer {
   status: number;
   ok: boolean;
   code: string;
   retryAfterMs: number | undefined;
+  /** Response text; only the heartbeat reads it (it may carry a renewed token). Never logged. */
+  text: string;
 }
 
 /** Retry-After as seconds or an HTTP date, in ms; undefined when absent or unusable. */
@@ -80,7 +126,7 @@ export function classifyAnswer(a: Pick<Answer, 'status' | 'code' | 'retryAfterMs
  * block the head of a queue or finish() (FR-601, FR-609, TC-063, TC-065).
  */
 export function createFetchTransport(o: FetchTransportOptions): EventTransport & {
-  heartbeat(): Promise<HeartbeatResult>;
+  heartbeat(body?: HeartbeatBody): Promise<HeartbeatResult>;
   sendKeystrokeBatch(batch: SignedBatch): Promise<SendResult>;
 } {
   const f = o.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
@@ -133,6 +179,7 @@ export function createFetchTransport(o: FetchTransportOptions): EventTransport &
         ok: res.ok,
         code,
         retryAfterMs: parseRetryAfter(res.headers?.get?.('Retry-After')),
+        text,
       };
     })();
     run.catch(() => undefined); // a late rejection after the timeout must not be unhandled
@@ -179,16 +226,24 @@ export function createFetchTransport(o: FetchTransportOptions): EventTransport &
   return {
     sendBatch: (batch: SignedBatch) => post(eventsPath, batch),
     sendKeystrokeBatch: (batch: SignedBatch) => post(keystrokesPath, batch),
-    async heartbeat(): Promise<HeartbeatResult> {
+    async heartbeat(body?: HeartbeatBody): Promise<HeartbeatResult> {
       try {
         const a = await request(
           heartbeatPath,
-          { method: 'POST', headers: headers() },
+          body === undefined
+            ? { method: 'POST', headers: headers() }
+            : { method: 'POST', headers: headers(), body: JSON.stringify(body) },
           heartbeatTimeout,
         );
-        if (a.ok) return true;
+        if (a.ok) {
+          const parsed = parseHeartbeatAnswer(a.text);
+          return parsed.state || parsed.renewal ? { ok: true, ...parsed } : true;
+        }
         const r = classifyAnswer(a);
-        if (typeof r === 'object' && r.kind === 'ENDED') return { ended: r.reason };
+        if (typeof r === 'object') {
+          if (r.kind === 'ENDED') return { ended: r.reason };
+          if (r.kind === 'AUTH') return { auth: r.code ?? '' };
+        }
         return false;
       } catch {
         return false;

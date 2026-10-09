@@ -34,3 +34,12 @@ pipeline.seedCounters(counters?.media ?? {}); // media streams continue at max(l
 - `finish()` and the end of a session (taken over, session not active) delete the stored key with the data; `stop()` keeps it for the reload. The retention sweep never touches a live session: its mark is refreshed by the heartbeat, also during a long outage.
 - The helper never stores or logs the token; errors carry a kind and a problem code only. As pull alias `keyProvider: keys` lets the session fetch the key itself after KEY_EPOCH_STALE; the session also calls `keys.forget()` when it purges, so the helper's store is cleaned, a request waiting for the lock is cancelled before its POST, and an in-flight request stores nothing afterwards. A helper with its own store (not the session's `store` / `keyStore`) is purged only through `keyProvider`.
 - After a purge (finish, taken over, session over) `session.setKey()` does nothing: call `stop()` and start a new session.
+
+## Heartbeat and health (ADR 0013 section 5.3)
+
+- Every 10 s `POST /candidate/session/heartbeat` with an optional body `{ capabilities?, recorder?, queue? }`.
+  - `capabilities`: only flags that changed since the last acknowledged beat (at most 32, worst first), and the full set every 5 minutes. Ids match `^[a-z][a-z0-9-]{1,47}$`, details are cut to 128 characters, counts and reasons only. Flags raised by the app (for example the pipeline's `onCapability`) go through `session.reportCapability(flag)`; the pipeline's `recording-storage` is folded into the single `idb` flag together with the event, keystroke and key parts.
+  - `recorder`: from `getHealth: () => ({ recorder: pipeline.heartbeatHealth() })`: per stream segment, last seq, buffered and dropped chunks and bytes, plus conflict, stale-identity and held counts.
+  - `queue`: pending event and keystroke batches and rejected batches.
+- Answer: the server state goes to `onHeartbeat`; a renewed token goes to `onToken` and is never stored or logged by the SDK. 409 SESSION_NOT_ACTIVE stops the heartbeat and fires `ended` (the queues keep draining during the grace). Three consecutive 401 stop the heartbeat and call `onReauthRequired` once; `session.resume()` or `setKey()` beat again. A 401 is "reachable", not offline.
+- `session.probe()` is the reachability probe for the recording pipeline: `new RecordingPipeline({ probe: () => session.probe() })`. A fresh acknowledged beat answers true at once, otherwise one beat is sent now.
