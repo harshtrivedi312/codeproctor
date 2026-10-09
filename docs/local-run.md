@@ -19,7 +19,7 @@ email address, or a real candidate. Last checked against `main` on 2026-10-07 (c
 
 - **Node 24** (`package.json` says `>=24 <25`). Check with `node --version`.
 - **pnpm 12** (the repository pins the exact version; `corepack enable` installs it).
-- **Docker Desktop** (or Docker Engine) running, for PostgreSQL 16, Redis 8.8 and Adminer.
+- **Docker Desktop** (or Docker Engine) running, for PostgreSQL 16, Redis 8.8, Adminer, Mailpit and MinIO.
 - Git. Nothing else: no AWS account, no cloud login.
 
 Free local ports: 5432 (PostgreSQL), 6379 (Redis), 8080 (Adminer), 1025 and 8025 (Mailpit), 9000 and 9001 (MinIO), 4000 (API), 3000 (web), 8000 (worker). If
@@ -40,7 +40,7 @@ use" below), starts the stack, builds the shared package, migrates,
 seeds, gives the seeded invitation a real link, starts the API and the web app in the background (logs in
 `.demo/`), waits until both answer, and prints the links, the accounts and where the password is. It is safe
 to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
-its own pnpm dev commands). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
+its own pnpm dev commands and its own worker). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
 data stays in Docker volumes). `pnpm demo:up --dry-run` lists the steps without running them, and
 `--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker. On a re-run where the seeded invitation was already used, `demo:up` prints "No unused seeded invitation" and carries on (create one from the recruiter UI, Tests → Invite candidates; the link arrives in Mailpit); `--no-invite` skips that step.
 
@@ -174,8 +174,10 @@ Mailpit at <http://localhost:8025>.
 
 The local demo uses your real camera and microphone. Recordings, the ID photo and the selfie are stored
 only in the local MinIO and PostgreSQL containers, on this Mac. To remove them, run `pnpm demo:down
---infra`, then delete the Docker volumes (`docker volume rm codeproctor_minio_data
-codeproctor_postgres_data`; a person runs this, it deletes all local data). Use a synthetic candidate
+--infra`, then delete the Docker volumes (`docker volume rm codeproctor-demo_minio_data
+codeproctor-demo_postgres_data`; a stack started by hand with `pnpm dev:infra` and no
+`COMPOSE_PROJECT_NAME` uses `codeproctor_minio_data` and `codeproctor_postgres_data` instead; a person
+runs this, it deletes all local data). Use a synthetic candidate
 name and the seeded test mailbox (Mailpit), and never upload a real ID document.
 
 ## 5. No backend: mock mode
