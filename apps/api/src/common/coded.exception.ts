@@ -3,7 +3,6 @@ import { ConflictException, ForbiddenException, HttpException } from '@nestjs/co
 /** Machine-readable codes the problem filter copies into the RFC 7807 body as `code`. */
 export const PROBLEM_CODES = [
   'REAUTH_FAILED',
-  'TWO_FACTOR_REQUIRED_FOR_ROLE',
   'SETTINGS_CONFLICT',
   'VARIANT_HAS_AI_REFERENCES',
   // The 503 for database lock contention (DL-37); only ProblemFilter's lock path sets it.

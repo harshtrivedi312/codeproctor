@@ -7,12 +7,14 @@ import { describe, it } from 'node:test';
 import { looksLikeOurs, parsePids } from './demo-down.mjs';
 import {
   DEMO_PORTS,
+  composeEnv,
+  demoProject,
   foreignContainers,
   foreignMessage,
   judgePort,
   parseDockerPs,
 } from './demo-ports.mjs';
-import { planSteps, summary } from './demo-up.mjs';
+import { INVITE_NONE_EXIT, failureHint, judgeStep, planSteps, summary } from './demo-up.mjs';
 import { REPO_ROOT } from './test-support.mjs';
 
 const names = (steps) => steps.map((s) => s.name);
@@ -137,6 +139,34 @@ describe('port checks (local demo)', () => {
       },
       { name: 'web', configFiles: [], ports: [3000, 3000] },
     ]);
+  });
+
+  it('parses a published port range (MinIO: 9000-9001) into every port in it', () => {
+    const text =
+      'codeproctor-demo-minio-1\t/work/infra/docker-compose.yml\t127.0.0.1:9000-9001->9000-9001/tcp\n' +
+      'mailpit\t\t127.0.0.1:1025->1025/tcp, 127.0.0.1:8025->8025/tcp\n' +
+      'odd\t\t127.0.0.1:9005-9003->9005-9003/tcp\n';
+    const [minio, mailpit, odd] = parseDockerPs(text);
+    assert.deepEqual(minio.ports, [9000, 9001]);
+    assert.deepEqual(mailpit.ports, [1025, 8025]);
+    assert.deepEqual(odd.ports, [9005], 'a backwards range is not expanded');
+    const ourCompose = '/work/infra/docker-compose.yml';
+    const own = { ...minio, project: 'codeproctor-demo' };
+    for (const port of [9000, 9001]) {
+      const spec = DEMO_PORTS.find((p) => p.port === port);
+      assert.equal(
+        judgePort({
+          spec,
+          free: false,
+          containers: [own],
+          ourCompose,
+          ourAppUp: false,
+          project: 'codeproctor-demo',
+        }).ok,
+        true,
+        String(port),
+      );
+    }
   });
 
   it('DL-57: a stopped container of another checkout in the shared project is a clash even when its ports are free', () => {
@@ -277,5 +307,108 @@ describe('local compose stack (D-67)', () => {
 
   it('the worker is behind a profile (it is not part of demo:up)', () => {
     assert.match(compose, /worker:\n\s+profiles: \['worker'\]/);
+  });
+});
+
+describe('demo:up compose project (local demo)', () => {
+  it("uses its own project, codeproctor-demo, so its volumes are never the dev stack's", () => {
+    assert.equal(demoProject({}), 'codeproctor-demo');
+    assert.equal(composeEnv({ PATH: '/bin' }).COMPOSE_PROJECT_NAME, 'codeproctor-demo');
+    assert.equal(composeEnv({ PATH: '/bin' }).PATH, '/bin');
+  });
+
+  it('COMPOSE_PROJECT_NAME chosen on purpose still wins, a malformed one does not', () => {
+    assert.equal(demoProject({ COMPOSE_PROJECT_NAME: 'mine' }), 'mine');
+    assert.equal(demoProject({ COMPOSE_PROJECT_NAME: '../x y' }), 'codeproctor-demo');
+  });
+
+  it('demo:down --infra runs in the same project', () => {
+    assert.match(readFileSync(`${REPO_ROOT}infra/scripts/demo-down.mjs`, 'utf8'), /composeEnv\(\)/);
+  });
+
+  it('P1000 from the migrations gets a hint: another .env owns the volume, no reset', () => {
+    const hint = failureHint(
+      ['pnpm', 'db:migrate'],
+      'Error: P1000: Authentication failed against database server',
+      'codeproctor-demo',
+    );
+    assert.match(hint, /P1000/);
+    assert.match(hint, /codeproctor-demo_postgres_data/);
+    assert.match(hint, /another \.env/);
+    assert.match(hint, /Never run db:reset or db push/);
+    assert.doesNotMatch(hint, /pnpm db:reset\b/);
+  });
+
+  it('with COMPOSE_PROJECT_NAME set the hint says to unset it; other failures get no hint', () => {
+    assert.match(
+      failureHint(['pnpm', 'db:seed'], 'P1000', 'codeproctor'),
+      /Unset it so the demo uses its own project, "codeproctor-demo"/,
+    );
+    assert.equal(failureHint(['pnpm', 'db:migrate'], 'P3009 failed migration', 'x'), '');
+    assert.equal(failureHint(['pnpm', 'dev:infra'], 'P1000', 'x'), '');
+  });
+
+  it("this checkout's own dev stack (project codeproctor) holding a port is a clash for the demo project", () => {
+    const ourCompose = '/work/codeproctor/infra/docker-compose.yml';
+    const spec = DEMO_PORTS.find((p) => p.port === 5432);
+    const dev = [
+      {
+        name: 'codeproctor-postgres-1',
+        configFiles: [ourCompose],
+        ports: [5432],
+        project: 'codeproctor',
+      },
+    ];
+    const verdict = judgePort({
+      spec,
+      free: false,
+      containers: dev,
+      ourCompose,
+      ourAppUp: false,
+      project: 'codeproctor-demo',
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.message, /pnpm dev:infra:down/);
+    const mine = [{ ...dev[0], project: 'codeproctor-demo' }];
+    assert.equal(
+      judgePort({
+        spec,
+        free: false,
+        containers: mine,
+        ourCompose,
+        ourAppUp: false,
+        project: 'codeproctor-demo',
+      }).ok,
+      true,
+    );
+  });
+});
+
+describe('demo:up invitation step (local demo)', () => {
+  const invite = planSteps({ hasEnv: true, hasModules: true, startApps: true }).find((s) =>
+    s.cmd?.join(' ').includes('demo-invite'),
+  );
+
+  it('"no unused seeded invitation" is not fatal: the run goes on to the apps', () => {
+    assert.equal(judgeStep(invite, 0), 'ok');
+    assert.equal(judgeStep(invite, INVITE_NONE_EXIT), 'skip');
+    assert.equal(judgeStep(invite, 1), 'fail', 'a real failure still stops the run');
+    assert.equal(judgeStep(invite, null), 'fail');
+  });
+
+  it('only the invitation step may be skipped that way', () => {
+    const others = planSteps({ hasEnv: false, hasModules: false, startApps: true }).filter(
+      (s) => s.cmd && !s.cmd.join(' ').includes('demo-invite'),
+    );
+    for (const s of others) assert.equal(judgeStep(s, INVITE_NONE_EXIT), 'fail', s.name);
+  });
+
+  it('--no-invite leaves the step out and the rest of the plan unchanged', () => {
+    const without = planSteps({ hasEnv: true, hasModules: true, startApps: true, invite: false });
+    assert.ok(!names(without).some((n) => /real link/.test(n)));
+    assert.equal(
+      without.length,
+      planSteps({ hasEnv: true, hasModules: true, startApps: true }).length - 1,
+    );
   });
 });

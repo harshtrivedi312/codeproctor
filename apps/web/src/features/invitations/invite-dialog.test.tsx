@@ -445,7 +445,7 @@ describe('FR-304: upload robustness', () => {
     function SignOut() {
       const { signOutRevoked } = useAuth();
       return (
-        <button type="button" onClick={() => void signOutRevoked()}>
+        <button type="button" onClick={() => void signOutRevoked('off')}>
           Force sign out
         </button>
       );
@@ -468,5 +468,73 @@ describe('FR-304: upload robustness', () => {
     await within(dialog).findByTestId('csv-summary');
     fireEvent.click(screen.getByText('Force sign out'));
     await waitFor(() => expect(document.body).not.toHaveTextContent('secret.person'));
+  });
+});
+
+describe('FR-303 TC-023: the window start is worked out at submit time', () => {
+  afterEach(() => vi.useRealTimers());
+
+  const captureStart = () => {
+    const sent: { windowStart: string; windowEnd: string }[] = [];
+    server.events.on('request:start', async ({ request }) => {
+      const path = new URL(request.url).pathname;
+      if (request.method === 'POST' && path.endsWith('/invitations')) {
+        sent.push((await request.clone().json()) as { windowStart: string; windowEnd: string });
+      }
+    });
+    return sent;
+  };
+
+  it('FR-303 TC-023: a dialog left open for 10 minutes sends a start close to the submit time and is accepted', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-08T10:00:20'));
+    const { u, dialog } = await openDialog();
+    const sent = captureStart();
+    await u.type(within(dialog).getByLabelText('Candidate name'), 'Nia New');
+    await u.type(within(dialog).getByLabelText('Candidate email'), 'nia.new@example.test');
+    vi.setSystemTime(new Date('2026-10-08T10:10:40'));
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    const start = Date.parse(sent[0]!.windowStart);
+    expect(Math.abs(start - Date.now())).toBeLessThan(60_000);
+    // The end keeps the 7 day length from the new start.
+    expect(Date.parse(sent[0]!.windowEnd) - start).toBe(7 * 86_400_000);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('FR-303: an explicit start that has gone stale is clamped to now with a note, and is accepted', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-08T10:00:20'));
+    const { u, dialog } = await openDialog();
+    const sent = captureStart();
+    await u.type(within(dialog).getByLabelText('Candidate name'), 'Nia New');
+    await u.type(within(dialog).getByLabelText('Candidate email'), 'nia.new@example.test');
+    fireEvent.change(within(dialog).getByLabelText('Window opens'), {
+      target: { value: '2026-10-08T10:02' },
+    });
+    vi.setSystemTime(new Date('2026-10-08T10:12:00'));
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(Math.abs(Date.parse(sent[0]!.windowStart) - Date.now())).toBeLessThan(60_000);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('FR-303: an explicit future start is kept exactly as chosen', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-08T10:00:20'));
+    const { u, dialog } = await openDialog();
+    const sent = captureStart();
+    await u.type(within(dialog).getByLabelText('Candidate name'), 'Nia New');
+    await u.type(within(dialog).getByLabelText('Candidate email'), 'nia.new@example.test');
+    fireEvent.change(within(dialog).getByLabelText('Window opens'), {
+      target: { value: '2026-10-09T09:00' },
+    });
+    fireEvent.change(within(dialog).getByLabelText('Window closes'), {
+      target: { value: '2026-10-10T09:00' },
+    });
+    vi.setSystemTime(new Date('2026-10-08T10:10:00'));
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]!.windowStart).toBe(new Date('2026-10-09T09:00').toISOString());
   });
 });

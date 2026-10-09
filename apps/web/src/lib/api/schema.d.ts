@@ -123,40 +123,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/auth/2fa/enroll/start': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Begin forced TOTP enrollment (FR-102). Needs the challenge token from login. */
-    post: operations['startTwoFactorEnrollment'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/auth/2fa/enroll/confirm': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Confirm enrollment with a first code; returns the one-time recovery codes (ADR 0003 section 1) */
-    post: operations['confirmTwoFactorEnrollment'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/auth/2fa/setup/start': {
     parameters: {
       query?: never;
@@ -965,6 +931,7 @@ export interface components {
       role: components['schemas']['StaffRole'];
       orgName: string;
       totpEnabled: boolean;
+      twoFactorRecommended: boolean;
     };
     AuthSession: {
       accessToken: string;
@@ -975,7 +942,7 @@ export interface components {
     };
     LoginResult: {
       /** @enum {string} */
-      status: 'authenticated' | 'two_factor_required' | 'two_factor_enrollment_required';
+      status: 'authenticated' | 'two_factor_required';
       session?: components['schemas']['AuthSession'];
       challengeToken?: string;
     };
@@ -1245,7 +1212,6 @@ export interface components {
      */
     ProblemCode:
       | 'REAUTH_FAILED'
-      | 'TWO_FACTOR_REQUIRED_FOR_ROLE'
       | 'SETTINGS_CONFLICT'
       | 'VARIANT_HAS_AI_REFERENCES'
       | 'BUSY'
@@ -2117,90 +2083,6 @@ export interface operations {
       };
     };
   };
-  startTwoFactorEnrollment: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['ChallengeRequest'];
-      };
-    };
-    responses: {
-      /** @description Secret and otpauth URI for the QR code */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            manualKey: string;
-            otpauthUri: string;
-          };
-        };
-      };
-      /** @description The challenge is stale or unknown. detail is "Your sign-in has expired. Sign in again." */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProblemDetails'];
-        };
-      };
-    };
-  };
-  confirmTwoFactorEnrollment: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': {
-          challengeToken: string;
-          code: string;
-        };
-      };
-    };
-    responses: {
-      /** @description Enrolled and signed in */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': {
-            session: components['schemas']['AuthSession'];
-            recoveryCodes: string[];
-          };
-        };
-      };
-      /** @description Wrong code */
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-      /** @description Challenge expired, sign in again */
-      401: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ApiError'];
-        };
-      };
-    };
-  };
   startTwoFactorSetup: {
     parameters: {
       query?: never;
@@ -2372,7 +2254,7 @@ export interface operations {
           'application/json': components['schemas']['ProblemDetails'];
         };
       };
-      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed), otherwise TWO_FACTOR_REQUIRED_FOR_ROLE for Super Admin and Reviewer (checked last) */
+      /** @description REAUTH_FAILED for a wrong or locked password or a wrong or replayed code (one identical body with the fixed detail "The password or code is incorrect.", so it never says which factor failed) */
       403: {
         headers: {
           [name: string]: unknown;

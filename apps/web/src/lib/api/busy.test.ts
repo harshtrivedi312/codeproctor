@@ -42,7 +42,7 @@ describe('DL-37 503 BUSY: the pure rules', () => {
     for (const [path, method] of [
       ['/v1/auth/login', 'POST'],
       ['/v1/auth/2fa/verify', 'POST'],
-      ['/v1/auth/2fa/enroll/confirm', 'POST'],
+      ['/v1/auth/2fa/setup/confirm', 'POST'],
       ['/v1/auth/2fa/setup/start', 'POST'],
       ['/v1/auth/2fa/disable', 'POST'],
       ['/v1/auth/2fa/recovery-codes/regenerate', 'POST'],

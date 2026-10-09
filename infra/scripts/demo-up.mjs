@@ -1,6 +1,6 @@
 // One command to a running local demo (docs/local-run.md; DL-52, D-67):
 //
-//   pnpm demo:up [--dry-run] [--no-apps] [--no-worker]
+//   pnpm demo:up [--dry-run] [--no-apps] [--no-worker] [--no-invite]
 //
 // It writes .env if missing, starts the local stack (PostgreSQL, Redis, Mailpit, MinIO, Adminer),
 // builds the shared package, migrates, seeds, gives one seeded invitation a real link, starts the API
@@ -15,8 +15,11 @@
 //   --no-apps   do everything except start the API and the web app (start them in your own terminals)
 //   --no-worker do not start the face-match worker on the host (it is optional: without it the identity
 //               check answers MANUAL_REVIEW and the candidate continues)
+//   --no-invite do not hand out a candidate link (a re-run on a database whose seeded invitation was used
+//               needs none; demo:up carries on by itself in that case)
 // It checks first that the ports it needs are free and stops with a message that names the port and what
-// holds it. It never stops or reuses another stack's containers.
+// holds it. It never stops or reuses another stack's containers. Its containers and volumes belong to the
+// compose project `codeproctor-demo` (COMPOSE_PROJECT_NAME overrides), never to the dev stack's `codeproctor`.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -25,6 +28,10 @@ import { parseEnv } from 'node:util';
 import { parsePids } from './demo-down.mjs';
 import {
   DEMO_PORTS,
+  DEMO_PROJECT as DEMO_PROJECT_NAME,
+  DEV_PROJECT,
+  composeEnv,
+  demoProject,
   dockerContainers,
   foreignContainers,
   foreignMessage,
@@ -38,7 +45,19 @@ export const WORKER_HEALTH = 'http://127.0.0.1:8000/health';
 export const WORKER_SCRIPT = 'apps/worker/tools/be08/run-local.sh';
 
 /** The ordered steps (pure: used for --dry-run and the tests). */
-export function planSteps({ hasEnv, hasModules, startApps, startWorker = false }) {
+/** demo-invite.mjs exits with this when no seeded invitation is left INVITED: not an error for demo:up. */
+export const INVITE_NONE_EXIT = 3;
+export const NO_INVITE_MESSAGE =
+  'No unused seeded invitation; create one from the recruiter UI (Tests → Invite candidates), and the link arrives in Mailpit.';
+
+/** Pure: what a finished step means. 'skip' = the step says there is nothing to do and the run goes on. */
+export function judgeStep(step, status) {
+  if (status === 0) return 'ok';
+  if (step.optionalExit !== undefined && status === step.optionalExit) return 'skip';
+  return 'fail';
+}
+
+export function planSteps({ hasEnv, hasModules, startApps, startWorker = false, invite = true }) {
   const steps = [];
   if (!hasEnv)
     steps.push({
@@ -60,12 +79,14 @@ export function planSteps({ hasEnv, hasModules, startApps, startWorker = false }
     { name: 'generate the database client', cmd: ['pnpm', 'db:generate'] },
     { name: 'apply the migrations', cmd: ['pnpm', 'db:migrate'] },
     { name: 'seed the demo data (idempotent)', cmd: ['pnpm', 'db:seed'] },
-    {
+  );
+  if (invite)
+    steps.push({
       name: 'give the seeded invitation a real link',
       cmd: ['node', 'infra/scripts/demo-invite.mjs'],
       capture: 'invite',
-    },
-  );
+      optionalExit: INVITE_NONE_EXIT,
+    });
   if (startApps) {
     steps.push(
       { name: 'start the API in the background', app: 'api' },
@@ -79,6 +100,26 @@ export function planSteps({ hasEnv, hasModules, startApps, startWorker = false }
     });
   }
   return steps;
+}
+
+/**
+ * A hint for a failed step (pure): `P1000` (authentication failed) from the migrations or the seed means
+ * the database volume was created with another .env's POSTGRES_PASSWORD (Postgres applies it only on
+ * the first start), so the fix is a fresh volume of the demo's own project, never a reset.
+ */
+export function failureHint(cmd, output, project) {
+  if (!/\bP1000\b|authentication failed/i.test(output)) return '';
+  const stepName = cmd.join(' ');
+  if (!/db:(migrate|seed)/.test(stepName)) return '';
+  const own = project === DEMO_PROJECT_NAME;
+  return (
+    `\ndemo-up: the database refused the password in .env (P1000). The volume ${project}_postgres_data ` +
+    `belongs to another .env: Postgres applies POSTGRES_PASSWORD only when the volume is first created. ` +
+    (own
+      ? `Restore the .env this demo was first started with, or ask a person to remove the demo's own volumes (\`docker volume rm ${project}_postgres_data\`; demo data only). `
+      : `This run used the compose project "${project}" (COMPOSE_PROJECT_NAME is set). Unset it so the demo uses its own project, "${DEMO_PROJECT_NAME}". `) +
+    `Never run db:reset or db push for this; the dev stack's data (project "${DEV_PROJECT}") is not touched by the demo.`
+  );
 }
 
 /** The summary printed at the end (pure). `invite` is the output of demo-invite.mjs, or ''. */
@@ -121,13 +162,22 @@ export function summary({ invite, appsStarted, workerStatus = 'skipped' }) {
   return lines.join('\n');
 }
 
-function run(root, cmd, { capture = false } = {}) {
+function run(root, cmd, { capture = false, env, watch = false } = {}) {
+  // `watch` also pipes stderr (no longer a terminal, so no colour; shown when the step ends), echoed
+  // unchanged, so a known failure can get a hint.
   const r = spawnSync(cmd[0], cmd.slice(1), {
     cwd: root,
-    stdio: capture ? ['ignore', 'pipe', 'inherit'] : 'inherit',
+    stdio: capture
+      ? ['ignore', 'pipe', 'inherit']
+      : watch
+        ? ['inherit', 'inherit', 'pipe']
+        : 'inherit',
     encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    ...(env === undefined ? {} : { env }),
   });
-  return { ok: r.status === 0, stdout: r.stdout ?? '' };
+  if (watch && r.stderr) process.stderr.write(r.stderr);
+  return { status: r.status, ok: r.status === 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
 async function waitFor(url, label, seconds) {
@@ -205,9 +255,13 @@ async function startWorkerStep(root) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const unknown = args.filter((a) => !['--dry-run', '--no-apps', '--no-worker'].includes(a));
+  const unknown = args.filter(
+    (a) => !['--dry-run', '--no-apps', '--no-worker', '--no-invite'].includes(a),
+  );
   if (unknown.length > 0) {
-    console.error('demo-up: usage: pnpm demo:up [--dry-run] [--no-apps] [--no-worker]');
+    console.error(
+      'demo-up: usage: pnpm demo:up [--dry-run] [--no-apps] [--no-worker] [--no-invite]',
+    );
     process.exit(1);
   }
   const dry = args.includes('--dry-run');
@@ -219,6 +273,7 @@ async function main() {
     hasModules: existsSync(join(root, 'node_modules')),
     startApps,
     startWorker,
+    invite: !args.includes('--no-invite'),
   });
   if (dry) {
     steps.forEach((s, i) =>
@@ -230,6 +285,7 @@ async function main() {
     console.error('demo-up: Docker is not running. Start Docker Desktop and try again.');
     process.exit(1);
   }
+  const project = demoProject();
   let invite = '';
   let workerStatus = startWorker ? 'not started' : 'skipped (--no-worker)';
   let n = 0;
@@ -252,10 +308,12 @@ async function main() {
     }
     if (step.check === 'ports') {
       const ourCompose = join(root, 'infra/docker-compose.yml');
-      const containers = dockerContainers();
+      // The dev stack's containers too: they hold the same ports, whatever the project.
+      const projects = project === DEV_PROJECT ? [project] : [project, DEV_PROJECT];
+      const containers = projects.flatMap((p) => dockerContainers(p));
       const problems = [];
-      const foreign = foreignContainers(containers, ourCompose);
-      if (foreign.length > 0) problems.push(foreignMessage(foreign));
+      const foreign = foreignContainers(dockerContainers(project), ourCompose);
+      if (foreign.length > 0) problems.push(foreignMessage(foreign, project));
       for (const spec of DEMO_PORTS) {
         if (spec.kind === 'api' && !startApps) continue;
         if (spec.kind === 'web' && !startApps) continue;
@@ -263,7 +321,7 @@ async function main() {
         const free = await isFree(spec.port);
         const url = { api: API_HEALTH, web: WEB_LOGIN, worker: WORKER_HEALTH }[spec.kind];
         const ourAppUp = !free && url !== undefined && (await isUp(url));
-        const verdict = judgePort({ spec, free, containers, ourCompose, ourAppUp });
+        const verdict = judgePort({ spec, free, containers, ourCompose, ourAppUp, project });
         if (!verdict.ok) problems.push(verdict.message);
         else if (verdict.note) console.log(verdict.note);
       }
@@ -294,9 +352,19 @@ async function main() {
       console.log('up.');
       continue;
     }
-    const r = run(root, step.cmd, { capture: step.capture !== undefined });
+    const r = run(root, step.cmd, {
+      capture: step.capture !== undefined,
+      env: composeEnv(),
+      watch: /db:(migrate|seed)/.test(step.cmd.join(' ')),
+    });
+    if (judgeStep(step, r.status) === 'skip') {
+      console.log(NO_INVITE_MESSAGE);
+      continue;
+    }
     if (!r.ok) {
       console.error(`demo-up: step ${n} failed: ${step.cmd.join(' ')}`);
+      const hint = failureHint(step.cmd, r.stderr, project);
+      if (hint !== '') console.error(hint);
       process.exit(1);
     }
     if (step.capture === 'invite') invite = r.stdout;

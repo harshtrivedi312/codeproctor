@@ -42,7 +42,7 @@ seeds, gives the seeded invitation a real link, starts the API and the web app i
 to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
 its own pnpm dev commands). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
 data stays in Docker volumes). `pnpm demo:up --dry-run` lists the steps without running them, and
-`--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker.
+`--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker. On a re-run where the seeded invitation was already used, `demo:up` prints "No unused seeded invitation" and carries on (create one from the recruiter UI, Tests → Invite candidates; the link arrives in Mailpit); `--no-invite` skips that step.
 
 **Step by step** (what `demo:up` does):
 
@@ -234,7 +234,7 @@ pnpm demo:down --infra                # ... and the containers; the data stays i
 pnpm demo:up                          # starts everything again (safe to repeat)
 ```
 
-By hand: `pnpm dev:infra:down` and `pnpm dev:infra`, then the two app commands.
+By hand: `pnpm dev:infra:down` and `pnpm dev:infra`, then the two app commands (add `COMPOSE_PROJECT_NAME=codeproctor-demo` to match what `demo:up` does).
 
 To get a clean database, ask a person to run `pnpm db:reset` (it deletes the local data, and only works
 on a local database; agents never run it). Then `pnpm db:migrate` and `pnpm db:seed` again.
@@ -245,6 +245,11 @@ on a local database; agents never run it). Then `pnpm db:migrate` and `pnpm db:s
   say `NEXT_PUBLIC_API_URL=http://localhost:4000/api`; restart `pnpm dev:web` after fixing it.
 - **`db:migrate` or `db:seed` refuses**: the message names the cause: `APP_ENV` must be `development`
   (seed), and every database URL must point at `127.0.0.1` or `localhost`.
+- **`P1000` / "authentication failed" while migrating**: the database volume was created with another `.env`'s
+  password (Postgres applies `POSTGRES_PASSWORD` only on first start). `demo:up` keeps its containers and
+  volumes in its own compose project, `codeproctor-demo`, so it never shares the dev stack's volume; if you see
+  this, `COMPOSE_PROJECT_NAME` is set to another project, or the `.env` was regenerated after the demo volume was
+  created. Never reset; restore the `.env`, or ask a person to remove the demo's own volume.
 - **Port already in use** (5432, 6379, 8080, 1025, 8025, 9000, 9001, 4000, 3000, 8000): `pnpm demo:up` checks
   them first and stops with a message that names the port and what holds it. If it is another checkout's
   local stack (the containers are called `codeproctor-...`), `demo:up` never stops or reuses it: go to that

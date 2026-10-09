@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoginForm } from '@/features/auth/login-form';
-import { TwoFactorEnroll } from '@/features/auth/two-factor-enroll';
 import { TwoFactorVerifyForm } from '@/features/auth/two-factor-verify-form';
 import { UsersPage } from '@/features/admin/users-page';
 import { api } from '@/lib/api/client';
@@ -18,7 +17,7 @@ import {
   seedMockTwoFactor,
   seedMockTwoFactorOff,
 } from '@/mocks/auth-handlers';
-import { mockFaultRequests, setMockBusy, setMockOutcomeUnknown } from '@/mocks/fault-handlers';
+import { mockFaultRequests, setMockOutcomeUnknown } from '@/mocks/fault-handlers';
 import { server } from '@/mocks/server';
 import { renderAsStaff, renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav, router } from '@/test/nav-mock';
@@ -76,61 +75,29 @@ async function reachConfirm(u: ReturnType<typeof userEvent.setup>) {
   await within(dialog()).findByTestId('manual-key');
 }
 
-describe('2FA setup/confirm answers the fixed 500 (FR-102, FU-BE-208)', () => {
-  it('FR-102: it landed: says so, offers new recovery codes, never confirms again with the same code', async () => {
-    const calls = watchCalls();
-    setMockOutcomeUnknown({
-      route: '/v1/auth/2fa/setup/confirm',
-      methods: ['POST'],
-      count: 1,
-      landed: () => seedMockTwoFactor(MOCK_USERS.recruiter.email),
+describe('2FA setup/confirm answers the fixed 500 (FR-102, FU-BE-208, D-70)', () => {
+  for (const landed of [true, false]) {
+    it(`FR-102: ${landed ? 'landed' : 'not landed'}: signs out through one logout, never confirms again, and the notice does not claim whether 2FA is on`, async () => {
+      const calls = watchCalls();
+      setMockOutcomeUnknown({
+        route: '/v1/auth/2fa/setup/confirm',
+        methods: ['POST'],
+        count: 1,
+        ...(landed ? { landed: () => seedMockTwoFactor(MOCK_USERS.recruiter.email) } : {}),
+      });
+      const u = await pageAs(MOCK_USERS.recruiter, false);
+      await reachConfirm(u);
+      await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
+      await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
+      await waitFor(() =>
+        expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=two-factor-unconfirmed'),
+      );
+      expect(calls['POST /v1/auth/2fa/setup/confirm']).toBe(1); // never sent again
+      expect(calls['POST /v1/auth/logout']).toBe(1);
+      expect(getAccessToken()).toBeNull();
+      expect(isSignOutPending()).toBe(false);
     });
-    const u = await pageAs(MOCK_USERS.recruiter, false);
-    await reachConfirm(u);
-    await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
-
-    // The check (setup/start with the held password) answers 409: 2FA is on.
-    expect(await within(dialog()).findByText('Two-factor sign-in is on')).toBeInTheDocument();
-    expect(dialog()).toHaveTextContent('We could not confirm the result');
-    expect(calls['POST /v1/auth/2fa/setup/confirm']).toBe(1); // never sent again
-    await u.click(within(dialog()).getByRole('button', { name: 'Get new recovery codes' }));
-    expect(await within(dialog()).findByTestId('recovery-codes')).toBeInTheDocument();
-    expect(calls['POST /v1/auth/2fa/recovery-codes/regenerate']).toBe(1);
-    expect(calls['POST /v1/auth/2fa/setup/confirm']).toBe(1);
-  });
-
-  it('FR-102: it did not land: set-up starts again with a new QR code and says the old code is void', async () => {
-    const calls = watchCalls();
-    setMockOutcomeUnknown({ route: '/v1/auth/2fa/setup/confirm', methods: ['POST'], count: 1 });
-    const u = await pageAs(MOCK_USERS.recruiter, false);
-    await reachConfirm(u);
-    await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
-    expect(
-      await within(dialog()).findByText('Set-up is not on, so we started it again'),
-    ).toBeInTheDocument();
-    expect(within(dialog()).getByLabelText('6-digit code')).toHaveValue('');
-    expect(calls['POST /v1/auth/2fa/setup/start']).toBe(2);
-    expect(calls['POST /v1/auth/2fa/setup/confirm']).toBe(1);
-    // A fresh code now works.
-    await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
-    expect(await within(dialog()).findByTestId('recovery-codes')).toBeInTheDocument();
-  });
-
-  it('FR-102: when the check itself fails, the dialog offers Check again and still sends nothing twice', async () => {
-    const calls = watchCalls();
-    setMockOutcomeUnknown({ route: '/v1/auth/2fa/setup/confirm', methods: ['POST'], count: 1 });
-    const u = await pageAs(MOCK_USERS.recruiter, false);
-    await reachConfirm(u);
-    server.use(http.post('*/v1/auth/2fa/setup/start', () => HttpResponse.error()));
-    await u.type(within(dialog()).getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(within(dialog()).getByRole('button', { name: 'Confirm and turn on' }));
-    expect(await within(dialog()).findByText('We could not check yet')).toBeInTheDocument();
-    expect(within(dialog()).getByRole('button', { name: 'Check again' })).toBeInTheDocument();
-    expect(calls['POST /v1/auth/2fa/setup/confirm']).toBe(1);
-  });
+  }
 });
 
 describe('2FA disable answers the fixed 500 (FR-102, FR-104, TC-005)', () => {
@@ -178,59 +145,9 @@ describe('2FA disable answers the fixed 500 (FR-102, FR-104, TC-005)', () => {
   it('FR-102: the sign-in page explains the unconfirmed result without claiming 2FA is off', async () => {
     nav.search = new URLSearchParams('reason=two-factor-unconfirmed');
     renderWithAuth(<LoginForm />);
-    const note = await screen.findByText(/If sign-in no longer asks for an authenticator code/);
+    const note = await screen.findByText(/If you are asked for an authenticator code/);
     expect(note.closest('[role=status]')).not.toBeNull();
     expect(screen.queryByText(/turned off and you were signed out/)).not.toBeInTheDocument();
-  });
-});
-
-describe('2FA enroll/confirm answers the fixed 500 (FR-102, TC-003)', () => {
-  function Flow() {
-    return (
-      <>
-        <LoginForm />
-        <TwoFactorEnroll />
-      </>
-    );
-  }
-  it('TC-003: goes to sign-in with no session, never re-confirms, and the sign-in page explains both outcomes', async () => {
-    const calls = watchCalls();
-    setMockOutcomeUnknown({ route: '/v1/auth/2fa/enroll/confirm', methods: ['POST'], count: 1 });
-    renderWithAuth(<Flow />);
-    const u = userEvent.setup();
-    await u.type(screen.getAllByLabelText('Work email')[0]!, MOCK_USERS.reviewer.email);
-    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
-    await u.click(screen.getByRole('button', { name: 'Sign in' }));
-    await screen.findByTestId('manual-key');
-    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith('/admin/login?reason=enroll-unconfirmed'),
-    );
-    expect(calls['POST /v1/auth/2fa/enroll/confirm']).toBe(1);
-    expect(getAccessToken()).toBeNull();
-  });
-
-  it('FR-102: a 503 BUSY on enroll/confirm says the service is busy, not that the code was wrong', async () => {
-    const calls = watchCalls();
-    setMockBusy({ route: '/v1/auth/2fa/enroll/confirm', methods: ['POST'], count: 1 });
-    renderWithAuth(<Flow />);
-    const u = userEvent.setup();
-    await u.type(screen.getAllByLabelText('Work email')[0]!, MOCK_USERS.reviewer.email);
-    await u.type(screen.getByLabelText('Password'), MOCK_USERS.reviewer.password);
-    await u.click(screen.getByRole('button', { name: 'Sign in' }));
-    await screen.findByTestId('manual-key');
-    await u.type(screen.getByLabelText('6-digit code'), MOCK_TOTP_CODE);
-    await u.click(screen.getByRole('button', { name: 'Confirm and continue' }));
-    expect(await screen.findByText('The service is busy')).toBeInTheDocument();
-    expect(screen.queryByText('That code did not match')).not.toBeInTheDocument();
-    expect(calls['POST /v1/auth/2fa/enroll/confirm']).toBe(1);
-  });
-
-  it('FR-102: the sign-in page says what to expect and that the codes were lost', async () => {
-    nav.search = new URLSearchParams('reason=enroll-unconfirmed');
-    renderWithAuth(<LoginForm />);
-    expect(await screen.findByText(/get new recovery codes/)).toBeInTheDocument();
   });
 });
 

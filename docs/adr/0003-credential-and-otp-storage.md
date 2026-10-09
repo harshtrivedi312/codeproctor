@@ -71,7 +71,7 @@ Self-service "forgot password" was a gap; D-22 put it in scope (section 6).
   - revokes every refresh-token family of the user;
   - resets `failed_logins` and `locked_until`;
   - writes an audit row.
-- It never signs the user in, and it never disables TOTP. SUPER_ADMIN and REVIEWER still pass TOTP at their next login (FR-102).
+- It never signs the user in, and it never disables TOTP. Users who have TOTP enrolled still pass it at their next login (FR-102; D-70 made TOTP optional for every role).
 - The token travels in the URL, so it gets the same never-log and Referer rules as the invitation token (ADR 0001 C-5, A-13).
 - *Detail chosen by architect; owner to confirm:*
   - reset links expire after 30 minutes (staff invite links after 72 hours);

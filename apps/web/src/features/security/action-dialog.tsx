@@ -8,12 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/features/auth/auth-provider';
-import {
-  captureSessionStamp,
-  getGeneration,
-  getSessionUserId,
-  refreshForReplay,
-} from '@/lib/auth-session';
+import { captureSessionStamp, getGeneration, getSessionUserId } from '@/lib/auth-session';
 import { RecoveryCodesPanel } from '@/features/auth/recovery-codes-panel';
 import {
   confirmSetup,
@@ -39,7 +34,7 @@ const COPY: Record<SecurityAction, { title: string; description: string; submit:
   setup: {
     title: 'Set up two-factor sign-in',
     description:
-      'Enter your current password to continue. We ask again so that nobody else can change your sign-in on a computer you left unlocked.',
+      'This is optional, and we recommend it. Enter your current password to continue. We ask again so that nobody else can change your sign-in on a computer you left unlocked.',
     submit: 'Continue',
   },
   disable: {
@@ -63,10 +58,6 @@ const FAILURE_HINT: Record<
   busy: {
     title: 'Verification is temporarily unavailable',
     hint: 'The service is busy. Nothing was changed. Wait a few seconds, then submit again.',
-  },
-  role: {
-    title: 'Two-factor sign-in is required for your role',
-    hint: 'Super Admins and Reviewers cannot turn it off. If you lost your phone, use a recovery code or ask a Super Admin.',
   },
   conflict: {
     title: 'This changed in the meantime',
@@ -96,12 +87,7 @@ const FAILURE_HINT: Record<
 
 type Stage =
   | { kind: 'password'; passwordWrong: boolean }
-  | { kind: 'confirm'; manualKey: string; qr: string; restarted?: boolean }
-  /**
-   * Set-up confirm answered the fixed 500 (outcome unknown): finding out whether 2FA is on. `on`:
-   * it is, so the recovery codes in the lost answer are gone; `retry`: the check itself failed.
-   */
-  | { kind: 'unconfirmed'; state: 'checking' | 'on' | 'retry' }
+  | { kind: 'confirm'; manualKey: string; qr: string }
   | { kind: 'codes'; codes: string[] };
 
 /**
@@ -146,14 +132,12 @@ export function ActionDialog({
       const out = await disableTwoFactor(values.currentPassword, values.totpCode ?? '');
       if (!out.ok && out.failure === 'outcomeUnknown') {
         // The fixed 500 (contract section 8): a landed commit revokes this session, a lost one
-        // leaves the cookie valid. Either way end this session as after a 204, plus POST
-        // /auth/logout so a silent refresh cannot bring it back. A 401 after this is expected and
-        // starts no refresh (refreshes are blocked from here until the next sign-in).
-        if (stamp.generation !== getGeneration() || stamp.userId !== getSessionUserId()) {
+        // leaves the cookie valid. Sign out for real (logout call) to the unconfirmed notice.
+        if (stamp.userId !== getSessionUserId()) {
           onClose();
           return 'ok';
         }
-        await signOutRevoked({ confirmWithLogout: true });
+        await signOutRevoked('unconfirmed');
         return 'ok';
       }
       if (!out.ok) return fail(out.failure);
@@ -163,8 +147,9 @@ export function ActionDialog({
         onClose();
         return 'ok';
       }
-      // The server revoked every session of this user, this one included: no refresh, no logout.
-      await signOutRevoked();
+      // The server revoked every session of this user, this one included: sign out normally (the
+      // logout call normally answers 401, which counts as confirmed), no refresh.
+      await signOutRevoked('off');
       return 'ok';
     }
     const out = await regenerateRecoveryCodes(values.currentPassword);
@@ -175,12 +160,17 @@ export function ActionDialog({
   }
 
   /**
-   * Set-up turned 2FA on: re-read the session user (it carries `totpEnabled`) through the shared
-   * silent-refresh guard. Only runs after the recovery codes were acknowledged (Done): a failing
-   * refresh signs the user out and would unmount the one-time codes. Never runs for another user.
+   * Set-up turned 2FA on, and the server revoked every refresh family of this user, this one
+   * included. After the recovery codes were acknowledged (Done), forget the session here and go to
+   * sign-in through the normal sign-out (one logout call, normally 401 = confirmed), no refresh. Never for another user's session.
    */
-  function refreshStatus(): void {
-    void refreshForReplay(stamp);
+  async function finishSetup(): Promise<void> {
+    // Only another person's session is not ours to end; the same user in a newer generation is.
+    if (stamp.userId !== getSessionUserId()) {
+      onDone('enabled');
+      return;
+    }
+    await signOutRevoked('on');
   }
 
   function fail(f: Failure): 'wrong' | 'invalid' | 'failed' {
@@ -206,65 +196,24 @@ export function ActionDialog({
       return 'failed';
     }
     if (out.failure === 'code') return 'wrongCode';
-    if (out.failure === 'outcomeUnknown') {
-      // The fixed 500: 2FA may or may not be on now. Never confirm again with this code.
-      void checkSetupOutcome();
+    if (
+      out.failure === 'network' ||
+      out.failure === 'unknown' ||
+      out.failure === 'outcomeUnknown'
+    ) {
+      // The outcome is unknown: 2FA may be on and every session revoked, or nothing happened and
+      // the cookie is still valid. Sign out for real (logout call, pending marker if it fails).
+      setPassword('');
+      if (stamp.userId === getSessionUserId()) {
+        await signOutRevoked('unconfirmed');
+        return 'failed';
+      }
+      // Another person's session now: do not end it. Hint to reload and check the current state.
+      setFailure('conflict');
       return 'failed';
     }
     setFailure(out.failure);
     return 'failed';
-  }
-
-  /**
-   * Finds out whether set-up landed, with the password this dialog still holds (setup/start answers
-   * 409 when 2FA is already on; until `totpEnabled` ships that is the only read). On: the codes in
-   * the lost answer are gone, so offer new ones. Off: set-up starts again with a new QR code.
-   */
-  async function checkSetupOutcome(): Promise<void> {
-    setFailure(null);
-    setStage({ kind: 'unconfirmed', state: 'checking' });
-    const out = await startSetup(password);
-    if (out.ok) {
-      if (!out.data.qrDataUrl.startsWith('data:image/png;base64,')) {
-        setStage({ kind: 'unconfirmed', state: 'retry' });
-        return;
-      }
-      setStage({
-        kind: 'confirm',
-        manualKey: out.data.manualKey,
-        qr: out.data.qrDataUrl,
-        restarted: true,
-      });
-      return;
-    }
-    if (out.failure === 'conflict') {
-      setStage({ kind: 'unconfirmed', state: 'on' });
-      return;
-    }
-    if (out.failure === 'password') {
-      setPassword('');
-      setStage({ kind: 'password', passwordWrong: true });
-      return;
-    }
-    setFailure(out.failure);
-    setStage({ kind: 'unconfirmed', state: 'retry' });
-  }
-
-  /** 2FA is on but the one-time codes were lost: issue a new set (the old ones stop working). */
-  async function regenerateAfterUnknown(): Promise<void> {
-    setFailure(null);
-    const out = await regenerateRecoveryCodes(password);
-    if (out.ok) {
-      setPassword('');
-      setStage({ kind: 'codes', codes: out.data.recoveryCodes });
-      return;
-    }
-    if (out.failure === 'password') {
-      setPassword('');
-      setStage({ kind: 'password', passwordWrong: true });
-      return;
-    }
-    setFailure(out.failure);
   }
 
   const locked = stage.kind === 'codes';
@@ -295,6 +244,7 @@ export function ActionDialog({
               failure={failure}
               onSubmit={onPassword}
               onCancel={onClose}
+              cancelLabel={action === 'setup' ? 'Skip for now' : 'Cancel'}
             />
           </>
         ) : null}
@@ -309,25 +259,9 @@ export function ActionDialog({
               manualKey={stage.manualKey}
               qr={stage.qr}
               failure={failure}
-              restarted={stage.restarted === true}
               onSubmit={onCode}
               onCancel={onClose}
-            />
-          </>
-        ) : null}
-        {stage.kind === 'unconfirmed' ? (
-          <>
-            <DialogTitle>We could not confirm the result</DialogTitle>
-            <DialogDescription>
-              The server did not say whether two-factor sign-in was turned on. We did not send the
-              code again.
-            </DialogDescription>
-            <UnconfirmedStep
-              state={stage.state}
-              failure={failure}
-              onCheck={checkSetupOutcome}
-              onRegenerate={regenerateAfterUnknown}
-              onCancel={onClose}
+              cancelLabel={action === 'setup' ? 'Skip for now' : 'Cancel'}
             />
           </>
         ) : null}
@@ -345,8 +279,8 @@ export function ActionDialog({
               email={user?.email ?? ''}
               codes={stage.codes}
               onDone={() => {
-                if (action === 'setup') refreshStatus();
-                onDone(action === 'setup' ? 'enabled' : 'regenerated');
+                if (action === 'setup') void finishSetup();
+                else onDone('regenerated');
               }}
             />
           </>
@@ -374,6 +308,7 @@ function PasswordStep({
   failure,
   onSubmit,
   onCancel,
+  cancelLabel = 'Cancel',
 }: {
   submitLabel: string;
   destructive: boolean;
@@ -383,6 +318,7 @@ function PasswordStep({
   failure: Failure | null;
   onSubmit: (values: PasswordFormValues) => Promise<'wrong' | 'invalid' | 'failed' | 'ok'>;
   onCancel: () => void;
+  cancelLabel?: string;
 }): React.JSX.Element {
   const {
     register,
@@ -454,7 +390,7 @@ function PasswordStep({
       ) : null}
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button
           type="submit"
@@ -472,87 +408,20 @@ function groupKey(key: string): string {
   return key.match(/.{1,4}/g)?.join(' ') ?? key;
 }
 
-function UnconfirmedStep({
-  state,
-  failure,
-  onCheck,
-  onRegenerate,
-  onCancel,
-}: {
-  state: 'checking' | 'on' | 'retry';
-  failure: Failure | null;
-  onCheck: () => Promise<void>;
-  onRegenerate: () => Promise<void>;
-  onCancel: () => void;
-}): React.JSX.Element {
-  const [busy, setBusy] = React.useState(false);
-  return (
-    <div className="mt-4 space-y-4" data-testid="setup-unconfirmed">
-      <FailureAlert failure={failure} />
-      {state === 'checking' ? (
-        <p role="status" className="text-sm">
-          Checking whether two-factor sign-in is on…
-        </p>
-      ) : null}
-      {state === 'on' ? (
-        <Alert tone="warning" role="status" title="Two-factor sign-in is on">
-          Set-up appears to have gone through, but your recovery codes did not reach you. Get a new
-          set now. Your authenticator app already works, and nothing needs to be scanned again.
-        </Alert>
-      ) : null}
-      {state === 'retry' ? (
-        <Alert tone="warning" role="status" title="We could not check yet">
-          Check your connection, then check again. Do not enter the same code again.
-        </Alert>
-      ) : null}
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="outline" onClick={onCancel}>
-          Close
-        </Button>
-        {state === 'on' ? (
-          <Button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void onRegenerate().finally(() => setBusy(false));
-            }}
-          >
-            Get new recovery codes
-          </Button>
-        ) : null}
-        {state === 'retry' ? (
-          <Button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void onCheck().finally(() => setBusy(false));
-            }}
-          >
-            Check again
-          </Button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 function ConfirmStep({
   manualKey,
   qr,
   failure,
-  restarted,
   onSubmit,
   onCancel,
+  cancelLabel = 'Cancel',
 }: {
   manualKey: string;
   qr: string;
   failure: Failure | null;
-  /** Set-up was started again after an unconfirmed answer: the old QR code and code are void. */
-  restarted: boolean;
   onSubmit: (values: CodeFormValues) => Promise<'ok' | 'wrongCode' | 'failed'>;
   onCancel: () => void;
+  cancelLabel?: string;
 }): React.JSX.Element {
   const [wrongCode, setWrongCode] = React.useState(false);
   const {
@@ -591,12 +460,6 @@ function ConfirmStep({
           {groupKey(manualKey)}
         </p>
       </div>
-      {restarted ? (
-        <Alert tone="info" role="status" title="Set-up is not on, so we started it again">
-          Scan this new QR code (remove the old entry from your app) and enter a fresh code. The old
-          code cannot be used.
-        </Alert>
-      ) : null}
       {wrongCode ? (
         <Alert tone="error" role="alert" title="That code did not match">
           Wait for a fresh code in your app and enter it again. If it keeps failing, check that your
@@ -611,7 +474,7 @@ function ConfirmStep({
       </Field>
       <div className="flex justify-end gap-2">
         <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button type="submit" disabled={isSubmitting}>
           {isSubmitting ? 'Checking…' : 'Confirm and turn on'}

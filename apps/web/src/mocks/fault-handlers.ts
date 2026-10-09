@@ -11,7 +11,7 @@ import { apiBaseUrl } from '@/lib/env';
  *    500 WITHOUT applying it (a MSW handler cannot run the next one and rewrite its answer), so a
  *    test that needs "it happened" must check the list as the screen tells the user to.
  *  - Outcome unknown (FU-BE-208): the five routes whose transaction may or may not have committed
- *    (2FA setup/confirm, enroll/confirm, disable, recovery-code verify, staff invite and re-issue)
+ *    (2FA setup/confirm, disable, recovery-code verify, staff invite and re-issue)
  *    answer the SAME fixed 500 as the audit failure. `setMockOutcomeUnknown` adds an optional
  *    `landed` callback that runs when the fault fires, so a test can leave the mock in the state a
  *    committed action would have produced (for example `seedMockTwoFactor`), or omit it for "did not land".

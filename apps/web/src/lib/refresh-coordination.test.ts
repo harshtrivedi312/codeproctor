@@ -18,6 +18,7 @@ type Session = {
     role: 'RECRUITER';
     orgName: string;
     totpEnabled: boolean;
+    twoFactorRecommended: boolean;
   };
 };
 const sessionFor = (token: string, id = 'u-1'): Session => ({
@@ -29,6 +30,7 @@ const sessionFor = (token: string, id = 'u-1'): Session => ({
     role: 'RECRUITER',
     orgName: 'Org',
     totpEnabled: false,
+    twoFactorRecommended: true,
   },
 });
 

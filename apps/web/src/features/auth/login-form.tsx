@@ -23,7 +23,7 @@ type Banner = { kind: 'failed' } | { kind: 'network' } | { kind: 'busy' } | null
 export const SIGN_IN_FAILED_MESSAGE =
   'Sign-in failed. If this keeps happening, wait 15 minutes or contact your administrator.';
 
-/** FR-101 login form. TOTP (FR-102) and enrollment are separate screens reached from the result. */
+/** FR-101 login form. TOTP (FR-102) is a separate screen reached from the result. */
 export function LoginForm(): React.JSX.Element {
   const router = useRouter();
   const params = useSearchParams();
@@ -66,12 +66,9 @@ export function LoginForm(): React.JSX.Element {
       if (data.status === 'authenticated' && data.session) {
         signIn(data.session);
         router.replace(next);
-      } else if (data.challengeToken) {
-        const kind = data.status === 'two_factor_enrollment_required' ? 'enroll' : 'verify';
-        setPending({ kind, challengeToken: data.challengeToken });
-        router.push(
-          `${kind === 'enroll' ? '/admin/2fa/enroll' : '/admin/2fa'}?next=${encodeURIComponent(next)}`,
-        );
+      } else if (data.status === 'two_factor_required' && data.challengeToken) {
+        setPending({ kind: 'verify', challengeToken: data.challengeToken });
+        router.push(`/admin/2fa?next=${encodeURIComponent(next)}`);
       } else {
         setBanner({ kind: 'network' });
       }
@@ -91,7 +88,9 @@ export function LoginForm(): React.JSX.Element {
   const expired = params.get('reason') === 'expired';
   const reset = params.get('reset') === 'done';
   const twoFactorOff = params.get('reason') === 'two-factor-off';
-  // After the fixed "outcome unknown" 500 (api-contract section 8): say what we know, and how to find out.
+  const twoFactorOn = params.get('reason') === 'two-factor-on';
+  // After the fixed "outcome unknown" 500 or a lost answer (api-contract section 8): say what we
+  // know, and how to find out.
   const unconfirmedReason = params.get('reason');
 
   return (
@@ -107,18 +106,16 @@ export function LoginForm(): React.JSX.Element {
           Two-factor sign-in is turned off and you were signed out on all devices. Sign in again.
         </Alert>
       ) : null}
-      {!banner && unconfirmedReason === 'two-factor-unconfirmed' ? (
-        <Alert tone="warning" role="status" title="We could not confirm the change">
-          You were signed out on this device. If sign-in no longer asks for an authenticator code,
-          two-factor sign-in is off. If it still asks, it is on: sign in, then turn it off again on
-          the Security page if you want to.
+      {twoFactorOn && !banner ? (
+        <Alert tone="info" role="status">
+          Two-factor sign-in is on. Sign in again with your authenticator code.
         </Alert>
       ) : null}
-      {!banner && unconfirmedReason === 'enroll-unconfirmed' ? (
-        <Alert tone="warning" role="status" title="We could not confirm that set-up finished">
-          Sign in again. If you are asked for a code from your authenticator app, set-up worked:
-          enter the code, then open the Security page and get new recovery codes, because the codes
-          from that attempt were lost. If you are asked to set up again, scan the new QR code.
+      {!banner && unconfirmedReason === 'two-factor-unconfirmed' ? (
+        <Alert tone="warning" role="status" title="We could not confirm the change">
+          You were signed out on this device to be safe. Sign in again. If you are asked for an
+          authenticator code, two-factor sign-in is on. If not, it is off: set it up or turn it off
+          again from the Security page if you want to.
         </Alert>
       ) : null}
       {!banner && unconfirmedReason === 'recovery-unconfirmed' ? (

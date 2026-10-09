@@ -483,6 +483,19 @@ export function assertCandidateColumns(
       `${model}.${operation}: omit must be an object (ADR 0013 CS-4.4).`,
     );
   }
+  // A second layer under the hook's omit check (omit-args.ts; S3 of the #314 review): the caller's omit is merged
+  // below, and Prisma turns an entry that is not `true` into a selection of its key, a relation or `_count`
+  // included (ADR 0013 CS-4.5). So a CANDIDATE omit names scalar columns of the model only, each `true`.
+  if (isPlainObject(omitted)) {
+    const scalars = new Set(scalarColumnsOf(model));
+    for (const [key, value] of Object.entries(omitted)) {
+      if (value !== true || !scalars.has(key)) {
+        throw new OrgScopeViolationError(
+          `${model}.${operation}: a CANDIDATE omit names scalar columns of the model only, each true (ADR 0013 CS-4.5).`,
+        );
+      }
+    }
+  }
   if (named !== undefined) {
     // A select that names nothing is refused (review of #185, S2): Prisma 7.10 answers `{}`, `{ id: false }`
     // and `{ id: undefined }` with a validation error today, which is a Prisma detail and not a promise.
