@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SESSION_EPOCH_KEY, beginSession, refreshSession, settleSession } from '@/lib/auth-session';
+import { apiBaseUrl } from '@/lib/env';
 import { MOCK_USERS } from '@/mocks/auth-handlers';
 import { server } from '@/mocks/server';
 import { renderWithAuth, resetAuthTestState } from '@/test/auth-test-utils';
@@ -16,6 +17,11 @@ import { useAuth } from './auth-provider';
  */
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
+// A short lock wait so the bound can be tested with real timers (AbortSignal.timeout is not faked).
+vi.mock('@/lib/auth-session', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/auth-session')>()),
+  LOGOUT_LOCK_WAIT_MS: 300,
+}));
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => {
@@ -129,5 +135,73 @@ describe('logout and the refresh lock (FR-104, TC-005)', () => {
     await tick();
     await tick();
     expect(calls.logout).toBe(0);
+  });
+});
+
+describe('logout lock bound and queued sign-outs (FR-104, TC-005)', () => {
+  it('FR-104 TC-005: with the lock held for good, the logout is sent exactly once after the bounded wait', async () => {
+    const calls = countLogouts();
+    const u = await signedInPage();
+    holdRefreshLock(); // never released
+    await u.click(screen.getByRole('button', { name: 'Sign out' }));
+    await tick();
+    expect(calls.logout).toBe(0);
+    await waitFor(() => expect(calls.logout).toBe(1), { timeout: 2000 });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(calls.logout).toBe(1);
+    expect(window.localStorage.getItem('cp.signOutPending')).toBeNull();
+  });
+
+  it('FR-104 TC-005: signOutRevoked(unconfirmed) queued behind a held lock still sends its logout once the lock is released', async () => {
+    function RevokedButton() {
+      const { signOutRevoked } = useAuth();
+      return (
+        <button type="button" onClick={() => void signOutRevoked('unconfirmed')}>
+          Revoked sign out
+        </button>
+      );
+    }
+    const calls = countLogouts();
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <RevokedButton />
+        <Who />
+      </>,
+    );
+    const u = userEvent.setup();
+    await u.type(screen.getByLabelText('Work email'), MOCK_USERS.recruiter.email);
+    await u.type(screen.getByLabelText('Password'), MOCK_USERS.recruiter.password);
+    await u.click(screen.getByRole('button', { name: 'Sign in' }));
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    const release = holdRefreshLock();
+    await u.click(screen.getByRole('button', { name: 'Revoked sign out' }));
+    await tick();
+    expect(calls.logout).toBe(0);
+    release();
+    await waitFor(() => expect(calls.logout).toBe(1));
+    await waitFor(() => expect(window.localStorage.getItem('cp.signOutPending')).toBeNull());
+  });
+
+  it('FR-104 TC-005: two tabs signing out at once send exactly one logout and leave the marker cleared', async () => {
+    const calls = countLogouts();
+    const u = await signedInPage();
+    // The other tab holds the lock, sends its own logout, clears the shared marker, then releases.
+    let release: () => void = () => undefined;
+    const otherTab = navigator.locks.request('cp.refresh', async () => {
+      await new Promise<void>((r) => (release = r));
+      await fetch(`${apiBaseUrl}/v1/auth/logout`, { method: 'POST' });
+      window.localStorage.removeItem('cp.signOutPending');
+    });
+    await u.click(screen.getByRole('button', { name: 'Sign out' }));
+    await tick();
+    expect(window.localStorage.getItem('cp.signOutPending')).toBe('1');
+    release();
+    await otherTab;
+    await tick();
+    await tick();
+    expect(calls.logout).toBe(1); // the other tab's; this tab saw the marker cleared and sent none
+    expect(window.localStorage.getItem('cp.signOutPending')).toBeNull();
+    expect(screen.queryByText('We could not confirm you were signed out')).not.toBeInTheDocument();
   });
 });

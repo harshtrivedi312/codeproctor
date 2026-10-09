@@ -109,7 +109,7 @@ function refreshServer(answer: () => Response | Promise<Response>) {
 const flush = () => new Promise((r) => setTimeout(r, 20));
 
 describe('FR-104, TC-005: one refresh across tabs', () => {
-  it('two tabs refreshing at once send exactly one request and both get its session', async () => {
+  it('FR-104 TC-005: two tabs refreshing at once send exactly one request and both get its session', async () => {
     const calls = refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 40));
       return HttpResponse.json(sessionFor('tok-A'));
@@ -125,7 +125,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(b.auth.getSessionUserId()).toBe('u-1');
   });
 
-  it('three tabs at once still send one request', async () => {
+  it('FR-104 TC-005: three tabs at once still send one request', async () => {
     const calls = refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 30));
       return HttpResponse.json(sessionFor('tok-A'));
@@ -136,7 +136,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(results.every((r) => r?.accessToken === 'tok-A')).toBe(true);
   });
 
-  it('a tab that refreshes alone, later, sends its own request (no stale outcome is reused)', async () => {
+  it('FR-104 TC-005: a tab that refreshes alone, later, sends its own request (no stale outcome is reused)', async () => {
     let n = 0;
     const calls = refreshServer(() => HttpResponse.json(sessionFor(`tok-${(n += 1)}`)));
     const a = await openTab();
@@ -147,7 +147,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(2);
   });
 
-  it('503 BUSY then success: the winner retries once, the other tab sends nothing and does not sign out', async () => {
+  it('FR-104 TC-005: 503 BUSY then success: the winner retries once, the other tab sends nothing and does not sign out', async () => {
     let n = 0;
     const calls = refreshServer(() =>
       (n += 1) === 1
@@ -165,7 +165,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(rb?.accessToken).toBe('tok-B');
   });
 
-  it('a BUSY refresh that gives up signs nobody out, in either tab', async () => {
+  it('FR-104 TC-005: a BUSY refresh that gives up signs nobody out, in either tab', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const calls = refreshServer(() =>
       HttpResponse.json(
@@ -190,7 +190,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(b.busy.busyStore.get().refreshBusy).toBe(true);
   });
 
-  it('401 with the cookie cleared signs both tabs out and nobody retries', async () => {
+  it('FR-104 TC-005: 401 with the cookie cleared signs both tabs out and nobody retries', async () => {
     const calls = refreshServer(() => new HttpResponse(null, { status: 401 }));
     const a = await openTab();
     const b = await openTab();
@@ -207,7 +207,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(seen.at(-1)).toBeNull();
   });
 
-  it('a tab that signs out while waiting for the lock ignores the winner outcome', async () => {
+  it('FR-104 TC-005: a tab that signs out while waiting for the lock ignores the winner outcome', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((r) => (release = r));
     refreshServer(async () => {
@@ -230,7 +230,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(b.auth.getSessionUserId()).toBeNull();
   });
 
-  it('never applies the winner outcome to a tab signed in as someone else', async () => {
+  it('FR-104 TC-005: never applies the winner outcome to a tab signed in as someone else', async () => {
     refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 30));
       return HttpResponse.json(sessionFor('tok-A', 'u-1'));
@@ -244,7 +244,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(b.auth.getSessionUserId()).toBeNull();
   });
 
-  it('a tab that already has the sign-out marker set restores nothing from another tab', async () => {
+  it('FR-104 TC-005: a tab that already has the sign-out marker set restores nothing from another tab', async () => {
     refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 30));
       return HttpResponse.json(sessionFor('tok-A'));
@@ -260,7 +260,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(b.token.getAccessToken()).toBeNull();
   });
 
-  it('the winner closing without an outcome lets the waiting tab send its own request', async () => {
+  it('FR-104 TC-005: the winner closing without an outcome lets the waiting tab send its own request', async () => {
     const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
     const a = await openTab();
     // A tab that holds the lock and never reports (closed or crashed), then lets go.
@@ -273,7 +273,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(1);
   });
 
-  it('without Web Locks a BroadcastChannel election still sends one request', async () => {
+  it('FR-104 TC-005: without Web Locks a BroadcastChannel election still sends one request', async () => {
     installFakes(false);
     const calls = refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 40));
@@ -321,7 +321,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(0);
   });
 
-  it('a holder whose request times out shares the error: both tabs sign out, one request', async () => {
+  it('FR-104 TC-005: a holder whose request times out shares the error: both tabs sign out, one request', async () => {
     const calls = refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 30));
       return HttpResponse.error();
@@ -338,7 +338,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(b.token.getAccessToken()).toBeNull();
   });
 
-  it('a stale election entry does not stall a tab: the other tab ending frees it at once', async () => {
+  it('FR-104 TC-005: a stale election entry does not stall a tab: the other tab ending frees it at once', async () => {
     installFakes(false);
     const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
     const b = await openTab();
@@ -352,7 +352,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(1);
   });
 
-  it('election: three tabs, the winner abandons: the others re-elect, one sends, one request in all', async () => {
+  it('FR-104 TC-005: election: three tabs, the winner abandons: the others re-elect, one sends, one request in all', async () => {
     installFakes(false);
     const calls = refreshServer(async () => {
       await new Promise((r) => setTimeout(r, 30));
@@ -377,7 +377,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect([t2, t3].every((t) => t.token.getAccessToken() === 'tok-next')).toBe(true);
   });
 
-  it('election: a tab whose session ended while it waited sends nothing', async () => {
+  it('FR-104 TC-005: election: a tab whose session ended while it waited sends nothing', async () => {
     installFakes(false);
     const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
     const a = await openTab();
@@ -388,7 +388,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(0);
   });
 
-  it('no coordination available: canSend still guards the send', async () => {
+  it('FR-104 TC-005: no coordination available: canSend still guards the send', async () => {
     installFakes(false);
     globalThis.BroadcastChannel = undefined as unknown as typeof BroadcastChannel;
     const calls = refreshServer(() => HttpResponse.json(sessionFor('tok-own')));
@@ -398,7 +398,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(calls.n).toBe(0);
   });
 
-  it('withRefreshLock: a bounded wait goes on without the lock after the timeout', async () => {
+  it('FR-104 TC-005: withRefreshLock: a bounded wait goes on without the lock after the timeout', async () => {
     const { withRefreshLock } = await import('@/lib/refresh-coordination');
     void navigator.locks.request('cp.refresh', () => new Promise<void>(() => undefined)); // held forever
     let ran = false;
@@ -409,7 +409,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(ran).toBe(true);
   });
 
-  it('a logout waits for a refresh in another tab (same lock)', async () => {
+  it('FR-104 TC-005: a logout waits for a refresh in another tab (same lock)', async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((r) => (release = r));
     refreshServer(async () => {
@@ -433,7 +433,34 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(ran).toBe(true);
   });
 
-  it('an idle tab drops the broadcast outcome: it never holds another tab token', async () => {
+  it('FR-104 TC-005: a refresh that starts after an outcome was adopted does not reuse it (older session generation)', async () => {
+    const rc = await import('@/lib/refresh-coordination');
+    rc.resetRefreshCoordinationForTests();
+    let release: () => void = () => undefined;
+    void navigator.locks.request('cp.refresh', () => new Promise<void>((r) => (release = r)));
+    const sendA = vi.fn(async () => ({ kind: 'error' as const }));
+    const sendB = vi.fn(async () => ({ kind: 'busy' as const }));
+    const first = rc.coordinateRefresh(sendA);
+    await flush();
+    // Another tab's outcome for the first call arrives while that call still waits.
+    new FakeChannel('cp.refresh.channel').postMessage({
+      t: 'outcome',
+      id: 'other-tab',
+      outcome: { kind: 'signed-out' },
+    });
+    await flush();
+    // A later call (a newer session generation) starts while the old outcome is still held.
+    const second = rc.coordinateRefresh(sendB);
+    await flush();
+    release();
+    expect(await first).toEqual({ kind: 'signed-out' });
+    expect(sendA).not.toHaveBeenCalled();
+    // The old outcome is not handed to the later call: it sends its own request.
+    expect(await second).toEqual({ kind: 'busy' });
+    expect(sendB).toHaveBeenCalledTimes(1);
+  });
+
+  it('FR-104 TC-005: an idle tab drops the broadcast outcome: it never holds another tab token', async () => {
     refreshServer(() => HttpResponse.json(sessionFor('tok-A')));
     const a = await openTab();
     const idle = await openTab();
@@ -442,7 +469,7 @@ describe('FR-104, TC-005: one refresh across tabs', () => {
     expect(idle.token.getAccessToken()).toBeNull();
   });
 
-  it('nothing token-like is written to any browser storage or cookie, in any tab', async () => {
+  it('FR-104 TC-005: nothing token-like is written to any browser storage or cookie, in any tab', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
     const cookieSet = vi.spyOn(document, 'cookie', 'set');
     refreshServer(async () => {

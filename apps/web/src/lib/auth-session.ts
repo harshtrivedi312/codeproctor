@@ -77,6 +77,13 @@ export function invalidateRefreshes(): void {
 /** Longest a refresh or logout request may take, and the longest a sign-in waits for them. */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * Longest a logout waits for the cross-tab refresh lock before it goes on (still checked first).
+ * 15 s is safe: once the sign-out marker is set, a lock holder's refresh stops within one request
+ * timeout (10 s) and releases the lock.
+ */
+export const LOGOUT_LOCK_WAIT_MS = 15_000;
+
 const SIGN_OUT_MARKER = 'cp.signOutPending';
 /** Changes on every sign-in so other tabs re-check their session. A random nonce, never a token. */
 export const SESSION_EPOCH_KEY = 'cp.sessionEpoch';
@@ -111,6 +118,20 @@ export function isSignOutPending(): boolean {
   return signingOut || markerSet();
 }
 
+/**
+ * True while a queued logout is still wanted. With working storage the shared marker decides:
+ * another tab clears it when it confirms this sign-out or signs in, and the in-memory flag stays
+ * true after a sign-out in this tab, so it cannot tell. Only when storage is blocked does the
+ * in-memory flag decide.
+ */
+export function signOutStillWanted(): boolean {
+  try {
+    return window.localStorage.getItem(SIGN_OUT_MARKER) === '1';
+  } catch {
+    return signingOut;
+  }
+}
+
 /** Called once the server answered the logout call with success. */
 export function confirmSignedOut(): void {
   signingOut = false;
@@ -133,8 +154,10 @@ export function trackLogout(call: Promise<unknown>): void {
 /** Resolves when any refresh and any logout call in flight have finished, whatever their result. */
 export async function settleSession(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Long enough for this tab's own queued logout: up to LOGOUT_LOCK_WAIT_MS for the lock, then one
+  // request, so a sign-in here cannot overtake a logout that is still waiting to be sent.
   const limit = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, REQUEST_TIMEOUT_MS);
+    timer = setTimeout(resolve, LOGOUT_LOCK_WAIT_MS + REQUEST_TIMEOUT_MS);
   });
   const settled = (async () => {
     await settleRefresh();

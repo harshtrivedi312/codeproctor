@@ -13,6 +13,8 @@ import {
   getGeneration,
   getSessionUserId,
   REQUEST_TIMEOUT_MS,
+  LOGOUT_LOCK_WAIT_MS,
+  signOutStillWanted,
   handleSignInElsewhere,
   invalidateRefreshes,
   isSignOutMarkerSet,
@@ -35,9 +37,6 @@ export interface PendingChallenge {
   kind: 'verify';
   challengeToken: string;
 }
-
-/** Longest a logout waits for the cross-tab refresh lock before it goes on (still checked first). */
-const LOGOUT_LOCK_WAIT_MS = 15_000;
 
 export const LOGIN_PATH = '/admin/login';
 /** Shown once on the login page after turning 2FA off. A fixed word, nothing about the user. */
@@ -138,7 +137,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     // while a logout is outstanding), and its new cookie must not be revoked.
     const call = withRefreshLock(async (): Promise<boolean> => {
       if (startedIn !== getGeneration()) return false; // a sign-in since: not ours to revoke
-      if (!isSignOutPending()) return true; // another tab already confirmed this sign-out
+      // Another tab already confirmed this sign-out (it cleared the shared marker): nothing to send.
+      if (!signOutStillWanted()) return true;
       try {
         const { response } = await api.POST('/v1/auth/logout', {
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -277,6 +277,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       // (Sign out, 2FA off, 2FA on, unknown set-up outcome) goes through here.
       const generationAtSignOut = getGeneration();
       const finished = trackSignOut();
+      // `settled` waits for a refresh already running. In theory that wait is unbounded; in practice
+      // a refresh stops within one request timeout (~10 s), so the logout can lag the UI sign-out
+      // by that much (the session is already forgotten here).
       await settled;
       try {
         // The session listener also cancels and clears on the user change; this is explicit so the

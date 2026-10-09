@@ -56,8 +56,14 @@ const FOREIGN_WAIT_MS = 60_000; // longer than the holder's worst case: 4 attemp
 const myId = makeId();
 let channel: BroadcastChannel | null | undefined;
 let waiting = 0;
-/** The latest outcome another tab broadcast while this tab was waiting. Memory only. */
-let adopted: RefreshOutcome | null = null;
+/**
+ * The latest outcome another tab broadcast while this tab was waiting, with a sequence number.
+ * Memory only. A call accepts it only when `seq` is newer than the sequence at the moment that
+ * call entered coordinateRefresh: an outcome that arrived for an earlier call (an older session
+ * generation) is never handed to a later one (FR-104, TC-005).
+ */
+let adopted: { seq: number; outcome: RefreshOutcome } | null = null;
+let outcomeSeq = 0;
 const outcomeWaiters = new Set<() => void>();
 /** Fallback: other tabs' refreshes announced and not yet finished (id to expiry time). */
 const foreignActive = new Map<string, number>();
@@ -118,7 +124,8 @@ function onMessage(data: unknown): void {
   foreignActive.delete(m.id);
   // Drop it unless a refresh of this tab is waiting: no idle tab holds another tab's token.
   if (waiting > 0 && isOutcome(m.outcome)) {
-    adopted = m.outcome;
+    outcomeSeq += 1;
+    adopted = { seq: outcomeSeq, outcome: m.outcome };
     for (const wake of outcomeWaiters) wake();
   }
 }
@@ -134,14 +141,19 @@ function post(message: Message): void {
   }
 }
 
-/** Resolves when an outcome was adopted, or after `ms` (true when one is there). */
-function waitForAdopted(ms: number): Promise<boolean> {
-  if (adopted) return Promise.resolve(true);
+/** The adopted outcome if it arrived after the call that entered at sequence `since`. */
+function freshOutcome(since: number): RefreshOutcome | null {
+  return adopted && adopted.seq > since ? adopted.outcome : null;
+}
+
+/** Resolves when an outcome newer than `since` was adopted, or after `ms` (true when one is there). */
+function waitForAdopted(ms: number, since: number): Promise<boolean> {
+  if (freshOutcome(since)) return Promise.resolve(true);
   return new Promise((resolve) => {
     const done = (): void => {
       clearTimeout(timer);
       outcomeWaiters.delete(done);
-      resolve(adopted !== null);
+      resolve(freshOutcome(since) !== null);
     };
     const timer = setTimeout(done, ms);
     outcomeWaiters.add(done);
@@ -168,10 +180,12 @@ export async function coordinateRefresh(
 ): Promise<RefreshOutcome | null> {
   getChannel();
   if (waiting === 0) adopted = null;
+  // Only outcomes broadcast after this point can answer this call.
+  const since = outcomeSeq;
   waiting += 1;
   try {
-    if (hasLocks()) return await withLock(send, canSend);
-    if (getChannel()) return await withElection(send, canSend);
+    if (hasLocks()) return await withLock(send, canSend, since);
+    if (getChannel()) return await withElection(send, canSend, since);
     return canSend() ? await send() : null;
   } finally {
     waiting -= 1;
@@ -193,6 +207,7 @@ async function sendAndShare(
 async function withLock(
   send: () => Promise<RefreshOutcome | null>,
   canSend: () => boolean,
+  since: number,
 ): Promise<RefreshOutcome | null> {
   // Lock free: nobody else is refreshing, send at once.
   const first = await navigator.locks.request(
@@ -206,7 +221,7 @@ async function withLock(
   // and nothing is sent. The holder posts before it releases, but delivery here can lag the
   // release a little, hence the short grace. No outcome (holder closed or abandoned): send ours.
   return navigator.locks.request(LOCK_NAME, async () => {
-    if (await waitForAdopted(OUTCOME_GRACE_MS)) return adopted;
+    if (await waitForAdopted(OUTCOME_GRACE_MS, since)) return freshOutcome(since);
     return sendAndShare(send, canSend);
   });
 }
@@ -217,19 +232,22 @@ const MAX_ELECTION_ROUNDS = 5;
 async function withElection(
   send: () => Promise<RefreshOutcome | null>,
   canSend: () => boolean,
+  since: number,
 ): Promise<RefreshOutcome | null> {
   for (let round = 0; round < MAX_ELECTION_ROUNDS; round += 1) {
     const now = Date.now();
     for (const [id, expires] of foreignActive) if (expires < now) foreignActive.delete(id);
-    if (adopted) return adopted;
+    const early = freshOutcome(since);
+    if (early) return early;
     // Every tab that needs a refresh announces itself and the lowest id sends. A tab that lost
     // waits for the winner's outcome; if the winner ended without one, everyone still waiting
     // announces again, so losers never wait on each other and never send together.
     post({ t: 'start', id: myId });
     await new Promise((r) => setTimeout(r, ELECTION_MS));
-    if (adopted) {
+    const quick = freshOutcome(since);
+    if (quick) {
       post({ t: 'retract', id: myId });
-      return adopted;
+      return quick;
     }
     const lower = [...foreignActive.keys()].some((id) => id < myId);
     if (!lower) {
@@ -240,8 +258,9 @@ async function withElection(
       }
     }
     post({ t: 'retract', id: myId });
-    await waitForAdopted(FOREIGN_WAIT_MS);
-    if (adopted) return adopted;
+    await waitForAdopted(FOREIGN_WAIT_MS, since);
+    const late = freshOutcome(since);
+    if (late) return late;
   }
   return sendAndShare(send, canSend);
 }
@@ -249,7 +268,9 @@ async function withElection(
 /**
  * Runs `fn` while holding the cross-tab refresh lock (a logout must not overlap a refresh). With
  * `timeoutMs` the wait for the lock is bounded: after it `fn` runs anyway (it must make its own
- * check that it is still wanted). Without Web Locks `fn` just runs.
+ * check that it is still wanted). Without Web Locks `fn` just runs. Any other lock error
+ * (SecurityError, an unusable lock manager) also falls back to running `fn` without the lock, on
+ * purpose: a logout that cannot be serialised must still be sent rather than silently dropped.
  */
 export async function withRefreshLock<T>(fn: () => Promise<T>, timeoutMs?: number): Promise<T> {
   if (!hasLocks()) return fn();
@@ -280,6 +301,7 @@ export function resetRefreshCoordinationForTests(): void {
   channel = undefined;
   waiting = 0;
   adopted = null;
+  outcomeSeq = 0;
   outcomeWaiters.clear();
   foreignActive.clear();
 }
