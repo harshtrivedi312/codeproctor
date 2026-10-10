@@ -257,7 +257,8 @@ export function createFetchTransport(o: FetchTransportOptions): EventTransport &
           if (r.kind === 'AUTH') return { auth: r.code ?? '' };
         }
         if (a.status === 429) return { busy: true };
-        if (r === 'REJECTED' || (typeof r === 'object' && r.kind === 'REJECTED')) {
+        // Only 400 and 413 mean "this body will not be accepted"; other 4xx are not about the body.
+        if (a.status === 400 || a.status === 413) {
           // 400 or 413: this body will never be accepted. Beat once more WITHOUT it, so
           // last_heartbeat stays fresh and the session is not reported offline.
           if (withBody && body !== undefined) {

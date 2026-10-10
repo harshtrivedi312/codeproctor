@@ -9,6 +9,20 @@ export * from './core/transport';
 export * from './core/session';
 export * from './core/key-store';
 export * from './core/proctor-key';
+export * from './core/system-check';
+export {
+  FLAG_DETAIL_MAX,
+  FLAG_ID_RE,
+  FLAG_RESEND_MS,
+  MAX_HEARTBEAT_FLAGS,
+  type HealthSnapshot,
+  type HeartbeatBody,
+  type HeartbeatQueueHealth,
+  type HeartbeatRecorderHealth,
+  type HeartbeatState,
+  type HeartbeatStreamHealth,
+  type TokenRenewal,
+} from './core/health';
 export * from './monitors/fullscreen';
 export * from './monitors/visibility';
 export * from './monitors/clipboard';
