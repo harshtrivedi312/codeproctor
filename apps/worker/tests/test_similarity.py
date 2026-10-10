@@ -151,7 +151,8 @@ def test_tc074_identical_submissions_flag_both_sessions() -> None:
     assert f.payload["matchedSessionId"] == "s2"
     assert f.payload["similarity"] == 1.0
     assert "aiReferenceSolutionId" not in f.payload
-    assert f.payload["matchedLines"]  # evidence: which lines
+    assert f.details["matchedLines"]  # evidence: which lines (in details, not the payload)
+    assert "matchedLines" not in f.payload
 
 
 def test_fr803_renamed_variables_and_changed_comments_still_match() -> None:

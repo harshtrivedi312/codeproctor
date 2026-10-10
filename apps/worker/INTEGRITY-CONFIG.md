@@ -170,3 +170,13 @@ the model covers less well (AuraFace card, F-6). False positives (a wrong person
 and family members; a threshold that is too low. Manual review and the pilot-exit review of false
 match and false non-match rates (ADR 0004) are the safeguards; no automatic rejection exists.
 An ID card held up to a webcam is small for the BlazeFace short-range model (ADR 0001 12.2 notes).
+
+## 8. Org settings and the signed analysis routes (BE-12, ADR 0014)
+
+Requests are signed (`WORKER_HMAC_KEYS`); only `GET /health` is open. `config` on `/v1/analyze/*` and
+`/v1/risk` is checked against `ORG_BOUNDS` in `src/worker/org_settings.py` (proposed bounds, pending
+the owner): an org may set the listed keys of `risk`, `keystrokes`, `similarity` and `vad` inside
+their bounds, plus `disabledEventTypes` (set from the accommodations). Anything else is a 422
+(`ORG_SETTINGS_INVALID`, or `ORG_SETTINGS_LEGACY_KEY` for the old `fastReviewBands`); nothing is
+clamped. Fast-path bands and face settings stay system configuration. Body limits: keystrokes and
+similarity 16 MiB, risk 8 MiB, vad 2 MiB, face routes 16 KiB. Analysis calls share a semaphore of 2.

@@ -41,11 +41,11 @@ DEFAULT_BODY_LIMIT: Final = 16 * 1024
 _KID: Final = re.compile(r"[A-Za-z0-9_-]{1,32}")
 _B64URL: Final = re.compile(r"[A-Za-z0-9_-]+")
 _DIGITS: Final = re.compile(r"[0-9]{1,12}")  # ASCII only: str.isdigit() accepts "²"
-# Paths that keep their own authentication or none (everything else needs a signature, 4.2).
-UNSIGNED_PATHS: Final = frozenset({"/health", "/risk"})
+# The only unsigned route: exact method and path (ADR 0014 4.2). Everything else needs a signature.
+UNSIGNED_ROUTES: Final = frozenset({("GET", "/health")})
 # The docs routes are exempt only in local development (ADR 0014 4.2), by `docs_exempt=True`.
 DOCS_PATHS: Final = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
-UNSIGNED_PREFIXES: Final = ("/analyze/",)  # legacy X-Internal-Token routes until BE-12
+_SIGNATURE: Final = re.compile(r"[A-Za-z0-9_-]{43}")  # base64url of a SHA-256 digest, no padding
 log = logging.getLogger(__name__)
 
 
@@ -155,8 +155,8 @@ class SigningMiddleware:
         body_limits: Mapping[str, int] | None = None,
         nonce_cache_entries: int = DEFAULT_NONCE_CACHE_ENTRIES,
         clock: Callable[[], float] = time.time,
-        unsigned_paths: frozenset[str] = UNSIGNED_PATHS,
-        unsigned_prefixes: tuple[str, ...] = UNSIGNED_PREFIXES,
+        unsigned_routes: frozenset[tuple[str, str]] = UNSIGNED_ROUTES,
+        unsigned_prefixes: tuple[tuple[str, str], ...] = (),
         docs_exempt: bool = False,
     ) -> None:
         self.app = app
@@ -164,14 +164,15 @@ class SigningMiddleware:
         self._limits = dict(body_limits or {})
         self._clock = clock
         self._nonces = NonceCache(nonce_cache_entries, clock)
-        self._unsigned = unsigned_paths | (DOCS_PATHS if docs_exempt else frozenset())
+        docs = frozenset(("GET", p) for p in DOCS_PATHS) if docs_exempt else frozenset()
+        self._unsigned = unsigned_routes | docs
         self._unsigned_prefixes = unsigned_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "websocket":  # no websocket routes exist; fail closed if one is added
             await send({"type": "websocket.close", "code": 1008})
             return
-        if scope["type"] != "http" or self._is_unsigned(scope["path"]):
+        if scope["type"] != "http" or self._is_unsigned(scope["method"], scope["path"]):
             await self.app(scope, receive, send)
             return
         if not self._keys:  # no key: refuse to serve rather than run open (ADR 0014 4.3)
@@ -199,7 +200,13 @@ class SigningMiddleware:
         key = self._keys.get(kid)
         # Cheap checks before buffering any body, so an unauthenticated caller cannot make the
         # worker read up to the route limit (steps 2 to 4 of ADR 0014 4.2).
-        if key is None or not self._fresh(ts) or not self._nonce_ok(nonce):
+        signature = headers.get("x-cp-signature", "")
+        if (
+            key is None
+            or not self._fresh(ts)
+            or not self._nonce_ok(nonce)
+            or not _SIGNATURE.fullmatch(signature)
+        ):
             await self._reject(send)
             return
         try:
@@ -209,10 +216,14 @@ class SigningMiddleware:
             return
         except _Disconnected:
             return
-        expected = sign(key, request_string(kid, scope["method"], scope["path"], ts, nonce, body))
-        # Bytes, not str: compare_digest raises TypeError on non-ASCII str, which must be a 401.
-        given = headers.get("x-cp-signature", "").encode("latin-1")
-        if not hmac.compare_digest(expected.encode(), given):
+        try:
+            message = request_string(kid, scope["method"], scope["path"], ts, nonce, body)
+        except UnicodeEncodeError:  # a path with a lone surrogate cannot have been signed
+            await self._reject(send)
+            return
+        expected = sign(key, message)
+        # Bytes, not str, as defence in depth: compare_digest raises TypeError on non-ASCII str.
+        if not hmac.compare_digest(expected.encode(), signature.encode("ascii")):
             await self._reject(send)
             return
         outcome = self._nonces.record(nonce)  # only after the signature verified (step 6)
@@ -227,8 +238,10 @@ class SigningMiddleware:
 
     # --- steps ---
 
-    def _is_unsigned(self, path: str) -> bool:
-        return path in self._unsigned or path.startswith(self._unsigned_prefixes)
+    def _is_unsigned(self, method: str, path: str) -> bool:
+        return (method, path) in self._unsigned or any(
+            method == m and path.startswith(prefix) for m, prefix in self._unsigned_prefixes
+        )
 
     def _fresh(self, ts: str) -> bool:
         return bool(_DIGITS.fullmatch(ts)) and abs(self._clock() - int(ts)) <= WINDOW_SECONDS

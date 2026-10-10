@@ -40,6 +40,7 @@ def build(
     clock: Clock | None = None,
     cache: int = 100,
     limits: dict[str, int] | None = None,
+    **middleware: Any,
 ) -> tuple[Any, Clock, list[bytes]]:
     app = FastAPI()
     seen_bodies: list[bytes] = []
@@ -65,6 +66,7 @@ def build(
         clock=c,
         nonce_cache_entries=cache,
         body_limits=limits,
+        **middleware,
     )
     return mw, c, seen_bodies
 
@@ -327,13 +329,67 @@ def test_fr403_timestamp_boundary_and_unsigned_400_for_query_and_bad_content_len
     assert r.status_code == 400
 
 
-def test_fr403_everything_is_protected_except_the_explicit_unsigned_list() -> None:
+def test_fr403_everything_is_protected_except_get_health() -> None:
     app, _, _ = build()
-    # a path outside /v1 that is not on the list is signed-only (ADR 0014 4.2: all but /health)
+    # ADR 0014 4.2: all but GET /health. A new path, a legacy path and the wrong method are signed-only.
     assert call(app, "/new-route", {}, b"").status_code == 401
     assert call(app, "/health", {}, b"", method="GET").status_code == 200
-    assert call(app, "/analyze/keystrokes", {}, b"").status_code != 401  # legacy token route
-    assert call(app, "/risk", {}, b"").status_code != 401
+    assert call(app, "/health", {}, b"", method="POST").status_code == 401
+    assert call(app, "/health/", {}, b"", method="GET").status_code == 401
+    assert call(app, "/analyze/keystrokes", {}, b"").status_code == 401
+    assert call(app, "/risk", {}, b"").status_code == 401
+    assert call(app, "/docs", {}, b"", method="GET").status_code == 401  # docs only when local
+
+
+def raw(
+    app: Any, headers: dict[str, str], body: bytes, path: str = "/v1/echo", method: str = "POST"
+) -> tuple[int, bool, list[dict[str, Any]]]:
+    """Drive the ASGI app directly: header values are latin-1 bytes, as a server hands them over."""
+    sent: list[dict[str, Any]] = []
+    read = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal read
+        read = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": b"",
+        "headers": [(k.lower().encode(), v.encode("latin-1")) for k, v in headers.items()],
+    }
+    asyncio.run(app(scope, receive, send))
+    return int(sent[0]["status"]), read, sent
+
+
+def test_fr403_malformed_signatures_and_odd_headers_are_401_never_500() -> None:
+    app, _, bodies = build()
+    h, body, _ = signed()
+    for bad in ("", "x", "é" * 43, "A" * 42, "A" * 44, "²" * 43, "A" * 42 + "=", "A" * 43):
+        status, _, sent = raw(app, {**h, "X-CP-Signature": bad}, body)
+        assert status == 401, bad
+        assert not any(k == b"x-cp-signature" for k, _ in sent[0]["headers"])
+    for name, bad in (("X-CP-Timestamp", "²³"), ("X-CP-Nonce", "é" * 22), ("X-CP-Key-Id", "é")):
+        assert raw(app, {**h, name: bad}, body)[0] == 401, name
+    assert bodies == []
+
+
+def test_fr403_a_bad_signature_header_is_refused_before_the_body_is_read() -> None:
+    app, _, _ = build()
+    h, body, _ = signed()
+    status, read, _ = raw(app, {**h, "X-CP-Signature": "x"}, body)
+    assert status == 401 and read is False
+
+
+def test_fr403_a_path_that_cannot_be_encoded_is_401_not_500() -> None:
+    app, _, _ = build()
+    h, body, _ = signed()
+    assert raw(app, h, body, path="/v1/ech\udcffo")[0] == 401  # unencodable: refused, not a 500
 
 
 def test_fr403_concurrent_duplicate_nonce_is_atomic_and_recorded_once() -> None:
@@ -429,3 +485,34 @@ def test_fr403_websocket_on_an_exempt_path_is_still_closed_and_all_docs_paths_fo
         assert call(app, path, {}, b"", method="GET").status_code == 401
         mw = signing.SigningMiddleware(inner, {"k1": KEY_A}, docs_exempt=True)
         assert call(mw, path, {}, b"", method="GET").status_code == 200
+
+
+def test_fr403_forty_threads_recording_one_nonce_get_exactly_one_recorded() -> None:
+    import threading
+
+    cache = signing.NonceCache(100, Clock())
+    results: list[str] = []
+    barrier = threading.Barrier(40)
+
+    def go() -> None:
+        barrier.wait()
+        results.append(cache.record("same-nonce-for-all"))
+
+    threads = [threading.Thread(target=go) for _ in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results.count("recorded") == 1 and results.count("duplicate") == 39
+
+
+def test_fr403_path_variants_of_health_cannot_bypass_signing() -> None:
+    app, _, bodies = build()
+    for method, path in (
+        ("HEAD", "/health"),
+        ("GET", "//health"),
+        ("GET", "/Health"),
+        ("GET", "/health/"),
+    ):
+        assert raw(app, {}, b"", path=path, method=method)[0] == 401, (method, path)
+    assert bodies == []

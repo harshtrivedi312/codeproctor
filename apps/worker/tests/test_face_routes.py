@@ -375,12 +375,20 @@ def test_fr403_unset_environment_is_lenient_and_local_allows_http_and_docs() -> 
     assert local and rt.fetch is not None and rt.cache_enabled
 
 
-def test_fr403_the_worker_app_exposes_the_signed_face_routes_and_keeps_legacy_ones() -> None:
+def test_fr403_the_worker_app_exposes_the_signed_face_and_analysis_routes() -> None:
     from worker.app import app
 
     paths = set(app.openapi()["paths"])
     assert {"/v1/face/match", "/v1/face/recheck", "/v1/face/evict", "/v1/ready"} <= paths
-    assert "/analyze/keystrokes" in paths and "/risk" in paths
+    assert {
+        "/v1/analyze/keystrokes",
+        "/v1/analyze/similarity",
+        "/v1/analyze/vad",
+        "/v1/risk",
+    } <= paths
+    assert (
+        "/analyze/keystrokes" not in paths and "/risk" not in paths
+    )  # legacy token routes are gone
 
 
 def test_fr403_a_runtime_without_an_object_store_answers_503_not_configured(

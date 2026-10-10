@@ -241,6 +241,21 @@ def _ignore_set(
     return frozenset(ignore)
 
 
+def _peer_finding(target: Submission, other_session_id: str, c: Comparison) -> Finding:
+    return Finding(
+        type="CODE_SIMILARITY",
+        occurred_at_ms=target.occurred_at_ms,
+        duration_ms=0,
+        confidence=c.confidence,
+        payload={
+            "sessionQuestionId": target.session_question_id,
+            "similarity": c.similarity,
+            "matchedSessionId": other_session_id,
+        },
+        details={"sharedFingerprints": c.shared, "matchedLines": _flat(c.matched_lines)},
+    )
+
+
 def find_peer_similarity(
     submissions: Sequence[Submission],
     config: IntegrityConfig | None = None,
@@ -277,21 +292,7 @@ def find_peer_similarity(
                     matches.append((c, sj))
             matches.sort(key=lambda m: (-m[0].similarity, m[1].session_id))
             for c, other in matches[: sc.max_peer_matches]:
-                out.setdefault(si.session_id, []).append(
-                    Finding(
-                        type="CODE_SIMILARITY",
-                        occurred_at_ms=si.occurred_at_ms,
-                        duration_ms=0,
-                        confidence=c.confidence,
-                        payload={
-                            "sessionQuestionId": si.session_question_id,
-                            "similarity": c.similarity,
-                            "matchedSessionId": other.session_id,
-                            "matchedLines": _flat(c.matched_lines),
-                        },
-                        details={"sharedFingerprints": c.shared},
-                    )
-                )
+                out.setdefault(si.session_id, []).append(_peer_finding(si, other.session_id, c))
     return out
 
 
@@ -365,8 +366,52 @@ def find_ai_likeness(
                 "sessionQuestionId": submission.session_question_id,
                 "similarity": c.similarity,
                 "aiReferenceSolutionId": ref.id,
-                "matchedLines": _flat(c.matched_lines),
             },
-            details={"sharedFingerprints": c.shared},
+            details={"sharedFingerprints": c.shared, "matchedLines": _flat(c.matched_lines)},
         )
     ]
+
+
+def find_target_similarity(
+    target: Submission,
+    corpus: Sequence[Submission],
+    config: IntegrityConfig | None = None,
+    starter_code: Mapping[CodeLanguage, str] | None = None,
+    ai_references: Sequence[AiReference] = (),
+) -> list[Finding]:
+    """Findings for ONE submission against a corpus and AI reference solutions (ADR 0014 6.2).
+
+    Target versus corpus is linear in the corpus size (the all-pairs form is quadratic). The idiom
+    filter and the starter-code ignore set are built the same way as in `find_peer_similarity`, so
+    for a target `t` and corpus `c` the CODE_SIMILARITY findings equal that function's result for
+    `t` over `[t, *c]`. Peer findings cite `matchedSessionId`, AI findings `aiReferenceSolutionId`.
+    Same-session corpus entries and other languages are skipped; disabled detectors do not run.
+    """
+    cfg = config or IntegrityConfig()
+    sc = cfg.similarity
+    findings: list[Finding] = []
+    if cfg.is_enabled("CODE_SIMILARITY"):
+        lang = target.language
+        peers = [c for c in corpus if c.language == lang]
+        prepared_target = prepare(target.code, lang, sc)
+        prepared_peers = [prepare(c.code, lang, sc) for c in peers]
+        boiler = (
+            all_kgram_hashes(starter_code[lang], lang, sc.k)
+            if starter_code and lang in starter_code
+            else None
+        )
+        ignore = _ignore_set([prepared_target, *prepared_peers], boiler, sc)
+        matches: list[tuple[Comparison, Submission]] = []
+        for other, prepared in zip(peers, prepared_peers, strict=True):
+            if other.session_id == target.session_id:
+                continue
+            c = compare(prepared_target, prepared, sc, ignore)
+            if c is not None and c.similarity >= sc.peer_threshold:
+                matches.append((c, other))
+        matches.sort(key=lambda m: (-m[0].similarity, m[1].session_id))
+        findings += [
+            _peer_finding(target, o.session_id, c) for c, o in matches[: sc.max_peer_matches]
+        ]
+    if ai_references:
+        findings += find_ai_likeness(target, ai_references, cfg, starter_code)
+    return findings
