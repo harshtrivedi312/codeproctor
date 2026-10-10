@@ -317,9 +317,9 @@ function TestScreenInner({
   const readOnly =
     isEditorReadOnly(lock, expired) || finished || clock.unavailable || proctorLocked;
 
-  // Autosave every 10 s (FR-504). Compared by identity: any edit or language switch creates a new
-  // value. The server keeps ONE answer per question (final code + its language, which is what is
-  // graded), so only the language shown is sent, and a language switch is itself a change.
+  // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new value. The server
+  // keeps ONE answer per question (final code + its language, which is what is graded), so only
+  // the language the candidate last typed in (or reset) is sent; a language switch alone is not.
   const autosaveValue = React.useMemo(() => ({ drafts, answerLangs }), [drafts, answerLangs]);
   const savedRef = React.useRef<SavedOnServer>(EMPTY_SAVED);
   const [saved, setSaved] = React.useState<SavedOnServer>(EMPTY_SAVED);
@@ -803,6 +803,13 @@ function TestScreenInner({
                 >
                   <RotateCcw className="h-4 w-4" aria-hidden /> Reset to starter code
                 </Button>
+                {answerLangs[question.id] && answerLangs[question.id] !== language ? (
+                  <p className="text-xs text-muted-foreground" data-testid="answer-language-hint">
+                    Your saved answer is in{' '}
+                    {LANGUAGE_LABELS[answerLangs[question.id] as CodeLanguage]}. Type here to make{' '}
+                    {LANGUAGE_LABELS[language]} your answer instead. Run uses the code shown.
+                  </p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   Tab inserts an indent. To move focus out of the editor, press Ctrl+M, then Tab.
                 </p>
@@ -962,6 +969,9 @@ function TestScreenInner({
           <DialogDescription>
             Your {LANGUAGE_LABELS[language]} code for this question is replaced with the starter
             code. This cannot be undone.
+            {question && answerLangs[question.id] && answerLangs[question.id] !== language
+              ? ` This also makes ${LANGUAGE_LABELS[language]} your answer instead of your ${LANGUAGE_LABELS[answerLangs[question.id] as CodeLanguage]} code.`
+              : ''}
           </DialogDescription>
           <div className="mt-6 flex justify-end gap-3">
             <Button variant="outline" onClick={() => setResetOpen(false)}>
