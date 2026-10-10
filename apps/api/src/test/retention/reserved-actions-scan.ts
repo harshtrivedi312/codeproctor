@@ -13,6 +13,8 @@ export const RESERVED_NAMES = [
   'ERASURE_SESSION_FENCED',
   'ERASURE_SESSION_PURGED',
   'ERASURE_LIST_COMPLETED',
+  'ERASURE_DELAY_NOTIFIED',
+  'ERASURE_ALERT_RAISED',
   'RETENTION_MARKER_ACTIONS',
   'ERASURE_RESERVED_ACTIONS',
 ];
@@ -26,6 +28,8 @@ export const RESERVED_FRAGMENTS = [
   'ERASURE_NOTICE',
   'ERASURE_SESSION',
   'ERASURE_LIST',
+  'DELAY_NOTIFIED',
+  'ALERT_RAISED',
   'ERASURE_COMPLETED',
   'FACE_DONE',
   'MEDIA_DONE',
@@ -39,6 +43,7 @@ export function reservedActionHits(text: string): string[] {
     if (text.includes(name)) hits.push(name);
   if (
     /RETENTION_\$\{/.test(text) ||
+    /ERASURE_\$\{/.test(text) ||
     /['"`]RETENTION_['"`]/.test(text) ||
     /['"`]ERASURE_['"`]/.test(text)
   ) {

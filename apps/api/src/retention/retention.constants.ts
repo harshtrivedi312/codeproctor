@@ -27,12 +27,14 @@ export const ERASURE_RESERVED_ACTIONS = {
   SESSION_PURGED: 'ERASURE_SESSION_PURGED',
   /** The erasure list entry was completed: gates the sweep's exit. */
   LIST_COMPLETED: 'ERASURE_LIST_COMPLETED',
+  /** The candidate was told the erasure is delayed by a hold: gates the delay notice (once per request). */
+  DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
+  /** The day-25 "tell the candidate" alert was raised: gates the alert (once per request and deadline). */
+  ALERT_RAISED: 'ERASURE_ALERT_RAISED',
 } as const;
 
 /** Non-reserved audit actions of the erasure run (ids and the request id only). */
 export const ERASURE_AUDIT_ACTIONS = {
-  DELAY_NOTIFIED: 'ERASURE_DELAY_NOTIFIED',
-  ALERT_RAISED: 'ERASURE_ALERT_RAISED',
   REQUESTED: 'ERASURE_REQUESTED',
 } as const;
 

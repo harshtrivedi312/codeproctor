@@ -28,6 +28,8 @@ const ALLOWED: Record<string, string> = {
   'apps/api/src/retention/retention.repository.ts': 'RetentionService writes and reads the markers',
   'apps/api/src/retention/erasure/erasure.repository.ts':
     'erasure writes the completion, notice and fence rows and reads the email markers (never RETENTION_*_DONE)',
+  'apps/api/src/retention/erasure/erasure.service.ts':
+    'the erasure run writes and reads only the delay-notice and day-25 alert once-rows (FU-DBB-27 c), through the constants',
   'apps/api/src/retention/erasure/erasure.ports.ts':
     'prose only: the notice port documents who writes ERASURE_EMAIL_SENT and ERASURE_EMAIL_FAILED',
   'infra/backup/erasure-list.sh':
@@ -81,6 +83,10 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
       "const a = 'ERASURE_' + 'EMAIL_FAILED';",
       "const a = 'ERASURE_SESSION' + '_PURGED';",
       "const a = 'ERASURE_LIST' + '_COMPLETED';",
+      'const a = `ERASURE_${x}`;',
+      "const a = 'ERASURE_' + 'ALERT_RAISED';",
+      "const a = ['ERASURE', 'ALERT_RAISED'].join('_');",
+      "const a = 'ERASURE_' + 'DELAY_NOTIFIED';",
     ];
     for (const sample of offenders) expect(reservedActionHits(sample)).not.toEqual([]);
     expect(reservedActionHits("action: 'RETENTION_RUN'")).toEqual([]);
@@ -93,7 +99,7 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
     }
   });
 
-  it('the constants hold exactly the ten reserved action names', () => {
+  it('the constants hold exactly the twelve reserved action names', () => {
     const text = readFileSync(join(REPO, 'apps/api/src/retention/retention.constants.ts'), 'utf8');
     for (const name of [
       'RETENTION_FACE_DONE',
@@ -106,6 +112,8 @@ describe('reserved retention and erasure audit actions (FR-704, NFR-05)', () => 
       'ERASURE_SESSION_FENCED',
       'ERASURE_SESSION_PURGED',
       'ERASURE_LIST_COMPLETED',
+      'ERASURE_DELAY_NOTIFIED',
+      'ERASURE_ALERT_RAISED',
     ]) {
       expect(text).toContain(`'${name}'`);
     }
