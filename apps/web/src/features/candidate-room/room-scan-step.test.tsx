@@ -297,6 +297,58 @@ describe('room scan step (FR-404, TC-035)', () => {
     expect(seen.filter((r) => r.url.endsWith('/media/presign'))).toHaveLength(2);
   });
 
+  it('FR-404 TC-035: confirm 503 with Retry-After is retried in place after the wait, without uploading the clip again', async () => {
+    await signIn();
+    let confirms = 0;
+    const seen = recordRequests();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/confirm`, () => {
+        confirms += 1;
+        return confirms <= 2
+          ? HttpResponse.json(
+              { code: 'SERVICE_UNAVAILABLE' },
+              { status: 503, headers: { 'Retry-After': '4' } },
+            )
+          : HttpResponse.json({ uploaded: true, sizeBytes: 5 });
+      }),
+    );
+    const { deps } = fakeRoomDeps();
+    const sleep = vi.fn(() => Promise.resolve());
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep deps={{ ...deps, sleep }} onDone={vi.fn()} onSessionEnded={vi.fn()} />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    expect(confirms).toBe(3);
+    expect(sleep).toHaveBeenNthCalledWith(1, 4000);
+    expect(seen.filter((r) => r.url.endsWith('/media/presign'))).toHaveLength(1);
+  });
+
+  it('FR-404: confirm that keeps answering 503 gives up after a few tries and keeps the recording', async () => {
+    await signIn();
+    server.use(
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/confirm`, () =>
+        HttpResponse.json({ code: 'SERVICE_UNAVAILABLE' }, { status: 503 }),
+      ),
+    );
+    const { deps } = fakeRoomDeps();
+    const user = userEvent.setup();
+    renderWithQuery(
+      <RoomScanStep
+        deps={{ ...deps, sleep: () => Promise.resolve() }}
+        onDone={vi.fn()}
+        onSessionEnded={vi.fn()}
+      />,
+    );
+    await recordRotation(user);
+    await user.click(await screen.findByRole('button', { name: /send this recording/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/service is busy/i);
+    expect(screen.getByRole('button', { name: /send this recording/i })).toBeEnabled();
+    expect(screen.queryByTestId('room-done')).not.toBeInTheDocument();
+  });
+
   it('FR-404: a double click on send uploads once', async () => {
     await signIn();
     const seen = recordRequests();

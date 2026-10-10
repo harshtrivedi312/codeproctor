@@ -32,6 +32,8 @@ export interface RoomScanDeps {
   startRecording: (stream: MediaStream) => RoomRecorder;
   /** PUTs the clip to the presigned URL. 412 (already stored) is reported as `exists`. */
   upload: (url: string, headers: Record<string, string>, body: Blob) => Promise<UploadOutcome>;
+  /** Waits between confirm retries (tests inject an instant one). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function pickMime(): string | undefined {
