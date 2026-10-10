@@ -14,10 +14,10 @@ We are trying out our own proctored coding test, CodeProctor, on ourselves befor
 
 ## What will be recorded (this is real, not practice data)
 
-- A photo of your government ID and a live selfie, compared by face-matching software.
+- A photo of your government ID and a live selfie. They are compared by face-matching software if it is switched on for the trial, and otherwise by a person.
 - Your screen, your webcam and your microphone, while you take the test.
-- Your typing in the code editor, and browser events (leaving full-screen, pasting).
-- Software also watches your webcam picture to see that your face is in view, that nobody else is, and where you are looking.
+- Your typing in the code editor (timing, pastes and how your code changes).
+- Browser events such as leaving full-screen, switching windows, pasting and sharing your screen.
 
 Please do not show anything private on your screen, and take the test alone in a quiet room, because the microphone and camera will pick up whatever is around you. If you would rather not use your own ID, say so before the day and we will discuss it.
 

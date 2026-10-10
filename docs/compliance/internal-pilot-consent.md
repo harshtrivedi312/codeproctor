@@ -12,15 +12,14 @@ You do not have to take part. Saying no, or stopping part-way, has no effect on 
 
 When you sign below, and only after you sign, the software will:
 
-- take a photo of your government ID and one live selfie, and compare the two faces with face-matching software;
+- take a photo of your government ID and one live selfie, and compare the two faces. If the face-matching software is switched on for this trial, it makes the comparison; if it is not, a person looks at the two photos instead;
 - record your screen, your webcam video and your microphone audio while you take the test;
 - record your typing in the code editor (timing, pastes and how your code changes);
-- record browser events such as leaving full-screen, switching windows or pasting;
-- look at your webcam picture while you work, to check that your face is in view, whether anyone else is in view, and where you are looking.
+- record browser events such as leaving full-screen, switching windows, pasting or sharing your screen.
 
 It also stores your name and work email address, your answers and code, the test score, and your IP address and browser details.
 
-Images and measurements of your face are **biometric data**. The face-matching software calculates face measurements in the computer's memory and they are not saved. The ID photo, the selfie, the webcam video and any snapshots are saved as files.
+Images and measurements of your face are **biometric data**. If the face-matching software is on, it calculates face measurements in the computer's memory and they are not saved. No software in this trial analyses where you are looking or whether other people are in view. The ID photo, the selfie, the webcam video and any snapshots are saved as files.
 
 ## 3. What we use it for, and what we do not
 
