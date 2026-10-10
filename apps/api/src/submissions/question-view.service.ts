@@ -14,6 +14,7 @@ import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common
 import type { CodeLanguage } from '@codeproctor/shared';
 import { CandidateScope } from '../candidate/candidate-scope';
 import type { CandidateContext } from '../candidate/candidate.types';
+import { mcqAnswerSchema, shortAnswerAnswerSchema } from '../grading/answer-shapes';
 import { OptionIdService } from '../grading/option-ids';
 import { loadCases } from '../grading/test-data';
 import { PrismaService } from '../database/prisma.service';
@@ -35,6 +36,18 @@ export interface QuestionView {
     readonly multiple: boolean;
     readonly options: readonly { id: string; text: string }[];
   };
+  /**
+   * The candidate's OWN saved work on this question (their draft, Run or Submit autosave), so a
+   * reload or a crash resumes from it and the next autosave never overwrites it with the starter
+   * code (data-loss fix, D-61). CODING: code and language; MCQ: the selected option ids as shown to
+   * this session; SHORT_ANSWER: the typed text; null when nothing was saved. Only the token's own
+   * session_questions row: never another candidate's data and never reference content.
+   */
+  readonly saved:
+    | { readonly code: string; readonly language: string }
+    | { readonly optionIds: readonly string[] }
+    | { readonly text: string }
+    | null;
 }
 
 @Injectable()
@@ -118,8 +131,36 @@ export class QuestionViewService {
           throw this.bad('An MCQ answer spec is invalid', open);
         throw e;
       }
+      const own = await db.sessionQuestion.findFirst({
+        where: { id: open.sessionQuestionId, sessionId: ctx.sessionId },
+        select: { finalCode: true, finalLanguage: true, answer: true },
+      });
+      const saved = ((): QuestionView['saved'] => {
+        if (own === null) return null;
+        if (projected.type === 'CODING') {
+          const language = own.finalLanguage;
+          return own.finalCode !== null &&
+            language !== null &&
+            (projected.languages as readonly string[]).includes(language)
+            ? { code: own.finalCode, language }
+            : null;
+        }
+        if (projected.type === 'MCQ') {
+          const parsed = mcqAnswerSchema.safeParse(own.answer);
+          if (!parsed.success || projected.mcq === undefined) return null;
+          const shown = this.optionIds.mapAll(
+            ctx.sessionId,
+            projected.mcq.options.map((o) => o.id),
+          );
+          const known = new Set(shown.values());
+          return { optionIds: parsed.data.optionIds.filter((id) => known.has(id)) };
+        }
+        const parsed = shortAnswerAnswerSchema.safeParse(own.answer);
+        return parsed.success ? { text: parsed.data.text } : null;
+      })();
       return {
         sessionQuestionId: open.sessionQuestionId,
+        saved,
         type: projected.type,
         title: projected.title,
         statementMd: projected.statementMd,
