@@ -248,7 +248,56 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(JSON.stringify(saved[0])).toContain('print(7)');
   }, 20_000);
 
-  it('FR-504 D-84: the server keeps one answer per question, so only the language shown is saved, and a switch counts once the candidate typed in it', async () => {
+  it('FR-504 TC-045 D-84: the server keeps one answer per question, so only the language shown is saved, and a switch counts once the candidate typed in it', async () => {
+    await startedSession();
+    const saved: Record<string, unknown>[] = [];
+    server.use(
+      http.put(`${cand}/answers/:id/draft`, async ({ request }) => {
+        saved.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    await enterTest(user);
+    // Run flushes the autosave first, so each checkpoint is exact (the 5 s Run cooldown applies).
+    let runs = 0;
+    const runAndFlush = async () => {
+      if (runs > 0) await new Promise((r) => setTimeout(r, 5_100));
+      await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+      runs += 1;
+      await waitFor(() => expect(seen.filter((r) => r.url.endsWith('/run'))).toHaveLength(runs));
+    };
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print(1)');
+    await runAndFlush();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[0])).toContain('print(1)');
+    // Only looking at another language saves nothing: its starter must never replace the saved
+    // answer (the server keeps one answer per question).
+    await user.selectOptions(screen.getByLabelText(/language/i), 'javascript');
+    await runAndFlush();
+    expect(saved).toHaveLength(1);
+    // Typing in it makes it the answer: that language's code is saved.
+    await user.type(screen.getByLabelText(/code editor, javascript/i), 'console.log(2)');
+    await runAndFlush();
+    expect(saved).toHaveLength(2);
+    expect(saved[1]).toMatchObject({ language: 'javascript' });
+    expect(JSON.stringify(saved[1])).toContain('console.log(2)');
+    expect(JSON.stringify(saved[1])).not.toContain('print(1)');
+    // Back to Python without typing: JavaScript stays the answer, nothing is sent.
+    await user.selectOptions(screen.getByLabelText(/language/i), 'python');
+    await runAndFlush();
+    expect(saved).toHaveLength(2);
+    // Typing in Python again makes Python (with its kept draft) the answer.
+    await user.type(screen.getByLabelText(/code editor, python/i), '!');
+    await runAndFlush();
+    expect(saved).toHaveLength(3);
+    expect(saved[2]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[2])).toContain('print(1)');
+  }, 60_000);
+
+  it('FR-504 TC-045 D-84: code typed just before a language switch is still saved, and the label says which language is saved', async () => {
     await startedSession();
     const saved: Record<string, unknown>[] = [];
     server.use(
@@ -259,31 +308,19 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     );
     const user = userEvent.setup();
     await enterTest(user);
-    await user.type(screen.getByLabelText(/code editor, python/i), 'print(1)');
-    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
-    await screen.findByText(/sample tests passed/i);
-    expect(saved).toHaveLength(1);
-    expect(saved[0]).toMatchObject({ language: 'python' });
-    expect(JSON.stringify(saved[0])).toContain('print(1)');
-    // Only looking at another language saves nothing: its starter must never replace the saved
-    // answer (the server keeps one answer per question).
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print(5)');
+    // Switch before any autosave tick, without typing in JavaScript.
     await user.selectOptions(screen.getByLabelText(/language/i), 'javascript');
-    await new Promise((r) => setTimeout(r, 10_500));
-    expect(saved).toHaveLength(1);
-    // Typing in it makes it the answer: that language's code is saved.
-    await user.type(screen.getByLabelText(/code editor, javascript/i), 'console.log(2)');
-    await waitFor(() => expect(saved).toHaveLength(2), { timeout: 12_000 });
-    expect(saved[1]).toMatchObject({ language: 'javascript' });
-    expect(JSON.stringify(saved[1])).toContain('console.log(2)');
-    expect(JSON.stringify(saved[1])).not.toContain('print(1)');
-    // Back to Python: the Python draft is still on screen and is the answer again.
-    await user.selectOptions(screen.getByLabelText(/language/i), 'python');
-    await waitFor(() => expect(saved).toHaveLength(3), { timeout: 12_000 });
-    expect(saved[2]).toMatchObject({ language: 'python' });
-    expect(JSON.stringify(saved[2])).toContain('print(1)');
-  }, 40_000);
+    await user.click(screen.getByRole('button', { name: /run sample tests/i })); // flushes
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[0])).toContain('print(5)');
+    expect(screen.getByRole('button', { name: /question 1/i })).toHaveTextContent(
+      /saved in python/i,
+    );
+  }, 20_000);
 
-  it('FR-504 D-84: a failing draft is not sent again together with the ones that saved', async () => {
+  it('FR-504 TC-045 D-84: a failing draft is not sent again together with the ones that saved', async () => {
     await startedSession();
     const calls: string[] = [];
     let failQ2 = true;

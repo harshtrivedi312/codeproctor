@@ -266,6 +266,9 @@ function TestScreenInner({
   const [activeId, setActiveId] = React.useState(questions[0]?.id ?? '');
   const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>({});
   const [drafts, setDrafts] = React.useState<Drafts>({ code: {}, mcq: {} });
+  // The language the candidate last typed in (or reset) per question: the one that is saved and
+  // graded. Looking at another language's starter does not change it.
+  const [answerLangs, setAnswerLangs] = React.useState<Record<string, CodeLanguage>>({});
   const [fsFailed, setFsFailed] = React.useState(false);
   const [finishOpen, setFinishOpen] = React.useState(false);
   const [finishing, setFinishing] = React.useState(false);
@@ -305,8 +308,7 @@ function TestScreenInner({
     (testLeft !== null && testLeft <= 0) || (sectionLeft !== null && sectionLeft <= 0);
 
   const question = questions.find((q) => q.id === activeId) ?? questions[0];
-  const language: CodeLanguage =
-    (question && languages[question.id]) ?? question?.languages?.[0] ?? 'python';
+  const language: CodeLanguage = question ? activeLanguage(question, languages) : 'python';
   // The editor is also off while the screen share is lost or a proctor paused the test (ADR 0002 P-2).
   const proctorLocked =
     proctor !== undefined &&
@@ -318,7 +320,7 @@ function TestScreenInner({
   // Autosave every 10 s (FR-504). Compared by identity: any edit or language switch creates a new
   // value. The server keeps ONE answer per question (final code + its language, which is what is
   // graded), so only the language shown is sent, and a language switch is itself a change.
-  const autosaveValue = React.useMemo(() => ({ drafts, languages }), [drafts, languages]);
+  const autosaveValue = React.useMemo(() => ({ drafts, answerLangs }), [drafts, answerLangs]);
   const savedRef = React.useRef<SavedOnServer>(EMPTY_SAVED);
   const [saved, setSaved] = React.useState<SavedOnServer>(EMPTY_SAVED);
   const autosave = useAutosave(autosaveValue, async (snapshot) => {
@@ -340,9 +342,10 @@ function TestScreenInner({
         );
         continue;
       }
-      // A language only counts once the candidate typed in it (or reset it): looking at another
-      // language's starter must never replace the saved answer with that starter.
-      const lang = activeLanguage(q, snapshot.languages);
+      // The answer is the language the candidate last typed in (or reset): looking at another
+      // language's starter never replaces it, and a draft typed just before a switch still saves.
+      const lang = snapshot.answerLangs[q.id];
+      if (lang === undefined) continue;
       const code = snapshot.drafts.code[codeKey(q.id, lang)];
       if (code === undefined) continue;
       const held = previous.code[q.id];
@@ -469,9 +472,10 @@ function TestScreenInner({
 
   const isSaved = (q: Schemas['Question']): boolean => {
     if (q.type === 'mcq') return saved.mcq[q.id] === drafts.mcq[q.id];
-    const lang = activeLanguage(q, languages);
+    const lang = answerLangs[q.id];
+    if (lang === undefined) return true; // nothing typed yet
     const code = drafts.code[codeKey(q.id, lang)];
-    if (code === undefined) return true; // nothing typed in the language shown
+    if (code === undefined) return true;
     const held = saved.code[q.id];
     return held !== undefined && held.language === lang && held.code === code;
   };
@@ -708,7 +712,15 @@ function TestScreenInner({
               >
                 Question {i + 1}
                 <span className="ml-1 text-xs text-muted-foreground">
-                  {!isAnswered(q) ? '(not started)' : isSaved(q) ? '(saved)' : '(not saved yet)'}
+                  {!isAnswered(q)
+                    ? '(not started)'
+                    : !isSaved(q)
+                      ? '(not saved yet)'
+                      : q.type !== 'mcq' &&
+                          answerLangs[q.id] &&
+                          answerLangs[q.id] !== activeLanguage(q, languages)
+                        ? `(saved in ${LANGUAGE_LABELS[answerLangs[q.id] as CodeLanguage]})`
+                        : '(saved)'}
                 </span>
               </button>
             ))}
@@ -829,12 +841,14 @@ function TestScreenInner({
                   value={value}
                   readOnly={readOnly}
                   ariaLabel={`Code editor, ${LANGUAGE_LABELS[language]}`}
-                  onChange={(next) =>
+                  onChange={(next) => {
+                    const id = question.id;
+                    setAnswerLangs((a) => (a[id] === language ? a : { ...a, [id]: language }));
                     setDrafts((d) => ({
                       ...d,
-                      code: { ...d.code, [codeKey(question.id, language)]: next },
-                    }))
-                  }
+                      code: { ...d.code, [codeKey(id, language)]: next },
+                    }));
+                  }}
                   onBlocked={(kind) =>
                     toast.message(
                       kind === 'paste'
@@ -956,9 +970,11 @@ function TestScreenInner({
             <Button
               variant="destructive"
               onClick={() => {
+                const id = question.id;
+                setAnswerLangs((a) => (a[id] === language ? a : { ...a, [id]: language }));
                 setDrafts((d) => ({
                   ...d,
-                  code: { ...d.code, [codeKey(question.id, language)]: starter },
+                  code: { ...d.code, [codeKey(id, language)]: starter },
                 }));
                 setResetOpen(false);
               }}
