@@ -3,11 +3,13 @@ import { BUSY_CODE } from '@/lib/api/busy';
 import { api, type Schemas } from '@/lib/api/client';
 import { REAUTH_FAILED_CODE } from '@/features/security/schemas';
 import type { StepUpOutcome } from '@/features/security/step-up-dialog';
-import { adminKeys, checkInviteOutcome, INVITE_UNKNOWN_TEXT } from './queries';
+import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
+import { adminKeys, checkInviteOutcome, INVITE_UNKNOWN_TEXT, readStaffUsers } from './queries';
 
 /*
- * The password-protected staff writes (FR-103; docs/api-contract.md section 6): invite, role
- * change, deactivate and reactivate. Each one sends the admin's own `currentPassword`.
+ * The password-protected staff writes (FR-103; docs/api-contract.md sections 1 and 6): invite,
+ * role change, deactivate, reactivate, re-issue an invite, unlock, and the admin's 2FA reset. Each
+ * one sends the admin's own `currentPassword`.
  *
  * These are plain functions, not TanStack mutations, on purpose: a mutation keeps its variables
  * (the password) in the mutation cache. Here the password is a call argument that is dropped when
@@ -17,7 +19,8 @@ import { adminKeys, checkInviteOutcome, INVITE_UNKNOWN_TEXT } from './queries';
 type StaffRole = Schemas['StaffRole'];
 type StaffUser = Schemas['StaffUser'];
 
-export type UserActionContext = 'invite' | 'role' | 'deactivate' | 'reactivate';
+export type UserActionContext =
+  'invite' | 'role' | 'deactivate' | 'reactivate' | 'reissue' | 'unlock' | 'resetTwoFactor';
 
 interface Answer<T> {
   /** 0 when the request never got an answer (offline, aborted). */
@@ -32,9 +35,20 @@ interface Raw<T> {
   response: Response;
 }
 
-async function send<T>(call: () => Promise<Raw<T>>): Promise<Answer<T>> {
+/**
+ * `replayOn401`: for the /auth/* routes, which the client's own refresh-and-retry skips. A 401
+ * (access token expired while the dialog sat open) is retried once after a silent refresh, for
+ * the same signed-in person only (docs/api-contract.md section 1, Frontend).
+ */
+async function send<T>(call: () => Promise<Raw<T>>, replayOn401 = false): Promise<Answer<T>> {
   try {
-    const { data, error, response } = await call();
+    const stamp = captureSessionStamp();
+    let result = await call();
+    if (replayOn401 && result.response.status === 401) {
+      if (!(await refreshForReplay(stamp))) return { status: 401, code: '', data: undefined };
+      result = await call();
+    }
+    const { data, error, response } = result;
     return {
       status: response.status,
       code: typeof error?.code === 'string' ? error.code : '',
@@ -65,6 +79,18 @@ const CONFLICT: Record<UserActionContext, { title: string; hint: string }> = {
     title: 'This user cannot be reactivated',
     hint: 'Reload the page to see their current status.',
   },
+  reissue: {
+    title: 'This invitation cannot be sent again',
+    hint: 'They have already set a password, or their account was deactivated. Reload the page to see their current status.',
+  },
+  unlock: {
+    title: 'This account cannot be unlocked',
+    hint: 'Reload the page to see their current status.',
+  },
+  resetTwoFactor: {
+    title: 'Two-factor was not reset',
+    hint: 'Reload the page to see their current status.',
+  },
 };
 
 const ACTION_FAILED: Record<UserActionContext, string> = {
@@ -72,6 +98,9 @@ const ACTION_FAILED: Record<UserActionContext, string> = {
   role: 'We could not change the role',
   deactivate: 'We could not deactivate this user',
   reactivate: 'We could not reactivate this user',
+  reissue: 'We could not send the invitation again',
+  unlock: 'We could not unlock this account',
+  resetTwoFactor: 'We could not reset two-factor sign-in',
 };
 
 /** Maps one non-2xx answer to words. Never says which part of a sign-in check failed. */
@@ -100,7 +129,9 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
       hint:
         context === 'invite'
           ? 'The server did not accept these details. Check the name, email and role, go back and fix them.'
-          : 'The server did not accept this request. Reload the page and try again.',
+          : context === 'resetTwoFactor'
+            ? 'You cannot reset your own two-factor sign-in here. Use the Security page for your own account.'
+            : 'The server did not accept this request. Reload the page and try again.',
     };
   }
   if (status === 404) {
@@ -114,9 +145,12 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
   if (status === 429) {
     return {
       kind: 'failed',
-      title: context === 'invite' ? 'Invitation limit reached' : 'Too many requests',
+      title:
+        context === 'invite' || context === 'reissue'
+          ? 'Invitation limit reached'
+          : 'Too many requests',
       hint:
-        context === 'invite'
+        context === 'invite' || context === 'reissue'
           ? `Your organisation has sent its hourly limit of invitations. ${NOT_DONE} Wait a while, then try again.`
           : `${NOT_DONE} Wait a minute, then try again.`,
     };
@@ -216,4 +250,94 @@ export async function updateStaffUser(
   staleAfter(qc, answer.status);
   if (answer.status === 200 && answer.data) return { kind: 'done', user: answer.data };
   return describe(answer, context);
+}
+
+/** Sends the invitation of a user who has not set a password yet again (a new link, the old one stops working). */
+export async function reissueStaffInvite(
+  qc: QueryClient,
+  userId: string,
+  currentPassword: string,
+): Promise<StepUpOutcome> {
+  const answer = await send(() =>
+    api.POST('/v1/admin/users/{userId}/invite', {
+      params: { path: { userId } },
+      body: { currentPassword },
+    }),
+  );
+  staleAfter(qc, answer.status);
+  if (answer.status === 200) return { kind: 'done' };
+  if (answer.status === 500) {
+    // Outcome unknown (contract section 8, c): never sent again for the user.
+    return {
+      kind: 'failed',
+      tone: 'warning',
+      title: 'The invitation may have been sent',
+      hint: 'We could not confirm it. Ask them to check their inbox before you send it again. Sending again replaces any earlier link.',
+    };
+  }
+  return describe(answer, 'reissue');
+}
+
+/** Clears the login lockout. Does not change the password or the sessions. */
+export async function unlockStaffUser(
+  qc: QueryClient,
+  userId: string,
+  currentPassword: string,
+): Promise<StepUpOutcome> {
+  const answer = await send(() =>
+    api.POST('/v1/admin/users/{userId}/unlock', {
+      params: { path: { userId } },
+      body: { currentPassword },
+    }),
+  );
+  staleAfter(qc, answer.status);
+  if (answer.status === 204) return { kind: 'done' };
+  return describe(answer, 'unlock');
+}
+
+/** True when the list now shows two-factor off for the person, false when on, null when unknown. */
+async function readTwoFactorOff(userId: string): Promise<boolean | null> {
+  try {
+    const { items } = await readStaffUsers();
+    const target = items.find((u) => u.id === userId);
+    return target ? !target.totpEnabled : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The admin's reset of another user's two-factor sign-in (FR-102, contract section 1). A 500 is
+ * the unknown outcome of section 8: the list is read and says whether two-factor is now off.
+ */
+export async function resetStaffTwoFactor(
+  qc: QueryClient,
+  userId: string,
+  currentPassword: string,
+): Promise<StepUpOutcome> {
+  const answer = await send(
+    () =>
+      api.POST('/v1/auth/2fa/reset/{userId}', {
+        params: { path: { userId } },
+        body: { currentPassword },
+      }),
+    true,
+  );
+  staleAfter(qc, answer.status);
+  if (answer.status === 204) return { kind: 'done' };
+  if (answer.status === 500) {
+    const off = await readTwoFactorOff(userId);
+    return {
+      kind: 'failed',
+      tone: 'warning',
+      title: 'We could not confirm the reset',
+      hint:
+        off === true
+          ? 'Two-factor now shows as off for this person, so the reset went through. Nothing was retried for you.'
+          : off === false
+            ? 'Two-factor still shows as on for this person, so the reset probably did not happen. You can submit again.'
+            : 'We could not read the list to check either. Reload the page and look at their two-factor column before trying again.',
+    };
+  }
+  return describe(answer, 'resetTwoFactor');
 }

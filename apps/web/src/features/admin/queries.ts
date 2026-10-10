@@ -55,6 +55,7 @@ export const adminKeys = {
   settings: ['admin', 'settings'] as const,
   consent: ['admin', 'consent-texts'] as const,
   candidates: ['admin', 'candidates'] as const,
+  lockEvents: ['admin', 'users', 'lock-events'] as const,
 };
 
 /** The API's largest page (docs/api-contract.md section 6: pageSize 1 to 100). */
@@ -67,7 +68,7 @@ const USERS_MAX_PAGES = 10;
  * the page limit was hit before the end, so a caller never mistakes "not on the pages I read" for
  * "not in the organisation".
  */
-async function readStaffUsers(
+export async function readStaffUsers(
   signal?: AbortSignal,
 ): Promise<{ items: StaffUser[]; complete: boolean }> {
   const items: StaffUser[] = [];
@@ -127,6 +128,22 @@ export const INVITE_UNKNOWN_TEXT = {
   unknown:
     'We could not confirm the invitation, and could not read the list to check. Reload the page and look for the person before you send it again.',
 } as const;
+
+/** Recent account lockouts, newest first (FR-101, P-03). The first page only: a short, recent list. */
+export function useLockEvents(enabled: boolean) {
+  return useQuery({
+    queryKey: adminKeys.lockEvents,
+    enabled,
+    queryFn: async ({ signal }) => {
+      const { data, error, response } = await api.GET('/v1/admin/users/lock-events', {
+        params: { query: { page: 1, pageSize: 20 } },
+        signal,
+      });
+      if (!data) fail(response, error);
+      return data;
+    },
+  });
+}
 
 export function useOrgSettings() {
   return useQuery({

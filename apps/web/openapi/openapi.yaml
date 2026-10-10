@@ -248,6 +248,45 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProblemDetails'
+  /v1/auth/2fa/reset/{userId}:
+    post:
+      operationId: resetTwoFactorOf
+      summary: Super Admin clears another user's two-factor sign-in and revokes their
+        sessions. Needs the admin's own currentPassword (FR-102). The user is told by email.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordBody' }
+      responses:
+        '204':
+          description: Two-factor is off for that user (it also was, if it was off before)
+        '400':
+          description: Not a UUID, a missing currentPassword, or the caller targeted
+            themselves (checked before the password)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '401':
+          description: Missing or invalid access token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '403': { $ref: '#/components/responses/ReauthOrForbidden' }
+        '404':
+          description: No such user in your organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /v1/auth/2fa/disable:
     post:
       operationId: disableTwoFactor
@@ -505,6 +544,100 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
         '429':
           description: The per-organisation invite limit (20 per hour by default) is reached
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /v1/admin/users/lock-events:
+    get:
+      operationId: listLockEvents
+      summary: Recent account lockouts of the organisation, newest first (FR-101, P-03)
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Lock events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LockEventList' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          $ref: '#/components/responses/Busy'
+  /v1/admin/users/{userId}/invite:
+    post:
+      operationId: reissueStaffInvite
+      summary: Re-issue the invitation of a user who has not set a password yet. A new
+        72 hour single-use link; the old link stops working (DL-23).
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordBody' }
+      responses:
+        '200':
+          description: Re-issued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/ReauthOrForbidden' }
+        '404':
+          description: No such user in this organisation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '409':
+          description: The user already has a password, or is deactivated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '429':
+          description: The per-organisation invite limit is reached
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '503':
+          $ref: '#/components/responses/Busy'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /v1/admin/users/{userId}/unlock:
+    post:
+      operationId: unlockStaffUser
+      summary: Clear the login lockout of a user (FR-101). Does not change the password
+        or the sessions. Needs the caller's own currentPassword.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CurrentPasswordBody' }
+      responses:
+        '204':
+          description: Unlocked (also when the account was not locked)
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/ReauthOrForbidden' }
+        '404':
+          description: No such user in this organisation
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProblemDetails' }
@@ -3294,6 +3427,25 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/StaffUser' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+    LockEvent:
+      type: object
+      required: [id, userId, email, name, lockedAt]
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        email: { type: string, nullable: true }
+        name: { type: string, nullable: true }
+        lockedAt: { type: string, format: date-time }
+    LockEventList:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/LockEvent' }
         page: { type: integer }
         pageSize: { type: integer }
         total: { type: integer }

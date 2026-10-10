@@ -6,6 +6,7 @@ import * as React from 'react';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { DataTable, type Column } from '@/components/data-table/data-table';
+import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -17,15 +18,33 @@ import { ROLE_LABELS } from '@/features/auth/user-badge';
 import { StepUpDialog, StepUpForm, type StepUpOutcome } from '@/features/security/step-up-dialog';
 import type { Schemas } from '@/lib/api/client';
 import { formatDate } from './format';
-import { useStaffUsers } from './queries';
+import { can } from '@/features/staff/permissions';
+import { useLockEvents, useStaffUsers } from './queries';
 import { inviteStaffSchema, type InviteStaffValues } from './schemas';
-import { inviteStaffUser, updateStaffUser, type InviteDetails } from './user-actions';
+import {
+  inviteStaffUser,
+  reissueStaffInvite,
+  resetStaffTwoFactor,
+  unlockStaffUser,
+  updateStaffUser,
+  type InviteDetails,
+} from './user-actions';
 import { SettingsFrame } from './settings-frame';
 
 type StaffUser = Schemas['StaffUser'];
 
 const STATUS_TONE = { active: 'success', invited: 'warning', deactivated: 'neutral' } as const;
-const STATUS_LABEL = { active: 'Active', invited: 'Invited', deactivated: 'Deactivated' } as const;
+const STATUS_LABEL = {
+  active: 'Active',
+  invited: 'Pending invite',
+  deactivated: 'Deactivated',
+} as const;
+
+/** "Locked until 14:05": the clock time, in the admin's own time zone. */
+function lockedUntilText(iso: string | null): string {
+  if (!iso) return 'Locked';
+  return `Locked until ${new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
 
 /**
  * FR-103: Super Admin manages users. Invite, change role, deactivate and reactivate. Each write
@@ -46,7 +65,10 @@ export function UsersPage(): React.JSX.Element {
 type PendingAction =
   | { kind: 'role'; user: StaffUser; role: Schemas['StaffRole'] }
   | { kind: 'deactivate'; user: StaffUser }
-  | { kind: 'reactivate'; user: StaffUser };
+  | { kind: 'reactivate'; user: StaffUser }
+  | { kind: 'unlock'; user: StaffUser }
+  | { kind: 'reissue'; user: StaffUser }
+  | { kind: 'resetTwoFactor'; user: StaffUser };
 
 function describeAction(action: PendingAction): {
   title: string;
@@ -78,6 +100,32 @@ function describeAction(action: PendingAction): {
       destructive: true,
     };
   }
+  if (action.kind === 'unlock') {
+    return {
+      title: `Unlock ${action.user.name}?`,
+      description:
+        'They can try to sign in again straight away. Their password and sessions do not change. Confirm with your password.',
+      submitLabel: 'Unlock',
+      destructive: false,
+    };
+  }
+  if (action.kind === 'reissue') {
+    return {
+      title: `Send the invitation to ${action.user.name} again?`,
+      description: `We email ${action.user.email} a new link to set a password, valid for 72 hours. The earlier link stops working. Confirm with your password.`,
+      submitLabel: 'Resend invite',
+      destructive: false,
+    };
+  }
+  if (action.kind === 'resetTwoFactor') {
+    return {
+      title: `Reset two-factor sign-in for ${action.user.name}?`,
+      description:
+        'Their account goes back to password-only sign-in until they set two-factor up again, and they are signed out everywhere. We email them to say it was reset. Only do this once you are sure who is asking. Confirm with your password.',
+      submitLabel: 'Reset two-factor',
+      destructive: true,
+    };
+  }
   return {
     title: `Reactivate ${action.user.name}?`,
     description: 'They can sign in again straight away. Confirm with your password.',
@@ -88,9 +136,11 @@ function describeAction(action: PendingAction): {
 
 function UsersContent(): React.JSX.Element {
   const { user: me } = useAuth();
+  const mayManage = can(me?.role, 'user:manage');
   const qc = useQueryClient();
   const users = useStaffUsers();
   const [inviteOpen, setInviteOpen] = React.useState(false);
+  const [lockEventsOpen, setLockEventsOpen] = React.useState(false);
   // The selects and buttons only stage a choice; nothing is sent until the password is confirmed.
   const [action, setAction] = React.useState<PendingAction | null>(null);
   // Password-protected actions run one at a time: every other control is disabled meanwhile.
@@ -117,21 +167,35 @@ function UsersContent(): React.JSX.Element {
 
   async function runAction(current: PendingAction, password: string): Promise<StepUpOutcome> {
     const { user } = current;
-    const out = await updateStaffUser(
-      qc,
-      user.id,
-      current.kind === 'role' ? { role: current.role } : { active: current.kind === 'reactivate' },
-      password,
-    );
-    if (out.kind === 'done') {
-      toast.success(
-        current.kind === 'role'
-          ? `${user.name} is now ${ROLE_LABELS[current.role]}.`
-          : current.kind === 'deactivate'
-            ? `${user.name} was deactivated.`
-            : `${user.name} can sign in again.`,
-      );
+    let out: StepUpOutcome;
+    let success: string;
+    switch (current.kind) {
+      case 'unlock':
+        out = await unlockStaffUser(qc, user.id, password);
+        success = `${user.name} is unlocked and can try to sign in.`;
+        break;
+      case 'reissue':
+        out = await reissueStaffInvite(qc, user.id, password);
+        success = `A new invitation was sent to ${user.email}. The earlier link no longer works.`;
+        break;
+      case 'resetTwoFactor':
+        out = await resetStaffTwoFactor(qc, user.id, password);
+        success = `Two-factor sign-in was reset for ${user.name}. They sign in with a password only.`;
+        break;
+      case 'role':
+        out = await updateStaffUser(qc, user.id, { role: current.role }, password);
+        success = `${user.name} is now ${ROLE_LABELS[current.role]}.`;
+        break;
+      case 'deactivate':
+        out = await updateStaffUser(qc, user.id, { active: false }, password);
+        success = `${user.name} was deactivated.`;
+        break;
+      case 'reactivate':
+        out = await updateStaffUser(qc, user.id, { active: true }, password);
+        success = `${user.name} can sign in again.`;
+        break;
     }
+    if (out.kind === 'done') toast.success(success);
     return out;
   }
 
@@ -193,11 +257,23 @@ function UsersContent(): React.JSX.Element {
         value: (u) => u.status,
         options: [
           { value: 'active', label: 'Active' },
-          { value: 'invited', label: 'Invited' },
+          { value: 'invited', label: 'Pending invite' },
           { value: 'deactivated', label: 'Deactivated' },
         ],
       },
-      cell: (u) => <Badge tone={STATUS_TONE[u.status]}>{STATUS_LABEL[u.status]}</Badge>,
+      cell: (u) => (
+        <span className="flex flex-wrap items-center gap-1">
+          <Badge tone={STATUS_TONE[u.status]}>{STATUS_LABEL[u.status]}</Badge>
+          {u.locked ? <Badge tone="warning">{lockedUntilText(u.lockedUntil)}</Badge> : null}
+        </span>
+      ),
+    },
+    {
+      id: 'twoFactor',
+      header: 'Two-factor',
+      sortValue: (u) => (u.totpEnabled ? 'On' : 'Off'),
+      searchValue: () => '',
+      cell: (u) => (u.totpEnabled ? 'On' : 'Off'),
     },
     {
       id: 'createdAt',
@@ -209,28 +285,33 @@ function UsersContent(): React.JSX.Element {
     {
       id: 'actions',
       header: 'Actions',
-      cell: (u) =>
-        u.id === me?.id ? (
-          <span className="text-muted-foreground">—</span>
-        ) : u.status === 'deactivated' ? (
+      cell: (u) => {
+        // Your own account is changed from the Security page, and a role that cannot manage
+        // users sees no actions (the API refuses them anyway).
+        if (u.id === me?.id || !mayManage) return <span className="text-muted-foreground">—</span>;
+        const row = (kind: PendingAction['kind'], label: string) => (
           <Button
+            key={kind}
             size="sm"
             variant="outline"
             disabled={inFlight}
-            onClick={() => setAction({ kind: 'reactivate', user: u })}
+            onClick={() => setAction({ kind, user: u } as PendingAction)}
           >
-            Reactivate<span className="sr-only"> {u.name}</span>
+            {label}
+            <span className="sr-only"> {u.name}</span>
           </Button>
-        ) : (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={inFlight}
-            onClick={() => setAction({ kind: 'deactivate', user: u })}
-          >
-            Deactivate<span className="sr-only"> {u.name}</span>
-          </Button>
-        ),
+        );
+        return (
+          <span className="flex flex-wrap gap-1">
+            {u.locked ? row('unlock', 'Unlock') : null}
+            {u.status === 'invited' ? row('reissue', 'Resend invite') : null}
+            {u.totpEnabled ? row('resetTwoFactor', 'Reset two-factor') : null}
+            {u.status === 'deactivated'
+              ? row('reactivate', 'Reactivate')
+              : row('deactivate', 'Deactivate')}
+          </span>
+        );
+      },
     },
   ];
 
@@ -261,12 +342,18 @@ function UsersContent(): React.JSX.Element {
           action: <Button onClick={() => setInviteOpen(true)}>Invite a user</Button>,
         }}
         toolbar={
-          <Button disabled={inFlight} onClick={() => setInviteOpen(true)}>
-            Invite a user
-          </Button>
+          <>
+            <Button variant="outline" onClick={() => setLockEventsOpen(true)}>
+              Recent lockouts
+            </Button>
+            <Button disabled={inFlight} onClick={() => setInviteOpen(true)}>
+              Invite a user
+            </Button>
+          </>
         }
       />
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} exclusive={exclusive} />
+      <LockEventsDialog open={lockEventsOpen} onOpenChange={setLockEventsOpen} />
       {action && copy ? (
         <StepUpDialog
           open
@@ -402,6 +489,86 @@ function InviteDialog({
             </form>
           </>
         )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** FR-101, P-03: who was locked out recently, newest first. Read only; no password needed. */
+function LockEventsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}): React.JSX.Element {
+  const events = useLockEvents(open);
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto">
+        <DialogTitle>Recent lockouts</DialogTitle>
+        <DialogDescription>
+          Accounts that were locked after too many wrong passwords, newest first. A locked account
+          unlocks by itself after 15 minutes, or you can unlock it from the users table.
+        </DialogDescription>
+        <div className="mt-4">
+          {events.isLoading ? (
+            <p role="status" className="text-sm text-muted-foreground">
+              Loading lockouts…
+            </p>
+          ) : events.isError ? (
+            <Alert tone="error" role="alert" title="We could not load the lockouts">
+              Check your connection, then{' '}
+              <button type="button" className="underline" onClick={() => void events.refetch()}>
+                try again
+              </button>
+              .
+            </Alert>
+          ) : events.data && events.data.items.length > 0 ? (
+            <table className="w-full text-left text-sm">
+              <caption className="sr-only">Recent account lockouts</caption>
+              <thead>
+                <tr className="border-b">
+                  <th scope="col" className="py-1 pr-3 font-medium">
+                    Person
+                  </th>
+                  <th scope="col" className="py-1 font-medium">
+                    Locked at
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.data.items.map((e) => (
+                  <tr key={e.id} className="border-b last:border-0">
+                    <td className="py-1.5 pr-3">
+                      {e.name ?? 'Unknown user'}
+                      {e.email ? (
+                        <span className="block text-muted-foreground">{e.email}</span>
+                      ) : null}
+                    </td>
+                    <td className="py-1.5">
+                      <time dateTime={e.lockedAt}>
+                        {new Date(e.lockedAt).toLocaleString([], {
+                          dateStyle: 'medium',
+                          timeStyle: 'short',
+                        })}
+                      </time>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No accounts have been locked out recently.
+            </p>
+          )}
+        </div>
+        <div className="mt-5 flex justify-end">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+        </div>
       </DialogContent>
     </Dialog>
   );

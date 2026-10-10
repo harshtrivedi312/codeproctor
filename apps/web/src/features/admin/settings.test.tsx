@@ -63,7 +63,7 @@ describe('Users (FR-103)', () => {
     nav.pathname = '/admin/settings/users';
     renderAsStaff(<UsersPage />, MOCK_USERS.admin);
     expect(await findRow('Casey Newhire')).toBeInTheDocument();
-    expect(within(rowOf('Casey Newhire')).getByText('Invited')).toBeInTheDocument();
+    expect(within(rowOf('Casey Newhire')).getByText('Pending invite')).toBeInTheDocument();
     expect(within(rowOf('Dana Departed')).getByText('Deactivated')).toBeInTheDocument();
     expect(screen.getByLabelText('Role for Riley Recruiter')).toHaveValue('RECRUITER');
   });
@@ -90,7 +90,7 @@ describe('Users (FR-103)', () => {
     await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
     await confirmWithPassword(u, dialog, 'Send invitation');
     expect(await findRow('Jo Newperson')).toBeInTheDocument();
-    expect(within(rowOf('Jo Newperson')).getByText('Invited')).toBeInTheDocument();
+    expect(within(rowOf('Jo Newperson')).getByText('Pending invite')).toBeInTheDocument();
     expect(screen.getByLabelText('Role for Jo Newperson')).toHaveValue('AUTHOR');
   });
 

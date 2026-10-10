@@ -60,7 +60,10 @@ function watchWrites(): { writes: Seen[]; authCalls: string[]; stop: () => void 
   const authCalls: string[] = [];
   const listener = ({ request }: { request: Request }) => {
     const { pathname } = new URL(request.url);
-    if (request.method !== 'GET' && pathname.includes('/admin/users')) {
+    if (
+      request.method !== 'GET' &&
+      (pathname.includes('/admin/users') || pathname.includes('/auth/2fa/reset/'))
+    ) {
       void request
         .clone()
         .json()
@@ -361,3 +364,163 @@ describe('Users: password step-up (FR-103, FR-102, TC-002)', () => {
     expect(await axe(dialog)).toHaveNoViolations();
   });
 });
+
+describe('Users: unlock, resend invite, two-factor reset, lockouts (FR-101, FR-102, FR-103, TC-002)', () => {
+  it('FR-101 TC-002: a locked account shows "Locked until" and Unlock only there; unlocking asks for the password', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const watch = watchWrites();
+    await findLoadedRow('Lee Locked');
+    expect(within(rowOf('Lee Locked')).getByText(/^Locked until \d/)).toBeInTheDocument();
+    expect(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ })).toBeInTheDocument();
+    expect(within(rowOf('Avery Author')).queryByRole('button', { name: /Unlock/ })).toBeNull();
+    await u.click(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Unlock');
+    await waitFor(() =>
+      expect(within(rowOf('Lee Locked')).queryByText(/^Locked until/)).not.toBeInTheDocument(),
+    );
+    expect(watch.writes[0]).toMatchObject({
+      method: 'POST',
+      path: expect.stringMatching(/\/admin\/users\/user-locked\/unlock$/) as string,
+      body: { currentPassword: PASSWORD },
+    });
+    watch.stop();
+  });
+
+  it('FR-103: Resend invite appears only for a pending invite and sends currentPassword', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const watch = watchWrites();
+    await findLoadedRow('Casey Newhire');
+    expect(within(rowOf('Casey Newhire')).getByText('Pending invite')).toBeInTheDocument();
+    expect(within(rowOf('Avery Author')).queryByRole('button', { name: /Resend/ })).toBeNull();
+    expect(within(rowOf('Dana Departed')).queryByRole('button', { name: /Resend/ })).toBeNull();
+    await u.click(within(rowOf('Casey Newhire')).getByRole('button', { name: /Resend invite/ }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('earlier link stops working');
+    await confirm(u, dialog, PASSWORD, 'Resend invite');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(watch.writes[0]).toMatchObject({
+      path: expect.stringMatching(/\/admin\/users\/user-invited\/invite$/) as string,
+      body: { currentPassword: PASSWORD },
+    });
+    watch.stop();
+  });
+
+  it('FR-103: resending to someone who already set a password is a 409 with a fix-it hint', async () => {
+    server.use(
+      http.post('*/v1/admin/users/:id/invite', () =>
+        HttpResponse.json({ title: 'Conflict', status: 409 }, { status: 409 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(within(rowOf('Casey Newhire')).getByRole('button', { name: /Resend invite/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Resend invite');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('already set a password');
+  });
+
+  it('FR-102: Reset two-factor shows only for accounts with 2FA on, warns about password-only sign-in, and sends currentPassword', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const watch = watchWrites();
+    await findLoadedRow('Sam Secure');
+    expect(
+      within(rowOf('Avery Author')).queryByRole('button', { name: /Reset two-factor/ }),
+    ).toBeNull();
+    // Your own account has no actions: use the Security page.
+    expect(within(rowOf('Alex Admin')).queryByRole('button')).toBeNull();
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('password-only sign-in');
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(watch.writes).toHaveLength(1));
+    expect(watch.writes[0]).toMatchObject({
+      path: expect.stringMatching(/\/auth\/2fa\/reset\/user-secure$/) as string,
+      body: { currentPassword: PASSWORD },
+    });
+    await waitFor(() =>
+      expect(
+        within(rowOf('Sam Secure')).queryByRole('button', { name: /Reset two-factor/ }),
+      ).toBeNull(),
+    );
+    watch.stop();
+  });
+
+  it('FR-102: a wrong password on the 2FA reset says "Password incorrect", stays open and keeps you signed in', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Sam Secure');
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, 'wrong-password', 'Reset two-factor');
+    expect(await within(dialog).findByText('Password incorrect')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Your password')).toHaveValue('');
+    expect(seen.user).toBeTruthy();
+  });
+
+  it('FR-102: the fixed 500 on a 2FA reset is not retried and the list says what happened', async () => {
+    let posts = 0;
+    server.use(
+      http.post('*/v1/auth/2fa/reset/:id', () => {
+        posts += 1;
+        return HttpResponse.json({ title: 'Internal Server Error', status: 500 }, { status: 500 });
+      }),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Sam Secure');
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('We could not confirm the reset');
+    expect(alert).toHaveTextContent('still shows as on');
+    expect(posts).toBe(1);
+  });
+
+  it('FR-101: Recent lockouts lists who was locked, newest first, with no password step', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(screen.getByRole('button', { name: 'Recent lockouts' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Lee Locked')).toBeInTheDocument();
+    const rows = within(dialog).getAllByRole('row');
+    expect(rows[1]).toHaveTextContent('Lee Locked');
+    expect(rows[2]).toHaveTextContent('Robin Reviewer');
+    expect(rows[3]).toHaveTextContent('Unknown user');
+    expect(within(dialog).queryByLabelText('Your password')).toBeNull();
+    expect(await axe(dialog)).toHaveNoViolations();
+  });
+
+  it('FR-101: a lockouts load failure says what to do', async () => {
+    server.use(http.get('*/v1/admin/users/lock-events', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(screen.getByRole('button', { name: 'Recent lockouts' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('try again');
+  });
+
+  it('WCAG 2.1 AA: the users table with lock, resend and reset actions has no axe violations', async () => {
+    const { container } = renderUsers();
+    await findLoadedRow('Lee Locked');
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+async function confirm(
+  u: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+  password: string,
+  submit: string,
+): Promise<void> {
+  await u.type(await within(dialog).findByLabelText('Your password'), password);
+  await u.click(within(dialog).getByRole('button', { name: submit }));
+}
