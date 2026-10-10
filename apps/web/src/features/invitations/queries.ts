@@ -5,6 +5,7 @@ import { testKeys } from '@/features/tests/queries';
 import { api, type Schemas } from '@/lib/api/client';
 import { getGeneration } from '@/lib/auth-session';
 import type { CsvRowInput } from './csv';
+import { problemWords } from './outcome';
 
 /*
  * Invitation calls: WEB-ONLY and PROVISIONAL [BE-06b] (see docs/followups/frontend.md). Candidate
@@ -96,6 +97,9 @@ export interface BulkOutcome {
   failed: InviteFailure | null;
 }
 
+/** The API refuses a start more than 5 minutes in the past; refresh the window well before that. */
+export const WINDOW_REFRESH_MS = 3 * 60_000;
+
 /** Requests in flight at once during a CSV upload. Small: the API limits invitations per hour. */
 export const BULK_CONCURRENCY = 4;
 
@@ -112,6 +116,13 @@ export async function inviteInChunks(
   testId: string,
   rows: readonly CsvRowInput[],
   window: { windowStart: string; windowEnd: string },
+  /**
+   * `followClock`: the start was not chosen by the user (untouched or clamped to now). A long upload
+   * must not outlive the API's "start at most 5 minutes in the past" rule, so once the cached start
+   * is older than WINDOW_REFRESH_MS the whole window is shifted by the time elapsed (same length).
+   * A start the user chose is kept; only if it went stale it moves to now and the end stays.
+   */
+  followClock: boolean,
   onProgress?: (sent: number) => void,
   signal?: { aborted: boolean },
 ): Promise<BulkOutcome> {
@@ -127,6 +138,23 @@ export async function inviteInChunks(
     retryAfterSeconds: null,
     failed: null,
   };
+  const t0 = Date.now();
+  const start0 = Date.parse(window.windowStart);
+  const end0 = Date.parse(window.windowEnd);
+  const windowNow = (): { windowStart: string; windowEnd: string } => {
+    const now = Date.now();
+    if (now - t0 < WINDOW_REFRESH_MS) return window;
+    if (followClock) {
+      const shift = now - t0;
+      return {
+        windowStart: new Date(start0 + shift).toISOString(),
+        windowEnd: new Date(end0 + shift).toISOString(),
+      };
+    }
+    return start0 < now - WINDOW_REFRESH_MS
+      ? { windowStart: new Date(now).toISOString(), windowEnd: window.windowEnd }
+      : window;
+  };
   const settled = new Set<number>();
   const uncertainAt = new Set<number>();
   let next = 0;
@@ -139,7 +167,7 @@ export async function inviteInChunks(
       const { data, error, response } = await api.POST('/v1/tests/{testId}/invitations', {
         params: { path: { testId } },
         // Only the fields the API's DTO accepts: externalRef and accommodations would be a 400.
-        body: { candidate: { email: row.email, name: row.name }, ...window },
+        body: { candidate: { email: row.email, name: row.name }, ...windowNow() },
       });
       if (!data) failFrom(response, error);
       settled.add(at);
@@ -147,7 +175,7 @@ export async function inviteInChunks(
       if (data.mail !== 'queued') {
         out.mailNotSent.push({
           row: row.row,
-          mail: data.mail === 'failed' ? 'failed' : 'disabled',
+          mail: data.mail === 'disabled' ? 'disabled' : 'failed',
         });
       }
       done += 1;
@@ -205,8 +233,7 @@ const rowFault = (e: InviteFailure): boolean => e.errors.some((m) => /^candidate
 
 /** The API's own words for a refused row. */
 function failureWords(e: InviteFailure): string {
-  const said = [e.message, ...e.errors].filter(Boolean).join(' ');
-  return said || 'The server did not accept this row.';
+  return problemWords(e.message, e.errors) || 'The server did not accept this row.';
 }
 
 export function useCandidateInvitations(candidateId: string | null) {

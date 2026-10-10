@@ -27,6 +27,7 @@ import {
 import { getGeneration } from '@/lib/auth-session';
 import {
   conflictText,
+  problemWords,
   MAIL_NOT_SENT_TITLE,
   MAIL_QUEUED_MESSAGE,
   mailNextStep,
@@ -144,6 +145,8 @@ function InviteBody({
   const [progress, setProgress] = React.useState<number | null>(null);
   const [outcome, setOutcome] = React.useState<BulkOutcome | null>(null);
   const stop = React.useRef({ aborted: false });
+  // The start was not chosen by the user (untouched, or clamped to now at submit).
+  const startAuto = React.useRef(true);
   React.useEffect(() => {
     const flag = stop.current;
     // React strict mode runs setup, cleanup, setup again: the flag must be reset on every setup.
@@ -157,7 +160,7 @@ function InviteBody({
     if (e instanceof InviteFailure) {
       if (e.status === 400)
         return (
-          [e.message, ...e.errors].filter(Boolean).join(' ') ||
+          problemWords(e.message, e.errors) ||
           'The server did not accept this invitation. Check the fields.'
         );
       if (e.status === 404)
@@ -172,8 +175,12 @@ function InviteBody({
         return 'Your role cannot send invitations. Ask a Super Admin if you think this is a mistake.';
       if (e.status === 401)
         return 'Your session ended before this could be sent. Sign in again; nothing was sent.';
+      if (e.status >= 500) {
+        return 'The server had a problem. The invitation was most likely not created and nothing was sent, but check the candidates list before you try again.';
+      }
     }
-    return 'We could not reach the server, so nothing was sent. Check your connection and try again.';
+    // A fetch that rejected: the request may have reached the server and been applied.
+    return 'The connection was lost before the server answered, so the invitation may have been created. Check the candidates list before inviting this candidate again.';
   };
 
   async function onFile(file: File | undefined): Promise<void> {
@@ -227,7 +234,14 @@ function InviteBody({
     }
     setProgress(0);
     const startedIn = getGeneration();
-    const result = await inviteInChunks(test, csv.parse.valid, window, setProgress, stop.current);
+    const result = await inviteInChunks(
+      test,
+      csv.parse.valid,
+      window,
+      startAuto.current,
+      setProgress,
+      stop.current,
+    );
     setProgress(null);
     setOutcome(result);
     // Whatever was created, the candidate list and the test (now in use) are stale.
@@ -253,6 +267,14 @@ function InviteBody({
     a.click();
     // Revoke later: some browsers start the download after the click handler returns.
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
+  function inviteAnother(): void {
+    const chosen = form.getValues('testId');
+    form.reset({ ...defaults(testId ?? ''), testId: chosen });
+    setMailNotSent(null);
+    setProblem(null);
+    setClampNote(null);
   }
 
   function downloadMailNotSent(): void {
@@ -299,6 +321,7 @@ function InviteBody({
             initialWindow.current,
             new Date(),
           );
+          startAuto.current = !dirtyFields.windowStart || next.clamped;
           form.setValue('windowStart', next.windowStart);
           form.setValue('windowEnd', next.windowEnd);
           setClampNote(
@@ -321,6 +344,11 @@ function InviteBody({
             <span data-testid="mail-not-sent">
               {mailReason(mailNotSent.mail)} {mailNextStep(mailNotSent.windowEnd)}
             </span>
+            <div className="mt-2">
+              <Button type="button" variant="outline" size="sm" onClick={inviteAnother}>
+                Invite another candidate
+              </Button>
+            </div>
           </Alert>
         ) : null}
         {problem ? (
@@ -395,7 +423,13 @@ function InviteBody({
                   {...aria}
                   type="file"
                   accept=".csv,text/csv"
-                  onChange={(e) => void onFile(e.target.files?.[0])}
+                  onChange={(e) => {
+                    const input = e.currentTarget;
+                    const file = input.files?.[0];
+                    // Clear the control so choosing the same file again fires a change.
+                    input.value = '';
+                    void onFile(file);
+                  }}
                 />
               )}
             </Field>
@@ -763,7 +797,7 @@ function stopCause(e: InviteFailure): string {
     return e.message ? `The server refused: ${e.message}.` : 'The server refused the request.';
   }
   if (e.status === 400)
-    return [e.message, ...e.errors].filter(Boolean).join(' ') || 'The server did not accept a row.';
+    return problemWords(e.message, e.errors) || 'The server did not accept a row.';
   if (e.status >= 500 || e.status === 0) return 'The connection or the server failed.';
   return 'The server refused the request.';
 }
@@ -790,7 +824,7 @@ export function uploadSummary(o: BulkOutcome, fileProblems: number): string {
   if (o.failed) {
     const may =
       o.uncertain > 0 ? `; ${plural(o.uncertain, 'row', 'rows')} of those may have been sent` : '';
-    return `The upload stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}. ${stopCause(o.failed)} ${plural(o.notSent, 'row was', 'rows were')} not confirmed${may}. Check the candidates list before trying again; people already invited are reported as already invited.`;
+    return `The upload stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}. ${stopCause(o.failed)} ${plural(o.notSent, 'row was', 'rows were')} not confirmed${may}. Check the candidates list before trying again. Then download the rows not sent and choose that file; do not upload the whole file again.`;
   }
   if (o.notSent > 0) {
     const wait = o.retryAfterSeconds

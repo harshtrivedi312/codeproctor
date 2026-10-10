@@ -33,6 +33,12 @@ export function mailNextStep(windowEnd?: string): string {
 export const MAIL_QUEUED_MESSAGE =
   'Invitation created. The email is queued for delivery; a queued email is not proof that it arrived.';
 
+/** The API's words for a problem: the errors[] when there are some (the detail is then a generic
+ * "Request validation failed"), else the detail. */
+export function problemWords(message: string, errors: readonly string[]): string {
+  return errors.length > 0 ? errors.join(' ') : message;
+}
+
 /**
  * A 409 on invitation creation. The API sends two different 409s with no code: "already has an
  * active invitation for this test" and "cannot be invited" (an erasure request). Show its words.

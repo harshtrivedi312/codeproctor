@@ -13,7 +13,14 @@ import { server } from '@/mocks/server';
 import { renderAsStaff, resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
 import { InviteButton } from './invite-button';
+import { MAIL_QUEUED_MESSAGE } from './outcome';
 import { INVITE_CAPABILITIES } from './schemas';
+
+const toastSuccess = vi.hoisted(() => vi.fn());
+vi.mock('sonner', async (orig) => {
+  const m = await orig<typeof import('sonner')>();
+  return { ...m, toast: Object.assign(m.toast, { success: toastSuccess }) };
+});
 
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
@@ -23,7 +30,10 @@ afterEach(() => {
   server.events.removeAllListeners();
 });
 afterAll(() => server.close());
-beforeEach(() => resetAuthTestState());
+beforeEach(() => {
+  resetAuthTestState();
+  toastSuccess.mockClear();
+});
 
 async function openDialog(
   user: { email: string } = MOCK_USERS.recruiter,
@@ -113,8 +123,15 @@ describe('FR-303 TC-023: invite one candidate', () => {
     ]);
   });
 
-  it('429: says nothing was sent and when to try again', async () => {
-    setInvitationScenario({ limitPerHour: 0 });
+  it('429: says nothing was sent and when to try again (Retry-After present)', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json(
+          { status: 429, title: 'Too Many Requests', detail: 'Too many invitations.' },
+          { status: 429, headers: { 'Retry-After': '1800' } },
+        ),
+      ),
+    );
     const { u, dialog } = await openDialog();
     await u.type(within(dialog).getByLabelText('Candidate name'), 'Nia');
     await u.type(within(dialog).getByLabelText('Candidate email'), 'nia@example.test');
@@ -122,6 +139,15 @@ describe('FR-303 TC-023: invite one candidate', () => {
     const alert = await within(dialog).findByRole('alert');
     expect(alert).toHaveTextContent(/Nothing was sent/);
     expect(alert).toHaveTextContent(/30 minutes/);
+  });
+
+  it('429: without a Retry-After header it says to try again later', async () => {
+    setInvitationScenario({ limitPerHour: 0 });
+    const { u, dialog } = await openDialog();
+    await u.type(within(dialog).getByLabelText('Candidate name'), 'Nia');
+    await u.type(within(dialog).getByLabelText('Candidate email'), 'nia@example.test');
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Try again later/);
   });
 
   it('passes axe', async () => {
@@ -143,6 +169,88 @@ describe('FR-303: the email outcome and 422 reasons (D-84)', () => {
     const { dialog } = await sendOne();
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(dialog).not.toBeInTheDocument();
+    expect(toastSuccess).toHaveBeenCalledWith(MAIL_QUEUED_MESSAGE);
+    expect(MAIL_QUEUED_MESSAGE).toMatch(/queued for delivery/);
+    expect(MAIL_QUEUED_MESSAGE).not.toMatch(/sent/);
+  });
+
+  it('FR-303: an unknown mail value is a warning (not sent), never a success', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json(
+          {
+            id: 'x',
+            testId: 'test-backend',
+            candidateId: 'c',
+            status: 'INVITED',
+            windowStart: new Date().toISOString(),
+            windowEnd: new Date(Date.now() + 86_400_000).toISOString(),
+            createdAt: new Date().toISOString(),
+            mail: 'noop',
+          },
+          { status: 201 },
+        ),
+      ),
+    );
+    const { dialog } = await sendOne();
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Invitation created, but the email could not be sent',
+    );
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it('FR-303: after a failed mail Close stays enabled and "Invite another candidate" resets the form', async () => {
+    setInvitationScenario({ mail: 'failed' });
+    const { u, dialog } = await sendOne();
+    await within(dialog).findByTestId('mail-not-sent');
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeEnabled();
+    expect(within(dialog).getByRole('button', { name: 'Send invitation' })).toBeDisabled();
+    await u.click(within(dialog).getByRole('button', { name: 'Invite another candidate' }));
+    expect(within(dialog).queryByTestId('mail-not-sent')).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Candidate email')).toHaveValue('');
+    expect(within(dialog).getByRole('button', { name: 'Send invitation' })).toBeEnabled();
+  });
+
+  it('FR-303: a lost connection says the invitation may exist; a 500 does not claim it was created', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () => HttpResponse.error(), {
+        once: true,
+      }),
+    );
+    const first = await sendOne();
+    const lost = await within(first.dialog).findByRole('alert');
+    expect(lost).toHaveTextContent(/may have been created/);
+    expect(lost).toHaveTextContent(/Check the candidates list/);
+    expect(lost).not.toHaveTextContent(/nothing was sent/i);
+  });
+
+  it('FR-303: a 500 answer says it was most likely not created', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json({ status: 500, title: 'x', detail: 'x' }, { status: 500 }),
+      ),
+    );
+    const { dialog } = await sendOne();
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/most likely not created/);
+  });
+
+  it('FR-303: a 400 with errors[] shows the errors without the generic prefix', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json(
+          {
+            status: 400,
+            detail: 'Request validation failed',
+            errors: ['candidate.email must be an email'],
+          },
+          { status: 400 },
+        ),
+      ),
+    );
+    const { dialog } = await sendOne();
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('candidate.email must be an email');
+    expect(alert).not.toHaveTextContent('Request validation failed');
   });
 
   it.each([
@@ -617,6 +725,152 @@ describe('FR-304: upload robustness', () => {
     const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
     expect(text).toMatch(/4 invitations created/);
     expect(text).toMatch(/1 row not invited/);
+  });
+
+  it('FR-304: a candidate.* 400 stays on its row; the upload goes on', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, async ({ request }) => {
+        const b = (await request.clone().json()) as { candidate: { email: string } };
+        if (b.candidate.email !== 'q1@example.test') return undefined;
+        return HttpResponse.json(
+          {
+            status: 400,
+            detail: 'Request validation failed',
+            errors: ['candidate.name must be shorter'],
+          },
+          { status: 400 },
+        );
+      }),
+    );
+    const { dialog } = await uploadMany(5);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/4 invitations created/);
+    expect(text).toMatch(/1 row not invited/);
+    expect(text).not.toMatch(/stopped/i);
+  });
+
+  it('FR-304: a windowStart 400 stops the upload (it would hit every row)', async () => {
+    let calls = 0;
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () => {
+        calls += 1;
+        if (calls < 3) return undefined;
+        return HttpResponse.json(
+          {
+            status: 400,
+            detail: 'Request validation failed',
+            errors: ['windowStart may be at most 5 minutes in the past'],
+          },
+          { status: 400 },
+        );
+      }),
+    );
+    const { dialog } = await uploadMany(40);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/The upload stopped/);
+    expect(text).toMatch(/windowStart may be at most 5 minutes in the past/);
+    expect(text).not.toMatch(/Request validation failed/);
+    expect(text).toMatch(/download the rows not sent/i);
+    expect(calls).toBeLessThan(40);
+  });
+
+  it('FR-304: an unknown mail value on a row counts as email not sent', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, () =>
+        HttpResponse.json(
+          {
+            id: 'x',
+            testId: 't',
+            candidateId: 'c',
+            status: 'INVITED',
+            windowStart: new Date().toISOString(),
+            windowEnd: new Date(Date.now() + 86_400_000).toISOString(),
+            createdAt: new Date().toISOString(),
+            mail: 'noop',
+          },
+          { status: 201 },
+        ),
+      ),
+    );
+    const { dialog } = await uploadMany(2);
+    const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+    expect(text).toMatch(/2 invitations created \(0 queued for delivery, 2 with no email sent\)/);
+  });
+
+  it('FR-304: closing the dialog mid-upload starts no new requests', async () => {
+    let calls = 0;
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, async () => {
+        calls += 1;
+        await new Promise((r) => setTimeout(r, 40));
+        return undefined;
+      }),
+    );
+    const ctx = await openDialog();
+    await ctx.u.click(within(ctx.dialog).getByLabelText('Several, from a CSV file'));
+    await ctx.u.upload(within(ctx.dialog).getByLabelText('CSV file'), csvFile(manyRows(60)));
+    await ctx.u.click(
+      await within(ctx.dialog).findByRole('button', { name: 'Invite 60 candidates' }),
+    );
+    await waitFor(() => expect(calls).toBeGreaterThan(0));
+    await ctx.u.click(within(ctx.dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const atClose = calls;
+    await new Promise((r) => setTimeout(r, 300));
+    // Only the requests already in flight (at most BULK_CONCURRENCY) may have started.
+    expect(calls - atClose).toBeLessThanOrEqual(4);
+    expect(calls).toBeLessThan(60);
+  });
+
+  it('FR-304: choosing the same file again works (the input is cleared)', async () => {
+    const { u, dialog } = await openDialog();
+    await u.click(within(dialog).getByLabelText('Several, from a CSV file'));
+    const file = csvFile(manyRows(2));
+    await u.upload(within(dialog).getByLabelText('CSV file'), file);
+    await u.click(await within(dialog).findByRole('button', { name: 'Invite 2 candidates' }));
+    await within(dialog).findByTestId('bulk-result');
+    expect(within(dialog).getByLabelText('CSV file')).toHaveValue('');
+    await u.upload(within(dialog).getByLabelText('CSV file'), file);
+    await waitFor(() =>
+      expect(within(dialog).queryByTestId('bulk-result')).not.toBeInTheDocument(),
+    );
+    expect(
+      await within(dialog).findByRole('button', { name: 'Invite 2 candidates' }),
+    ).toBeEnabled();
+  });
+
+  it('FR-304: a long upload keeps the window start fresh (shifts it with the clock)', async () => {
+    const starts: { start: number; end: number; at: number }[] = [];
+    // Each request takes 15 simulated seconds; only Date is faked, timers stay real.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      server.use(
+        http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, async ({ request }) => {
+          const b = (await request.clone().json()) as { windowStart: string; windowEnd: string };
+          starts.push({
+            start: Date.parse(b.windowStart),
+            end: Date.parse(b.windowEnd),
+            at: Date.now(),
+          });
+          vi.setSystemTime(Date.now() + 15_000);
+          return undefined;
+        }),
+      );
+      const { dialog } = await uploadMany(30);
+      await within(dialog).findByTestId('bulk-result');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(starts).toHaveLength(30);
+    const first = (starts[0] as { start: number }).start;
+    // Rows sent in the first moments (BULK_CONCURRENCY of them) keep the original start; every
+    // row that started later got a refreshed one, so none is older than the API's 5 minutes.
+    const later = starts.filter((r) => r.start !== first);
+    expect(later.length).toBeGreaterThanOrEqual(5);
+    for (const r of later) expect(r.at - r.start).toBeLessThan(5 * 60_000);
+    // The window keeps its length.
+    const length = (starts[0] as { start: number; end: number }).end - first;
+    for (const r of starts) expect(r.end - r.start).toBe(length);
   });
 
   it('after the hourly limit, the rows not sent can be downloaded and a new file chosen', async () => {

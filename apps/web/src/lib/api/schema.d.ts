@@ -1484,7 +1484,7 @@ export interface components {
             /** Format: date-time */
             windowEnd: string;
             /** Format: date-time */
-            createdAt?: string;
+            createdAt: string;
             mail: components["schemas"]["MailOutcome"];
         };
         StatusStep: {
@@ -4177,6 +4177,15 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Missing or expired access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
             403: components["responses"]["Forbidden"];
             /** @description No such test in your organisation */
             404: {
@@ -4205,7 +4214,7 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Too many invitations this hour; Retry-After says when */
+            /** @description Too many invitations this hour. The API sends no Retry-After header. A 404, 409 or 422 attempt keeps its slot. */
             429: {
                 headers: {
                     [name: string]: unknown;

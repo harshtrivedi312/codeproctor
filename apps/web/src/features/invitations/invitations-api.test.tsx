@@ -271,7 +271,19 @@ describe('Invitations mock: accommodations and the identity waiver (ADR 0015, C-
 });
 
 describe('Invitations mock: rate limit (429)', () => {
-  it('answers 429 with Retry-After once the hourly limit is used', async () => {
+  it('FR-303: a 409 keeps its slot, so the next invite is 429; the 429 has no Retry-After header (as the API)', async () => {
+    setInvitationScenario({ limitPerHour: 1 });
+    const dup = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'tim.berners.lee@candidates.example.test', name: 'Tim' },
+      ...win(),
+    });
+    expect(dup.status).toBe(409);
+    const r = await call('RECRUITER', 'POST', path, one());
+    expect(r.status).toBe(429);
+    expect(r.headers.get('retry-after')).toBeNull();
+  });
+
+  it('answers 429 once the hourly limit is used', async () => {
     setInvitationScenario({ limitPerHour: 1 });
     expect((await call('RECRUITER', 'POST', path, one())).status).toBe(201);
     const r = await call(
@@ -281,7 +293,6 @@ describe('Invitations mock: rate limit (429)', () => {
       one({ candidate: { email: 'second@example.test', name: 'Second' } }),
     );
     expect(r.status).toBe(429);
-    expect(Number(r.headers.get('retry-after'))).toBeGreaterThan(0);
   });
 });
 

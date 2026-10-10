@@ -1807,7 +1807,7 @@ paths:
       - name: testId
         in: path
         required: true
-        schema: { type: string }
+        schema: { type: string, format: uuid }
     post:
       operationId: createInvitation
       summary: WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create).
@@ -1827,6 +1827,11 @@ paths:
         '400':
           description: Validation failed (email, name, window, accommodations; errors[]
             says which)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: Missing or expired access token
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1853,7 +1858,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '429':
-          description: Too many invitations this hour; Retry-After says when
+          description: Too many invitations this hour. The API sends no Retry-After header.
+            A 404, 409 or 422 attempt keeps its slot.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -3083,7 +3089,7 @@ components:
         the same candidate and test is a 409 until the window ends.'
     InvitationResult:
       type: object
-      required: [id, testId, candidateId, status, windowStart, windowEnd, mail]
+      required: [id, testId, candidateId, status, windowStart, windowEnd, createdAt, mail]
       properties:
         id: { type: string }
         testId: { type: string }

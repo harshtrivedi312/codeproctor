@@ -370,6 +370,11 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
       ];
       if (dto.length) return problem(400, 'x', dto);
       await wait();
+      // The real order (invitations.service.ts): the hourly slot is taken BEFORE the test lookup,
+      // the 409 and the 422, and those keep their slot. The answer has no Retry-After header.
+      if (state.usedThisHour + 1 > state.scenario.limitPerHour)
+        return problem(429, 'Too many invitations. Try again later.');
+      state.usedThisHour += 1;
       const testId = String(params.testId);
       if (!mockTestExists(testId)) return problem(404, 'Test not found.');
       const acc = (b.accommodations as Schemas['InvitationAccommodations'] | undefined) ?? null;
@@ -389,17 +394,7 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
       if (state.scenario.candidateErased) return problem(409, 'This candidate cannot be invited.');
       if (existing && openFor(testId, existing))
         return problem(409, 'This candidate already has an active invitation for this test.');
-      if (state.usedThisHour + 1 > state.scenario.limitPerHour) {
-        return problem(
-          429,
-          'Too many invitations this hour. Try again later.',
-          undefined,
-          undefined,
-          { 'Retry-After': '1800' },
-        );
-      }
       if (state.scenario.testUnsatisfiable) return unsatisfiable();
-      state.usedThisHour += 1;
       const inv = create(testId, cand, b.windowStart as string, b.windowEnd as string, acc);
       return HttpResponse.json(
         {
