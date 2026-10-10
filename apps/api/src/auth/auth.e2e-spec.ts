@@ -1564,6 +1564,8 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
         .set('Cookie', rotated)
         .expect(204);
       expect(String(res.headers['set-cookie'])).toMatch(/cp_refresh=;/);
+      // DL-52: the default test env is not development, so the clear carries Secure like the set.
+      expect(String(res.headers['set-cookie'])).toMatch(/cp_refresh=;.*; Secure/);
       await refresh(rotated).expect(401);
       const rows = await prisma.refreshToken.findMany({ where: { userId: u.id } });
       expect(rows.every((r) => r.revokedAt !== null)).toBe(true);

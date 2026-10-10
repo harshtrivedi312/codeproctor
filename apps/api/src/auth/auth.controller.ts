@@ -25,6 +25,8 @@ import {
   ApiTooManyRequestsResponse,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
+import { type Env, isLiveEnv } from '../config/env';
 import type { CookieOptions, Request, Response } from 'express';
 import type { AuthedRequest } from '../common/auth/auth.types';
 import { Public, Roles } from '../common/auth/decorators';
@@ -65,18 +67,36 @@ function carriedRefreshCookie(req: Request): boolean {
 const NO_STORE = 'no-store';
 const ALL_STAFF = [UserRole.SUPER_ADMIN, UserRole.RECRUITER, UserRole.AUTHOR, UserRole.REVIEWER];
 
-const cookieOptions: CookieOptions = {
-  httpOnly: true,
-  secure: true,
-  sameSite: 'strict',
-  signed: true,
-  path: '/api/v1/auth',
-};
+/**
+ * The one place the cp_refresh attributes are defined (FR-101, FR-104, DL-52). Set and clear both
+ * use it: a clear must carry the same secure, path and sameSite as the set or browsers keep the
+ * cookie. `secure` is false only for APP_ENV=development (Safari and non-localhost origins drop
+ * Secure cookies over http); every other value, and NODE_ENV=production always, stays true.
+ */
+export function refreshCookieOptions(env: Pick<Env, 'APP_ENV' | 'NODE_ENV'>): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: !(env.APP_ENV === 'development' && !isLiveEnv(env)),
+    sameSite: 'strict',
+    signed: true,
+    path: '/api/v1/auth',
+  };
+}
 
-function setRefreshCookie(res: Response, outcome: SessionOutcome): void {
+function setRefreshCookie(res: Response, outcome: SessionOutcome, options: CookieOptions): void {
   if (outcome.refreshToken) {
-    res.cookie(REFRESH_COOKIE, outcome.refreshToken, { ...cookieOptions, maxAge: REFRESH_TTL_MS });
+    res.cookie(REFRESH_COOKIE, outcome.refreshToken, { ...options, maxAge: REFRESH_TTL_MS });
   }
+}
+
+function clearRefreshCookie(res: Response, options: CookieOptions): void {
+  // clearCookie ignores maxAge/expires, and `signed` is not a cookie attribute.
+  res.clearCookie(REFRESH_COOKIE, {
+    httpOnly: options.httpOnly,
+    secure: options.secure,
+    sameSite: options.sameSite,
+    path: options.path,
+  });
 }
 
 function readRefreshCookie(req: Request): string | undefined {
@@ -88,7 +108,17 @@ function readRefreshCookie(req: Request): string | undefined {
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  private readonly cookieOptions: CookieOptions;
+
+  constructor(
+    private readonly auth: AuthService,
+    config: ConfigService<Env, true>,
+  ) {
+    this.cookieOptions = refreshCookieOptions({
+      APP_ENV: config.get('APP_ENV', { infer: true }),
+      NODE_ENV: config.get('NODE_ENV', { infer: true }),
+    });
+  }
 
   @Public()
   @Post('login')
@@ -103,7 +133,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<LoginResultDto> {
     const outcome = await this.auth.login(dto.email, dto.password, ctxOf(req));
-    setRefreshCookie(res, outcome);
+    setRefreshCookie(res, outcome, this.cookieOptions);
     return outcome.body;
   }
 
@@ -127,7 +157,7 @@ export class AuthController {
       ctxOf(req),
       challenge,
     );
-    setRefreshCookie(res, outcome);
+    setRefreshCookie(res, outcome, this.cookieOptions);
     return outcome.body.session;
   }
 
@@ -180,12 +210,7 @@ export class AuthController {
       ctxOf(req),
     );
     // Every refresh family is revoked, this one included: sign in again, with the code.
-    res.clearCookie(REFRESH_COOKIE, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: cookieOptions.path,
-    });
+    clearRefreshCookie(res, this.cookieOptions);
     return { recoveryCodes: result.recoveryCodes };
   }
 
@@ -216,12 +241,7 @@ export class AuthController {
       dto.totpCode,
       ctxOf(req),
     );
-    res.clearCookie(REFRESH_COOKIE, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      path: cookieOptions.path,
-    });
+    clearRefreshCookie(res, this.cookieOptions);
   }
 
   @Roles(...ALL_STAFF)
@@ -283,7 +303,7 @@ export class AuthController {
   ): Promise<AuthSessionDto | undefined> {
     try {
       const outcome = await this.auth.refresh(readRefreshCookie(req), ctxOf(req));
-      setRefreshCookie(res, outcome);
+      setRefreshCookie(res, outcome, this.cookieOptions);
       return outcome.body.session;
     } catch (e) {
       // Only an outcome-unknown rotation clears the cookie (the commit may have landed, so the
@@ -292,12 +312,7 @@ export class AuthController {
       // the request carried one (raw cookies, so a tampered signed cookie is cleared too): a
       // cookieless cross-site POST must not clear a victim's cookie. A 503 BUSY keeps the cookie.
       if (e instanceof RefreshOutcomeUnknownException && carriedRefreshCookie(req)) {
-        res.clearCookie(REFRESH_COOKIE, {
-          httpOnly: true,
-          secure: true,
-          sameSite: 'strict',
-          path: cookieOptions.path,
-        });
+        clearRefreshCookie(res, this.cookieOptions);
       }
       throw e;
     }
@@ -312,12 +327,7 @@ export class AuthController {
     await this.auth.logout(readRefreshCookie(req), ctxOf(req));
     // Only when a cookie was sent: a cookieless cross-site POST must not clear a victim's cookie.
     if (carriedRefreshCookie(req)) {
-      res.clearCookie(REFRESH_COOKIE, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'strict',
-        path: cookieOptions.path,
-      });
+      clearRefreshCookie(res, this.cookieOptions);
     }
   }
 
