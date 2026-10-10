@@ -232,11 +232,11 @@ describe('staff invite answers the fixed 500 (FR-103, FU-BE-208)', () => {
     expect(await findLoadedRow('Jo Newperson')).toBeInTheDocument();
   });
 
-  it('FR-103: it did not land: says it probably was not created and still never resends', async () => {
+  it('FR-103: it did not land: says it may not have been created yet and still never resends', async () => {
     const calls = watchCalls();
     setMockOutcomeUnknown({ route: '/v1/admin/users', methods: ['POST'], count: 1 });
     const d = await invite('jo@example.test');
-    expect(await within(d).findByText(/probably was not created/)).toBeInTheDocument();
+    expect(await within(d).findByText(/may not have been created yet/)).toBeInTheDocument();
     expect(calls['POST /v1/admin/users']).toBe(1);
     expect(seen('POST', '/v1/admin/users')).toBe(1);
   });

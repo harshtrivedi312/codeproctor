@@ -108,7 +108,7 @@ describe('DL-37 a busy service is a calm state, not an error page', () => {
     await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
     // The unknown-outcome 500 (FU-BE-208): the list is read, the person is not in it.
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      /may have been sent[\s\S]*probably was not created/,
+      /may have been sent[\s\S]*may not have been created yet/,
     );
     expect(writes()).toHaveLength(1);
     expect(

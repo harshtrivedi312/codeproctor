@@ -124,7 +124,7 @@ export const INVITE_UNKNOWN_TEXT = {
   found:
     'The person is now in the list, so the account exists, but we could not confirm that the email went out. Ask them to check their inbox, or use Resend invite on their row to make a new link: the earlier link stops working.',
   missing:
-    'We could not confirm the invitation. The person is not in the list yet, so it probably was not created. Check the list, then send it again if they are still missing.',
+    'We could not confirm the invitation. The person is not in the list yet, so it may not have been created yet. Check the list, then send it again if they are still missing.',
   unknown:
     'We could not confirm the invitation, and could not read the list to check. Reload the page and look for the person before you send it again.',
 } as const;

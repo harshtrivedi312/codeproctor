@@ -584,7 +584,7 @@ describe('Users: risky paths of a password-protected write (FR-102, FR-103)', ()
     await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
     const alert = await within(dialog).findByRole('alert');
     expect(alert).toHaveTextContent('Invitation may have been sent');
-    expect(alert).toHaveTextContent('probably was not created');
+    expect(alert).toHaveTextContent('may not have been created yet');
   });
 
   it('FR-103: a 409 on deactivate explains the last Super Admin rule', async () => {
@@ -608,7 +608,7 @@ describe('Users: unlock, resend invite, two-factor reset, lockouts (FR-101, FR-1
     renderUsers();
     const watch = watchWrites();
     await findLoadedRow('Lee Locked');
-    expect(within(rowOf('Lee Locked')).getByText(/^Locked until \d/)).toBeInTheDocument();
+    expect(within(rowOf('Lee Locked')).getByText(/^Locked until /)).toBeInTheDocument();
     expect(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ })).toBeInTheDocument();
     expect(within(rowOf('Avery Author')).queryByRole('button', { name: /Unlock/ })).toBeNull();
     await u.click(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ }));
@@ -876,3 +876,68 @@ async function confirm(
   await u.type(await within(dialog).findByLabelText('Your password'), password);
   await u.click(within(dialog).getByRole('button', { name: submit }));
 }
+
+describe('Users: 2FA reset 401 replay and unknown-outcome guard (FR-102)', () => {
+  async function openReset(u: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+    await findLoadedRow('Sam Secure');
+    await waitFor(() => expect(seen.user).toBeTruthy());
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    return screen.findByRole('dialog');
+  }
+  function resetSequence(answer: (n: number) => Response): { bodies: unknown[] } {
+    const bodies: unknown[] = [];
+    server.use(
+      http.post('*/v1/auth/2fa/reset/:id', async ({ request }) => {
+        bodies.push(await request.json());
+        return answer(bodies.length);
+      }),
+    );
+    return { bodies };
+  }
+  const unauthorized = () =>
+    HttpResponse.json({ title: 'Unauthorized', status: 401 }, { status: 401 });
+
+  it('FR-102: a 401 on the reset refreshes once and replays the same body once', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = resetSequence((n) =>
+      n === 1 ? unauthorized() : new HttpResponse(null, { status: 204 }),
+    );
+    const dialog = await openReset(u);
+    let refreshes = 0;
+    const count = ({ request }: { request: Request }) => {
+      if (request.url.endsWith('/auth/refresh')) refreshes += 1;
+    };
+    server.events.on('request:start', count);
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    server.events.removeListener('request:start', count);
+    expect(calls.bodies).toHaveLength(2);
+    expect(calls.bodies[1]).toEqual(calls.bodies[0]);
+    expect(calls.bodies[0]).toEqual({ currentPassword: PASSWORD });
+    expect(refreshes).toBe(1);
+  });
+
+  it('FR-102 FR-104: a failed refresh sends nothing more and signs the user out', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = resetSequence(unauthorized);
+    const dialog = await openReset(u);
+    server.use(http.post('*/v1/auth/refresh', unauthorized));
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(seen.user).toBeFalsy());
+    expect(calls.bodies).toHaveLength(1);
+  });
+
+  it('FR-103 TC-005: a refresh that comes back as another person sends nothing more', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = resetSequence(unauthorized);
+    const dialog = await openReset(u);
+    seedMockRefresh(MOCK_USERS.reviewer.email);
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(calls.bodies).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.bodies).toHaveLength(1);
+  });
+});

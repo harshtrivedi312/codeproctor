@@ -18,7 +18,7 @@ import { ROLE_LABELS } from '@/features/auth/user-badge';
 import { StepUpDialog, StepUpForm, type StepUpOutcome } from '@/features/security/step-up-dialog';
 import type { Schemas } from '@/lib/api/client';
 import { can } from '@/features/staff/permissions';
-import { formatDate } from './format';
+import { formatDate, lockedUntilText } from './format';
 import { useLockEvents, useStaffUsers } from './queries';
 import { inviteStaffSchema, type InviteStaffValues } from './schemas';
 import {
@@ -39,17 +39,6 @@ const STATUS_LABEL = {
   invited: 'Pending invite',
   deactivated: 'Deactivated',
 } as const;
-
-/** "Locked until 14:05": the clock time, in the admin's own time zone. */
-function lockedUntilText(iso: string | null): string {
-  if (!iso) return 'Locked';
-  const at = new Date(iso);
-  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  // A lock is 15 minutes, but around midnight it ends on another day: say which.
-  return at.toDateString() === new Date().toDateString()
-    ? `Locked until ${time}`
-    : `Locked until ${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
-}
 
 /**
  * FR-103: Super Admin manages users. Invite, change role, deactivate and reactivate. Each write
