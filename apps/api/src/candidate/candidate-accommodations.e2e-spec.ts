@@ -101,14 +101,99 @@ describe('Candidate accommodations projection (FR-305, FR-403, ADR 0015 section 
     return request(app.getHttpServer()).get(URL_PATH).set('Authorization', `Bearer ${token}`);
   }
 
-  it('FR-305: no accommodations gives both flags false, with Cache-Control no-store', async () => {
+  const EMPTY = {
+    identityCheckWaived: false,
+    faceDetectorsOff: false,
+    disabledDetectors: [],
+    gate: { idPhotoUpload: false, roomScanAlternative: false, microphoneNotRequired: false },
+  };
+
+  it('FR-305: no accommodations (the default until the PATCH exists) is all false and [], with Cache-Control no-store', async () => {
     const res = await get({});
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ identityCheckWaived: false, faceDetectorsOff: false });
+    expect(res.body).toEqual(EMPTY);
     expect(res.headers['cache-control']).toBe('no-store');
   });
 
-  it('FR-403: a waiver and a disabled FACE detector show as two booleans and nothing else', async () => {
+  it('FR-305: an empty object and a non-object jsonb value give the empty projection, never a 500', async () => {
+    const empty = await get({ accommodations: {} });
+    expect(empty.status).toBe(200);
+    expect(empty.body).toEqual(EMPTY);
+    for (const bad of [['FACE'], 'FACE', 7]) {
+      const res = await get({ accommodations: bad as never });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(EMPTY);
+    }
+  });
+
+  it('FR-403: the detector list is sorted, deduplicated and enum-filtered', async () => {
+    const res = await get({
+      accommodations: { disabledDetectors: ['OBJECT', 'FACE', 'OBJECT', 'BOGUS-DETECTOR', 'GAZE'] },
+    });
+    const body = res.body as { disabledDetectors: string[]; faceDetectorsOff: boolean };
+    expect(body.disabledDetectors).toEqual(['FACE', 'GAZE', 'OBJECT']);
+    expect(body.faceDetectorsOff).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('BOGUS-DETECTOR');
+  });
+
+  it('FR-403: microphoneNotRequired forces VOICE into the list and sets the gate flag (ADR 0018)', async () => {
+    const res = await get({
+      accommodations: { microphoneNotRequired: true, disabledDetectors: ['FACE'] },
+    });
+    expect(res.body).toEqual({
+      ...EMPTY,
+      faceDetectorsOff: true,
+      disabledDetectors: ['FACE', 'VOICE'],
+      gate: { idPhotoUpload: false, roomScanAlternative: false, microphoneNotRequired: true },
+    });
+  });
+
+  it('FR-403: the gate flags come from idPhotoUpload and the lenient roomScanAlternative', async () => {
+    const res = await get({
+      accommodations: {
+        idPhotoUpload: true,
+        roomScanAlternative: { reasonCode: 'OTHER', reasonNote: 'SECRET-ROOM' },
+      },
+    });
+    expect(res.body).toEqual({
+      ...EMPTY,
+      gate: { idPhotoUpload: true, roomScanAlternative: true, microphoneNotRequired: false },
+    });
+    expect(JSON.stringify(res.body)).not.toContain('SECRET-ROOM');
+  });
+
+  it('FR-403: the response has exactly four top-level keys and three gate keys, and no private value', async () => {
+    const res = await get({
+      accommodations: {
+        identityCheckWaiver: { reasonCode: 'OTHER', reasonNote: 'SECRET-WAIVER-NOTE' },
+        roomScanAlternative: { reasonCode: 'OTHER', reasonNote: 'SECRET-ROOM-NOTE' },
+        idPhotoUpload: true,
+        microphoneNotRequired: true,
+        reason: 'SECRET-REASON',
+        reasonCode: 'SECRET-CODE',
+        notes: 'SECRET-NOTES',
+        assistiveInput: { label: 'SECRET-ASSIST', setAt: '2026-01-01T00:00:00Z' },
+        allowedAssistiveTools: ['SECRET-TOOL'],
+        extraTimePct: 987654,
+      },
+    });
+    expect(res.status).toBe(200);
+    const body = res.body as { gate: Record<string, boolean> };
+    expect(Object.keys(body).sort()).toEqual([
+      'disabledDetectors',
+      'faceDetectorsOff',
+      'gate',
+      'identityCheckWaived',
+    ]);
+    expect(Object.keys(body.gate).sort()).toEqual([
+      'idPhotoUpload',
+      'microphoneNotRequired',
+      'roomScanAlternative',
+    ]);
+    expect(JSON.stringify(res.body)).not.toMatch(/SECRET|987654|OTHER/);
+  });
+
+  it('FR-403: a waiver and a disabled FACE detector show in the projection and nothing private', async () => {
     const res = await get({
       accommodations: {
         identityCheckWaiver: {
@@ -122,7 +207,12 @@ describe('Candidate accommodations projection (FR-305, FR-403, ADR 0015 section 
       },
     });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ identityCheckWaived: true, faceDetectorsOff: true });
+    expect(res.body).toEqual({
+      ...EMPTY,
+      identityCheckWaived: true,
+      faceDetectorsOff: true,
+      disabledDetectors: ['FACE'],
+    });
     expect(JSON.stringify(res.body)).not.toMatch(/SECRET-NOTE|PRIVATE-NOTES|REFUSED|screen-reader/);
   });
 
@@ -130,7 +220,11 @@ describe('Candidate accommodations projection (FR-305, FR-403, ADR 0015 section 
     const res = await get({
       accommodations: { disabledDetectors: ['GAZE'], identityCheckWaived: true },
     });
-    expect(res.body).toEqual({ identityCheckWaived: true, faceDetectorsOff: false });
+    expect(res.body).toEqual({
+      ...EMPTY,
+      identityCheckWaived: true,
+      disabledDetectors: ['GAZE'],
+    });
   });
 
   it('TC-008: the token binds the session; another candidate never sees the first one`s flags', async () => {
@@ -144,7 +238,7 @@ describe('Candidate accommodations projection (FR-305, FR-403, ADR 0015 section 
       .get(URL_PATH)
       .query({ sessionId: waived.sessionId })
       .set('Authorization', `Bearer ${tokenPlain}`);
-    expect(res.body).toEqual({ identityCheckWaived: false, faceDetectorsOff: false });
+    expect(res.body).toEqual(EMPTY);
   });
 
   it('FR-609: an expired token is 401 TOKEN_EXPIRED; no token is 401', async () => {

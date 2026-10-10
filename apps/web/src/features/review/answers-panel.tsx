@@ -24,12 +24,13 @@ const SCORING_TEXT = {
   manual: 'Scored by a reviewer',
 } as const;
 
+const NOT_MANUAL_MESSAGE =
+  'This answer cannot be scored by hand. It is graded automatically, or this kind of answer cannot be scored by hand in this build. Answers that are still pending keep the verdict blocked.';
+
 /** The 409 codes of the scoring route (docs/api-contract.md section 7), each with a next step. */
 export function scoringErrorMessage(e: unknown): string {
   if (e instanceof ApiFailure) {
-    if (e.code === 'ANSWER_NOT_MANUAL') {
-      return 'This answer is scored automatically, so it cannot be marked by hand. Reload the page to see its score.';
-    }
+    if (e.code === 'ANSWER_NOT_MANUAL') return NOT_MANUAL_MESSAGE;
     if (e.code === 'SESSION_NOT_UNDER_REVIEW') {
       return 'This session is not under review right now, so answers cannot be scored. Reload the page to see its current status.';
     }
@@ -37,6 +38,15 @@ export function scoringErrorMessage(e: unknown): string {
       return 'A verdict is already set for this session, so scores can no longer change.';
     }
     if (e.status === 403) return 'Your role cannot score answers.';
+    if (e.status === 404) {
+      return 'This answer or session no longer exists for your organisation. Go back to the review queue and open it again.';
+    }
+    if (e.status === 400) {
+      return 'The note was not accepted. Remove unusual control characters and keep it under 1000 characters.';
+    }
+    if (e.status === 503) {
+      return 'The service is busy and the decision was not saved. Wait a moment and press the button again.';
+    }
   }
   return 'The decision was not saved. Check your connection and try again.';
 }
@@ -124,17 +134,30 @@ function AnswerBody({ answer }: { answer: ReviewAnswer }): React.JSX.Element {
   if (body.kind === 'code') {
     return (
       <div className="mt-3">
-        <p className="text-xs text-muted-foreground">Submitted code ({body.language})</p>
-        <pre
-          role="region"
-          // A scrollable region must be reachable by keyboard (WCAG 2.1.1).
-          // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
-          tabIndex={0}
-          aria-label={`Submitted code for ${answer.title}`}
-          className="mt-1 max-h-72 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs"
-        >
-          {body.code}
-        </pre>
+        <p className="text-xs text-muted-foreground">
+          Submitted code{body.language ? ` (${body.language})` : ''}
+        </p>
+        {body.code === '' ? <p className="mt-1 text-sm">No code submitted.</p> : null}
+        {body.code === '' ? null : (
+          <pre
+            role="region"
+            // A scrollable region must be reachable by keyboard (WCAG 2.1.1).
+            // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+            tabIndex={0}
+            aria-label={`Submitted code for ${answer.title}`}
+            className="mt-1 max-h-72 overflow-auto rounded-md border bg-muted p-3 font-mono text-xs"
+          >
+            {body.code}
+          </pre>
+        )}
+      </div>
+    );
+  }
+  if (body.kind === 'text' && body.text === '' && answer.type === 'CODING') {
+    return (
+      <div className="mt-3">
+        <p className="text-xs text-muted-foreground">Submitted code</p>
+        <p className="mt-1 text-sm">No code submitted.</p>
       </div>
     );
   }
@@ -142,7 +165,7 @@ function AnswerBody({ answer }: { answer: ReviewAnswer }): React.JSX.Element {
     const text = (id: string): string => id;
     return (
       <div className="mt-3">
-        <p className="text-xs text-muted-foreground">Selected options</p>
+        <p className="text-xs text-muted-foreground">Option ids (labels not available yet)</p>
         {body.ids.length === 0 ? (
           <p className="text-sm">No option selected.</p>
         ) : (
@@ -198,17 +221,39 @@ function ManualScore({
   const score = useScoreAnswer(sessionId);
   const [note, setNote] = React.useState('');
   const noteId = `note-${answer.sessionQuestionId}`;
+  // The API refused scoring for this answer (409 ANSWER_NOT_MANUAL): remember it, so the card stops
+  // offering buttons that cannot work.
+  const [wasRefused, setWasRefused] = React.useState(false);
+  if (wasRefused) {
+    const stub = (answer.scoringNote ?? '').toLowerCase().includes('local stub');
+    return (
+      <Alert tone="info" role="alert" className="mt-3">
+        {answer.scoring === 'MANUAL_PENDING'
+          ? `${stub ? 'Not graded (local stub). ' : ''}It cannot be scored by hand in this build, so the verdict stays blocked.`
+          : NOT_MANUAL_MESSAGE}
+      </Alert>
+    );
+  }
   const decide = (correct: boolean): void =>
-    score.mutate({
-      sessionQuestionId: answer.sessionQuestionId,
-      body: { correct, ...(note.trim() ? { note: note.trim() } : {}) },
-    });
+    score.mutate(
+      {
+        sessionQuestionId: answer.sessionQuestionId,
+        body: { correct, ...(note.trim() ? { note: note.trim() } : {}) },
+      },
+      {
+        onError: (e) => {
+          if (e instanceof ApiFailure && e.code === 'ANSWER_NOT_MANUAL') setWasRefused(true);
+        },
+      },
+    );
   return (
     <div className="mt-3 rounded-md border border-dashed p-3">
       <p className="text-sm font-medium">
         {answer.scoring === 'MANUAL_PENDING'
           ? 'This answer needs your decision'
-          : 'Change your decision'}
+          : answer.scoring === 'MANUAL'
+            ? 'Change your decision'
+            : 'Score this answer by hand'}
       </p>
       <div className="mt-2 max-w-xl">
         <Field id={noteId} label="Note (optional)" hint="Up to 1000 characters.">

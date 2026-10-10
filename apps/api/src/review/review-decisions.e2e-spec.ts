@@ -162,6 +162,7 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
       scoring: QuestionScoring;
       score?: string | null;
       answerText?: string;
+      scoringNote?: string;
     },
   ): Promise<string> {
     const n = ++seq;
@@ -194,6 +195,7 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
         points,
         scoring: o.scoring,
         score,
+        ...(o.scoringNote !== undefined ? { scoringNote: o.scoringNote } : {}),
         answer: o.answerText === undefined ? undefined : ({ text: o.answerText } as never),
       },
     });
@@ -653,6 +655,173 @@ describe('Reviewer decisions (FR-205, FR-902, D-23, TC-099, TC-008)', () => {
   });
 
   // ---- verdict ----------------------------------------------------------------------------------
+
+  // DL-72 development-only stopgap (BE-12 and FU-BEB-145 own the real behaviour). The booted app is
+  // APP_ENV 'test', so these HTTP cases prove every non-development environment is unchanged; the
+  // development case runs the same service class with APP_ENV 'development' injected.
+  describe('DL-72: coding manual scoring is development-only', () => {
+    const STUB = 'not graded (local stub)';
+
+    async function stubCoding(): Promise<{ s: Seeded; coding: string }> {
+      const s = await seedSession();
+      const coding = await seedAnswer(s, {
+        type: 'CODING',
+        position: 1,
+        points: 20,
+        scoring: 'MANUAL_PENDING',
+        score: null,
+        scoringNote: STUB,
+      });
+      return { s, coding };
+    }
+
+    it('FR-205, TC-099: with APP_ENV test (and so staging, pilot, production, unset) a stub-pending coding answer is 409 ANSWER_NOT_MANUAL and unchanged', async () => {
+      const { s, coding } = await stubCoding();
+      const who = await make(UserRole.REVIEWER);
+      const res = await http()
+        .patch(scoreUrl(s.sessionId, coding))
+        .set(who.auth)
+        .send({ correct: true })
+        .expect(409);
+      expect(res.body).toMatchObject({ code: 'ANSWER_NOT_MANUAL' });
+      const row = await owner.sessionQuestion.findUniqueOrThrow({ where: { id: coding } });
+      expect(row).toMatchObject({ scoring: 'MANUAL_PENDING', score: null, scoredById: null });
+    });
+
+    it('FR-205, TC-099: with APP_ENV development a stub-pending coding answer is scored by hand with the short-answer math and audit; other coding answers stay 409', async () => {
+      const mod = jest.requireActual<typeof import('./review-decisions.service')>(
+        './review-decisions.service',
+      );
+      const ctx =
+        jest.requireActual<typeof import('../database/org-context')>('../database/org-context');
+      const prismaMod = jest.requireActual<typeof import('../database/prisma.service')>(
+        '../database/prisma.service',
+      );
+      const stateMod = jest.requireActual<typeof import('../session/session-state.service')>(
+        '../session/session-state.service',
+      );
+      const orgContext = app.get(ctx.OrgContextService);
+      const dev = new mod.ReviewDecisionsService(
+        app.get(prismaMod.PrismaService),
+        orgContext,
+        app.get(stateMod.SessionStateService),
+        { get: (k: string) => ({ APP_ENV: 'development', NODE_ENV: 'development' })[k] } as never,
+      );
+      const real = await make(UserRole.REVIEWER);
+      const asOrgA = <T>(fn: () => Promise<T>): Promise<T> =>
+        orgContext.runAsUser({ orgId: orgA, userId: real.id, role: UserRole.REVIEWER }, fn);
+      const score = (
+        sid: string,
+        sqid: string,
+        correct: boolean,
+      ): ReturnType<typeof dev.scoreAnswer> =>
+        asOrgA(() =>
+          dev.scoreAnswer({ id: real.id, orgId: orgA }, undefined, sid, sqid, { correct }),
+        );
+
+      const { s, coding } = await stubCoding();
+      await expect(score(s.sessionId, coding, true)).resolves.toMatchObject({ score: 20 });
+      expect(await total(s.sessionId)).toBe('20.00');
+      await expect(score(s.sessionId, coding, false)).resolves.toMatchObject({ score: 0 });
+      expect(await total(s.sessionId)).toBe('0.00');
+      const audits = await owner.auditLog.findMany({
+        where: { entityId: s.sessionId, action: 'ANSWER_SCORED_MANUALLY' },
+        orderBy: { id: 'asc' },
+      });
+      expect(audits.map((a) => a.metadata)).toEqual([
+        { sessionQuestionId: coding, correct: true, previousCorrect: null },
+        { sessionQuestionId: coding, correct: false, previousCorrect: true },
+      ]);
+
+      // AUTO coding, and a pending coding answer without the grader's marker, stay refused.
+      const auto = await seedAnswer(s, {
+        type: 'CODING',
+        position: 2,
+        scoring: 'AUTO',
+        score: '5.00',
+      });
+      const other = await seedAnswer(s, {
+        type: 'CODING',
+        position: 3,
+        scoring: 'MANUAL_PENDING',
+        score: null,
+        scoringNote: 'please score this',
+      });
+      const bare = await seedAnswer(s, {
+        type: 'CODING',
+        position: 4,
+        scoring: 'MANUAL_PENDING',
+        score: null,
+      });
+      for (const id of [auto, other, bare]) {
+        await expect(score(s.sessionId, id, true)).rejects.toMatchObject({
+          code: 'ANSWER_NOT_MANUAL',
+        });
+      }
+    });
+  });
+
+  describe('DL-72: non-development configs refuse coding manual scoring even when built by hand', () => {
+    const configs: Record<string, string>[] = [
+      { APP_ENV: 'development', NODE_ENV: 'production' },
+      { APP_ENV: 'staging', NODE_ENV: 'production' },
+      { APP_ENV: 'staging' },
+    ];
+    for (const cfg of configs) {
+      it(`FR-205, TC-099: ${JSON.stringify(cfg)} answers ANSWER_NOT_MANUAL for a stub-pending and for a MANUAL coding answer`, async () => {
+        const mod = jest.requireActual<typeof import('./review-decisions.service')>(
+          './review-decisions.service',
+        );
+        const ctx =
+          jest.requireActual<typeof import('../database/org-context')>('../database/org-context');
+        const prismaMod = jest.requireActual<typeof import('../database/prisma.service')>(
+          '../database/prisma.service',
+        );
+        const stateMod = jest.requireActual<typeof import('../session/session-state.service')>(
+          '../session/session-state.service',
+        );
+        const orgContext = app.get(ctx.OrgContextService);
+        const svc = new mod.ReviewDecisionsService(
+          app.get(prismaMod.PrismaService),
+          orgContext,
+          app.get(stateMod.SessionStateService),
+          { get: (k: string) => cfg[k] } as never,
+        );
+        const real = await make(UserRole.REVIEWER);
+        const s = await seedSession();
+        const pending = await seedAnswer(s, {
+          type: 'CODING',
+          position: 1,
+          scoring: 'MANUAL_PENDING',
+          score: null,
+          scoringNote: 'not graded (local stub)',
+        });
+        const manual = await seedAnswer(s, {
+          type: 'CODING',
+          position: 2,
+          scoring: 'MANUAL_PENDING',
+          score: null,
+          scoringNote: 'not graded (local stub)',
+        });
+        // The check constraint ties MANUAL to scored_by and scored_at: set all three together.
+        await owner.sessionQuestion.update({
+          where: { id: manual },
+          data: { scoring: 'MANUAL', score: '10.00', scoredById: real.id, scoredAt: new Date() },
+        });
+        for (const id of [pending, manual]) {
+          await expect(
+            orgContext.runAsUser({ orgId: orgA, userId: real.id, role: UserRole.REVIEWER }, () =>
+              svc.scoreAnswer({ id: real.id, orgId: orgA }, undefined, s.sessionId, id, {
+                correct: true,
+              }),
+            ),
+          ).rejects.toMatchObject({ code: 'ANSWER_NOT_MANUAL' });
+        }
+        const row = await owner.sessionQuestion.findUniqueOrThrow({ where: { id: pending } });
+        expect(row).toMatchObject({ scoring: 'MANUAL_PENDING', score: null });
+      });
+    }
+  });
 
   describe('FR-902, TC-099: verdict', () => {
     it('TC-099: 409 MANUAL_PENDING while an answer waits (status stays UNDER_REVIEW, no review row); 200 after every answer is decided', async () => {
