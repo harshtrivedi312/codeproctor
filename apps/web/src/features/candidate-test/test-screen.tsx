@@ -11,7 +11,14 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import type { Schemas } from '@/lib/api/client';
 import { TestLoadError } from './adr-source';
 import { demoSource } from './demo-source';
-import type { DraftBody, DraftResult, RunResultView, TestSource } from './source';
+import {
+  savedWorkOf,
+  type DraftBody,
+  type DraftResult,
+  type RunResultView,
+  type TestQuestion,
+  type TestSource,
+} from './source';
 import type { ProctorBridge } from './proctor/bridge';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
@@ -73,7 +80,37 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
 
 const codeKey = (questionId: string, language: CodeLanguage) => `${questionId}:${language}`;
 
-const EMPTY_SAVED: SavedOnServer = { code: {}, mcq: {} };
+/**
+ * The screen's starting state from the work the server already holds for these questions. Only a
+ * saved language the question still offers is used; anything else is as if nothing was saved.
+ */
+function seedFrom(questions: readonly TestQuestion[]): {
+  drafts: Drafts;
+  langs: Record<string, CodeLanguage>;
+  saved: SavedOnServer;
+} {
+  const out: {
+    drafts: Drafts;
+    langs: Record<string, CodeLanguage>;
+    saved: SavedOnServer;
+  } = { drafts: { code: {}, mcq: {} }, langs: {}, saved: { code: {}, mcq: {} } };
+  for (const q of questions) {
+    const work = savedWorkOf(q);
+    if (work === null) continue;
+    if (q.type === 'coding' && 'code' in work) {
+      if (q.languages && !q.languages.includes(work.language)) continue;
+      out.drafts.code[codeKey(q.id, work.language)] = work.code;
+      out.langs[q.id] = work.language;
+      out.saved.code[q.id] = { language: work.language, code: work.code };
+    } else if (q.type === 'mcq' && 'optionIds' in work) {
+      const first = work.optionIds[0];
+      if (first === undefined || !q.options?.some((o) => o.id === first)) continue;
+      out.drafts.mcq[q.id] = first;
+      out.saved.mcq[q.id] = first;
+    }
+  }
+  return out;
+}
 
 /** What the server holds per question: one answer, with the language it is graded as. */
 type SavedOnServer = {
@@ -263,12 +300,15 @@ function TestScreenInner({
   onFinished: (info: FinishedSection) => void;
 }): React.JSX.Element {
   const { questions, section } = session;
+  // The candidate's own saved work seeds the screen (a reload or a crash resumes from it, #402): the
+  // editor shows it and the autosave never replaces it with the starter code.
+  const [seed] = React.useState(() => seedFrom(questions));
   const [activeId, setActiveId] = React.useState(questions[0]?.id ?? '');
-  const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>({});
-  const [drafts, setDrafts] = React.useState<Drafts>({ code: {}, mcq: {} });
+  const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>(seed.langs);
+  const [drafts, setDrafts] = React.useState<Drafts>(seed.drafts);
   // The language the candidate last typed in (or reset) per question: the one that is saved and
   // graded. Looking at another language's starter does not change it.
-  const [answerLangs, setAnswerLangs] = React.useState<Record<string, CodeLanguage>>({});
+  const [answerLangs, setAnswerLangs] = React.useState<Record<string, CodeLanguage>>(seed.langs);
   const [fsFailed, setFsFailed] = React.useState(false);
   const [finishOpen, setFinishOpen] = React.useState(false);
   const [finishing, setFinishing] = React.useState(false);
@@ -321,8 +361,8 @@ function TestScreenInner({
   // keeps ONE answer per question (final code + its language, which is what is graded), so only
   // the language the candidate last typed in (or reset) is sent; a language switch alone is not.
   const autosaveValue = React.useMemo(() => ({ drafts, answerLangs }), [drafts, answerLangs]);
-  const savedRef = React.useRef<SavedOnServer>(EMPTY_SAVED);
-  const [saved, setSaved] = React.useState<SavedOnServer>(EMPTY_SAVED);
+  const savedRef = React.useRef<SavedOnServer>(seed.saved);
+  const [saved, setSaved] = React.useState<SavedOnServer>(seed.saved);
   const autosave = useAutosave(autosaveValue, async (snapshot) => {
     const previous = savedRef.current;
     const next: SavedOnServer = { code: { ...previous.code }, mcq: { ...previous.mcq } };

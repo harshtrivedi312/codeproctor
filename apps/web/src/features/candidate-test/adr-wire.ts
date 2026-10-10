@@ -72,6 +72,21 @@ export const testLayoutSchema = z.object({
 });
 export type TestLayout = z.infer<typeof testLayoutSchema>;
 
+/**
+ * The candidate's OWN saved work on a question (the question view's `saved`, #402): CODING code and
+ * language, MCQ option ids, SHORT_ANSWER text, null when nothing was saved. A reload resumes from
+ * it. An unreadable value is treated as nothing saved (the draft is not seeded, never invented).
+ */
+export const savedWorkSchema = z
+  .union([
+    z.object({ code: z.string(), language: codeLanguageSchema }),
+    z.object({ optionIds: z.array(z.string()) }),
+    z.object({ text: z.string() }),
+  ])
+  .nullable()
+  .catch(null);
+export type SavedWork = z.infer<typeof savedWorkSchema>;
+
 /** ADR 0013 CS-4.6: `render-question`, candidate-safe (no hidden tests, no answer key). */
 export const questionViewSchema = z.object({
   sessionQuestionId: z.string(),
@@ -87,6 +102,7 @@ export const questionViewSchema = z.object({
       options: z.array(z.object({ id: z.string(), text: z.string() })),
     })
     .optional(),
+  saved: savedWorkSchema.default(null),
 });
 export type QuestionView = z.infer<typeof questionViewSchema>;
 

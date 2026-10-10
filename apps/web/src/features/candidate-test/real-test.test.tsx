@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
@@ -322,6 +322,27 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
       /saved answer is in python/i,
     );
   }, 20_000);
+
+  it('FR-504 TC-045 D-61: a reload resumes from the saved work and never saves the starter code over it', async () => {
+    await startedSession();
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print("mine")');
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    await screen.findByText(/sample tests passed/i);
+    expect(seen.filter((r) => r.method === 'PUT')).toHaveLength(1);
+    cleanup(); // the page is gone: a new load of the same session
+    const again = recordRequests();
+    const user2 = userEvent.setup();
+    await enterTest(user2);
+    expect(screen.getByLabelText<HTMLTextAreaElement>(/code editor, python/i).value).toContain(
+      'print("mine")',
+    );
+    // Nothing was typed: the question reads as saved, not as "not started", and nothing is sent.
+    expect(again.filter((r) => r.method === 'PUT')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: /question 1/i })).toHaveTextContent(/\(saved\)/i);
+  }, 30_000);
 
   it('FR-504 TC-045 D-84: a failing draft is not sent again together with the ones that saved', async () => {
     await startedSession();

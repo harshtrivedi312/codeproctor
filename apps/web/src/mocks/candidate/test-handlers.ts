@@ -288,9 +288,19 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       if (!isQuestionId(id)) return problem(404, 'NOT_FOUND');
       // The open-section rule: only the open section's questions are served (CS-4.6).
       if (QUESTIONS[id].section !== openPosition(r.s)) return problem(409, 'SECTION_NOT_OPEN');
+      // The candidate's own saved work (#402): what the draft route stored, null when nothing was.
+      const stored = r.s.drafts.get(id) as
+        { code?: string; language?: string; answer?: { optionIds?: string[] } } | undefined;
+      const saved =
+        stored === undefined
+          ? null
+          : stored.answer?.optionIds
+            ? { optionIds: stored.answer.optionIds }
+            : { code: stored.code ?? '', language: stored.language ?? 'python' };
       if (id === 'q2') {
         return HttpResponse.json({
           sessionQuestionId: id,
+          saved,
           type: 'MCQ',
           title: 'Complexity',
           statementMd: 'What is the time complexity of binary search on a sorted array?',
@@ -306,6 +316,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       }
       return HttpResponse.json({
         sessionQuestionId: id,
+        saved,
         type: 'CODING',
         title: id === 'q1' ? 'Sum of two numbers' : 'Reverse a string',
         statementMd:

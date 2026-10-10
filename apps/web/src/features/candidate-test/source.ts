@@ -1,5 +1,14 @@
 import type { CodeLanguage } from '@codeproctor/shared';
 import type { Schemas } from '@/lib/api/client';
+import { savedWorkSchema, type SavedWork } from './adr-wire';
+
+/** A question as the screen holds it: the generated shape plus the candidate's own saved work. */
+export type TestQuestion = Schemas['Question'] & { saved?: SavedWork };
+
+/** The saved work carried on a question (null when none, or when the source has none). */
+export function savedWorkOf(q: Schemas['Question']): SavedWork {
+  return 'saved' in q ? savedWorkSchema.parse(q.saved) : null;
+}
 
 /**
  * Where the test screen gets its data and sends its writes. Two adapters implement it: the demo
