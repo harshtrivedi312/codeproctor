@@ -189,7 +189,7 @@ describe('local-env --top-up (an .env written before a secret was added)', () =>
     assert.ok(env.QUESTION_OPTION_ID_SECRET.length >= 32);
     assert.doesNotMatch(env.QUESTION_OPTION_ID_SECRET, /change-me/);
     for (const [k, v] of Object.entries(parseEnv(old))) assert.equal(env[k], v, k);
-    assert.deepEqual(topUpLocalEnv(example, merged), { keys: [], text: '' });
+    assert.deepEqual(topUpLocalEnv(example, merged), { keys: [], text: '', unknown: [] });
   });
 
   it('never appends a coupled value (database or object-store passwords) or a key that is already defined', () => {
@@ -267,6 +267,9 @@ describe('local-env --top-up (an .env written before a secret was added)', () =>
       assert.equal(notDev.status, 1);
       assert.match(notDev.stderr, /APP_ENV=development/);
       assert.equal(readFileSync(join(dir, '.env'), 'utf8'), 'APP_ENV=staging\n');
+      // the last value wins when a file sets APP_ENV twice (dotenv and parseEnv agree)
+      writeFileSync(join(dir, '.env'), 'APP_ENV=development\nAPP_ENV=staging\n');
+      assert.equal(run().status, 1);
       // without an .env it refuses instead of writing one
       rmSync(join(dir, '.env'));
       const none = run();

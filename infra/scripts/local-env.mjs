@@ -20,6 +20,7 @@ import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseEnv } from 'node:util';
 
 const NAME = 'local-env';
 
@@ -65,7 +66,7 @@ export function buildLocalEnv(example, supports = { smtpDev: false, execStub: fa
   const values = generatedValues();
   const lines = example.split('\n').map((line) => {
     const m = /^([A-Za-z0-9_]+)=(.*)$/.exec(line);
-    if (m === null || !(m[1] in values)) return line;
+    if (m === null || !Object.hasOwn(values, m[1])) return line;
     return `${m[1]}=${values[m[1]]}`;
   });
   let text = lines.join('\n');
@@ -199,7 +200,7 @@ function main() {
     try {
       const existing = readFileSync(envPath, 'utf8');
       // Local development only (ADR 0009): never write into an .env that is not one.
-      if (!/^\s*APP_ENV\s*=\s*development\s*$/m.test(existing)) {
+      if (parseEnv(existing).APP_ENV !== 'development') {
         console.error(
           `${NAME}: .env does not say APP_ENV=development; --top-up is for a local run only.`,
         );
@@ -208,7 +209,7 @@ function main() {
       const { keys, text, unknown } = topUpLocalEnv(readFileSync(examplePath, 'utf8'), existing);
       if (unknown.length > 0)
         console.error(
-          `${NAME}: warning: .env.example asks for ${unknown.join(', ')} and this script has no local value for it; set it by hand.`,
+          `${NAME}: warning: .env.example asks for ${unknown.join(', ')} and --top-up does not generate it; set it by hand.`,
         );
       if (keys.length === 0) {
         console.log('.env has every secret this script can generate; nothing appended.');
