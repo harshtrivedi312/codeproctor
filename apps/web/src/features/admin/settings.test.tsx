@@ -28,6 +28,17 @@ beforeEach(() => {
 });
 
 const findRow = (name: string) => findLoadedRow(name);
+
+/** Types the admin's password into the step-up dialog and presses its submit button. */
+async function confirmWithPassword(
+  u: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+  submit: string,
+  password: string = MOCK_USERS.admin.password,
+): Promise<void> {
+  await u.type(await within(dialog).findByLabelText('Your password'), password);
+  await u.click(within(dialog).getByRole('button', { name: submit }));
+}
 const rowOf = (name: string) => screen.getByRole('row', { name: new RegExp(name) });
 
 describe('Settings access (FR-103, TC-004)', () => {
@@ -69,14 +80,15 @@ describe('Users (FR-103)', () => {
     await findRow('Casey Newhire');
     await u.click(screen.getByRole('button', { name: 'Invite a user' }));
     const dialog = await screen.findByRole('dialog');
-    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
     expect(await within(dialog).findByText('Enter their full name.')).toBeInTheDocument();
     expect(within(dialog).getByText(/Enter the work email/)).toBeInTheDocument();
 
     await u.type(within(dialog).getByLabelText('Full name'), 'Jo Newperson');
     await u.type(within(dialog).getByLabelText('Work email'), 'jo@example.test');
     await u.selectOptions(within(dialog).getByLabelText('Role'), 'AUTHOR');
-    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    await confirmWithPassword(u, dialog, 'Send invitation');
     expect(await findRow('Jo Newperson')).toBeInTheDocument();
     expect(within(rowOf('Jo Newperson')).getByText('Invited')).toBeInTheDocument();
     expect(screen.getByLabelText('Role for Jo Newperson')).toHaveValue('AUTHOR');
@@ -90,7 +102,8 @@ describe('Users (FR-103)', () => {
     const dialog = await screen.findByRole('dialog');
     await u.type(within(dialog).getByLabelText('Full name'), 'Dup');
     await u.type(within(dialog).getByLabelText('Work email'), 'author@example.test');
-    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    await confirmWithPassword(u, dialog, 'Send invitation');
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('already has an account');
   });
 
@@ -112,7 +125,7 @@ describe('Users (FR-103)', () => {
     const dialog = await screen.findByRole('dialog');
     expect(patches.count()).toBe(0);
     expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
-    await u.click(within(dialog).getByRole('button', { name: 'Change role' }));
+    await confirmWithPassword(u, dialog, 'Change role');
     await waitFor(() =>
       expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('RECRUITER'),
     );
@@ -130,13 +143,12 @@ describe('Users (FR-103)', () => {
     renderAsStaff(<UsersPage />, MOCK_USERS.admin);
     await findRow('Casey Newhire');
     await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'RECRUITER');
-    await u.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Change role' }),
-    );
-    await waitFor(() => expect(toast.error).toHaveBeenCalled());
-    const message = vi.mocked(toast.error).mock.calls[0]?.[0] as string;
-    expect(message).toContain('This role change is not allowed');
-    expect(message).toContain('last Super Admin');
+    const dialog = await screen.findByRole('dialog');
+    await confirmWithPassword(u, dialog, 'Change role');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('This role change is not allowed');
+    expect(alert).toHaveTextContent('last Super Admin');
+    await u.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
   });
@@ -147,14 +159,13 @@ describe('Users (FR-103)', () => {
     renderAsStaff(<UsersPage />, MOCK_USERS.admin);
     await findRow('Casey Newhire');
     await u.selectOptions(screen.getByLabelText('Role for Avery Author'), 'RECRUITER');
-    await u.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Change role' }),
+    const dialog = await screen.findByRole('dialog');
+    await confirmWithPassword(u, dialog, 'Change role');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'We could not confirm the result',
     );
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith(
-        expect.stringContaining('Could not change the role. Check your connection'),
-      ),
-    );
+    expect(dialog).toHaveTextContent('check the list before trying again');
+    await u.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
   });
@@ -209,11 +220,12 @@ describe('Users (FR-103)', () => {
     await u.click(within(rowOf('Robin Reviewer')).getByRole('button', { name: /Deactivate/ }));
     const dialog = await screen.findByRole('dialog');
     expect(dialog).toHaveTextContent('cannot sign in until you reactivate');
-    await u.click(within(dialog).getByRole('button', { name: 'Deactivate' }));
+    await confirmWithPassword(u, dialog, 'Deactivate');
     await waitFor(() =>
       expect(within(rowOf('Robin Reviewer')).getByText('Deactivated')).toBeInTheDocument(),
     );
     await u.click(within(rowOf('Robin Reviewer')).getByRole('button', { name: /Reactivate/ }));
+    await confirmWithPassword(u, await screen.findByRole('dialog'), 'Reactivate');
     await waitFor(() =>
       expect(within(rowOf('Robin Reviewer')).queryByText('Deactivated')).not.toBeInTheDocument(),
     );

@@ -14,6 +14,7 @@ export const currentPasswordSchema = z
 
 /** Body of 2FA setup start, disable and recovery-code regeneration. */
 export const reauthBodySchema = z.object({ currentPassword: currentPasswordSchema });
+export type ReauthBodyValues = z.infer<typeof reauthBodySchema>;
 /** Body of 2FA setup confirm. */
 export const setupConfirmBodySchema = reauthBodySchema.extend({ code: otpCodeSchema });
 

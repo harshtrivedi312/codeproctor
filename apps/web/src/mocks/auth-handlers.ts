@@ -214,7 +214,7 @@ export function mockRecoveryCodesFor(user: { email: string; role: string }, gen:
 }
 
 /** RFC 7807 problem body as the real API's global filter sends it (backend PR #26). */
-function problem(
+export function problem(
   request: Request,
   status: number,
   detail: string,
@@ -225,7 +225,9 @@ function problem(
     400: 'Bad Request',
     401: 'Unauthorized',
     403: 'Forbidden',
+    404: 'Not Found',
     409: 'Conflict',
+    429: 'Too Many Requests',
   };
   return HttpResponse.json(
     {
@@ -273,7 +275,7 @@ const totpCodeOnly = (body: Record<string, unknown>): string[] =>
  * 5-failure lockout as login; a correct one gives the attempt back. The mock does not rate limit
  * requests; that is the server's job.
  */
-async function reauth(
+export async function mockReauth(
   request: Request,
   extra?: (body: Record<string, unknown>) => string[],
   /** False when the caller still has a second factor to check and gives the attempt back itself. */
@@ -391,7 +393,7 @@ export function createAuthHandlers() {
 
     // Signed-in 2FA management (FR-102). Every call re-asks the current password.
     http.post(`${base}/2fa/setup/start`, async ({ request }) => {
-      const checked = await reauth(request);
+      const checked = await mockReauth(request);
       if (checked instanceof Response) return checked;
       if (twoFactorOn(checked.user, load())) return conflict(request, 'Two-factor is already on.');
       const otpauthUri = `otpauth://totp/CodeProctor:${encodeURIComponent(checked.user.email)}?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=CodeProctor`;
@@ -403,7 +405,7 @@ export function createAuthHandlers() {
     }),
 
     http.post(`${base}/2fa/setup/confirm`, async ({ request }) => {
-      const checked = await reauth(request, sixDigits);
+      const checked = await mockReauth(request, sixDigits);
       if (checked instanceof Response) return checked;
       const { user, body } = checked;
       const state = load();
@@ -424,7 +426,7 @@ export function createAuthHandlers() {
     // Backend PR #51: needs the current password AND a 6-digit TOTP code (never a recovery code).
     // Order: password, 409 if off, code. Allowed for every role. Success revokes every refresh token.
     http.post(`${base}/2fa/disable`, async ({ request }) => {
-      const checked = await reauth(request, totpCodeOnly, false, REAUTH_DISABLE_DETAIL);
+      const checked = await mockReauth(request, totpCodeOnly, false, REAUTH_DISABLE_DETAIL);
       if (checked instanceof Response) return checked;
       const { user, body } = checked;
       const state = load();
@@ -445,7 +447,7 @@ export function createAuthHandlers() {
     }),
 
     http.post(`${base}/2fa/recovery-codes/regenerate`, async ({ request }) => {
-      const checked = await reauth(request);
+      const checked = await mockReauth(request);
       if (checked instanceof Response) return checked;
       const { user } = checked;
       const state = load();

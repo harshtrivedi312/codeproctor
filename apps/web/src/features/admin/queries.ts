@@ -57,40 +57,63 @@ export const adminKeys = {
   candidates: ['admin', 'candidates'] as const,
 };
 
+/** The API's largest page (docs/api-contract.md section 6: pageSize 1 to 100). */
+const USERS_PAGE_SIZE = 100;
+/** page * pageSize over 10 000 is a 400, and a staff list that long is not a real list. */
+const USERS_MAX_PAGES = 10;
+
+/**
+ * Reads the staff user list page by page (the API pages it, default 50). `complete` is false when
+ * the page limit was hit before the end, so a caller never mistakes "not on the pages I read" for
+ * "not in the organisation".
+ */
+async function readStaffUsers(
+  signal?: AbortSignal,
+): Promise<{ items: StaffUser[]; complete: boolean }> {
+  const items: StaffUser[] = [];
+  for (let page = 1; page <= USERS_MAX_PAGES; page += 1) {
+    const { data, error, response } = await api.GET('/v1/admin/users', {
+      params: { query: { page, pageSize: USERS_PAGE_SIZE } },
+      ...(signal ? { signal } : {}),
+    });
+    if (!data) fail(response, error);
+    items.push(...data.items);
+    const total = typeof data.total === 'number' ? data.total : null;
+    if (data.items.length < USERS_PAGE_SIZE || (total !== null && items.length >= total)) {
+      return { items, complete: true };
+    }
+  }
+  return { items, complete: false };
+}
+
+type StaffUser = Schemas['StaffUser'];
+
 export function useStaffUsers() {
   return useQuery({
     queryKey: adminKeys.users,
-    queryFn: async ({ signal }) => {
-      const { data, error, response } = await api.GET('/v1/admin/users', { signal });
-      if (!data) fail(response, error);
-      return data.items;
-    },
+    queryFn: async ({ signal }) => (await readStaffUsers(signal)).items,
   });
 }
 
 /**
  * The fixed 500 on a staff invite (or re-issue) means the outcome is unknown (api-contract section
  * 8, FU-BE-208): the user row may exist and the mail may or may not have gone out. Reads the user
- * list (never sends again) and says whether the address is in it. 'unknown': the list could not be read.
+ * list (never sends again) and says whether the address is in it. 'unknown': the list could not be
+ * read, or was too long to read in full.
  */
-/** The API's default page size (api-contract section 6); the web contract has no paging parameters yet. */
-const LIST_PAGE_SIZE = 50;
-
 export async function checkInviteOutcome(
   qc: QueryClient,
   email: string,
 ): Promise<'found' | 'missing' | 'unknown'> {
   const startedIn = getGeneration();
   try {
-    const { data } = await api.GET('/v1/admin/users');
+    const { items, complete } = await readStaffUsers();
     // The session changed meanwhile: this answer is about someone else's organisation.
-    if (!data || startedIn !== getGeneration()) return 'unknown';
-    qc.setQueryData(adminKeys.users, data.items);
+    if (startedIn !== getGeneration()) return 'unknown';
+    qc.setQueryData(adminKeys.users, items);
     const wanted = email.trim().toLowerCase();
-    if (data.items.some((u) => u.email.toLowerCase() === wanted)) return 'found';
-    // The list is paged (the API's default page is 50) and this call reads the first page only:
-    // a full page may hide the person, so "missing" is only claimed for a short list.
-    return data.items.length >= LIST_PAGE_SIZE ? 'unknown' : 'missing';
+    if (items.some((u) => u.email.toLowerCase() === wanted)) return 'found';
+    return complete ? 'missing' : 'unknown';
   } catch {
     return 'unknown';
   }
@@ -104,35 +127,6 @@ export const INVITE_UNKNOWN_TEXT = {
   unknown:
     'We could not confirm the invitation, and could not read the list to check. Reload the page and look for the person before you send it again.',
 } as const;
-
-export function useInviteUser() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (body: InviteBody) => {
-      const { data, error, response } = await api.POST('/v1/admin/users', { body });
-      if (!data) fail(response, error);
-      return data;
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: adminKeys.users }),
-  });
-}
-type InviteBody = { email: string; name: string; role: Schemas['StaffRole'] };
-
-export function useUpdateUser() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (vars: { id: string; role?: Schemas['StaffRole']; active?: boolean }) => {
-      const { id, ...body } = vars;
-      const { data, error, response } = await api.PATCH('/v1/admin/users/{userId}', {
-        params: { path: { userId: id } },
-        body,
-      });
-      if (!data) fail(response, error);
-      return data;
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: adminKeys.users }),
-  });
-}
 
 export function useOrgSettings() {
   return useQuery({

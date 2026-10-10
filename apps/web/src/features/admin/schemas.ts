@@ -15,7 +15,8 @@ const whole = (label: string, min: number, max: number) =>
     .min(min, `${label} must be at least ${min}.`)
     .max(max, `${label} must be at most ${max}.`);
 
-export const MAX_STAFF_NAME_LENGTH = 100;
+// InviteStaffUserDto: name 1..200 (apps/api/src/users/dto/users.dto.ts).
+export const MAX_STAFF_NAME_LENGTH = 200;
 
 export const inviteStaffSchema = z.object({
   email: z

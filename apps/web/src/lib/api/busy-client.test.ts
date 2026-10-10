@@ -131,7 +131,7 @@ describe('DL-37 503 BUSY: the API client retries only BUSY', () => {
       body: { currentPassword: 'x', totpCode: '123456' },
     });
     const invite = await api.POST('/v1/admin/users', {
-      body: { email: 'n@example.test', name: 'N', role: 'RECRUITER' },
+      body: { currentPassword: 'x', email: 'n@example.test', name: 'N', role: 'RECRUITER' },
     });
     for (const r of [login, verify, disable, invite]) expect(r.response.status).toBe(503);
     expect(mockFaultRequests()).toHaveLength(4); // one request each

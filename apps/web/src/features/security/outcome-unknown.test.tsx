@@ -209,6 +209,8 @@ describe('staff invite answers the fixed 500 (FR-103, FU-BE-208)', () => {
     const d = await screen.findByRole('dialog');
     await u.type(within(d).getByLabelText('Full name'), 'Jo Newperson');
     await u.type(within(d).getByLabelText('Work email'), email);
+    await u.click(within(d).getByRole('button', { name: 'Continue' }));
+    await u.type(await within(d).findByLabelText('Your password'), MOCK_USERS.admin.password);
     beforeSend?.();
     await u.click(within(d).getByRole('button', { name: 'Send invitation' }));
     return d;
