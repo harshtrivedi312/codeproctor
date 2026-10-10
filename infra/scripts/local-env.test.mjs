@@ -17,7 +17,7 @@ import { parseEnv } from 'node:util';
 import { after, before, describe, it } from 'node:test';
 import { findProblems } from './local-db-guard.mjs';
 import { REPO_ROOT } from './test-support.mjs';
-import { buildLocalEnv, detectSupport } from './local-env.mjs';
+import { COUPLED, INDEPENDENT, buildLocalEnv, detectSupport, topUpLocalEnv } from './local-env.mjs';
 
 const SCRIPT = `${REPO_ROOT}infra/scripts/local-env.mjs`;
 
@@ -169,6 +169,114 @@ describe('local-env (local demo)', () => {
       assert.ok(existsSync(join(empty, '.env')));
     } finally {
       rmSync(empty, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('local-env --top-up (an .env written before a secret was added)', () => {
+  const exampleOf = () => readFileSync(`${REPO_ROOT}.env.example`, 'utf8');
+  const withKey = (text) =>
+    `${text.replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '')}\nQUESTION_OPTION_ID_SECRET=change-me-random-secret\n`;
+
+  it('appends the missing independent secret, leaves every existing value alone, and is idempotent', () => {
+    const example = withKey(exampleOf());
+    const old = buildLocalEnv(exampleOf()).replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '');
+    const r = topUpLocalEnv(example, old);
+    assert.deepEqual(r.keys, ['QUESTION_OPTION_ID_SECRET']);
+    const merged = old + r.text;
+    assert.ok(merged.startsWith(old), 'the old file is a prefix: nothing was changed');
+    const env = parseEnv(merged);
+    assert.ok(env.QUESTION_OPTION_ID_SECRET.length >= 32);
+    assert.doesNotMatch(env.QUESTION_OPTION_ID_SECRET, /change-me/);
+    for (const [k, v] of Object.entries(parseEnv(old))) assert.equal(env[k], v, k);
+    assert.deepEqual(topUpLocalEnv(example, merged), { keys: [], text: '', unknown: [] });
+  });
+
+  it('never appends a coupled value (database or object-store passwords) or a key that is already defined', () => {
+    // Every coupled key removed from the old file: none may come back, only the independent one.
+    let old = buildLocalEnv(exampleOf());
+    for (const k of [...COUPLED, 'QUESTION_OPTION_ID_SECRET'])
+      old = old.replace(new RegExp(`^${k}=.*\\n?`, 'gm'), '');
+    old = old.replace(/^OTP_PEPPER=.*$/m, 'OTP_PEPPER=');
+    const r = topUpLocalEnv(withKey(exampleOf()), old);
+    assert.deepEqual(r.keys, ['QUESTION_OPTION_ID_SECRET'], 'an empty OTP_PEPPER is still defined');
+    for (const k of [...COUPLED, 'OTP_PEPPER']) assert.doesNotMatch(r.text, new RegExp(k));
+  });
+
+  it('a key is defined for `export KEY=`, leading space and spaces around `=`; a commented-out line is not', () => {
+    const base = buildLocalEnv(exampleOf());
+    const without = base.replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '');
+    const example = withKey(exampleOf());
+    for (const line of [
+      'export QUESTION_OPTION_ID_SECRET=mine',
+      '  QUESTION_OPTION_ID_SECRET=mine',
+      'QUESTION_OPTION_ID_SECRET = mine',
+    ]) {
+      assert.deepEqual(topUpLocalEnv(example, `${without}\n${line}\n`).keys, [], line);
+    }
+    assert.deepEqual(topUpLocalEnv(example, `${without}\n# QUESTION_OPTION_ID_SECRET=old\n`).keys, [
+      'QUESTION_OPTION_ID_SECRET',
+    ]);
+  });
+
+  it('only the allowlist is ever appended, and a change-me key without a generator is reported, not thrown', () => {
+    const example = `${withKey(exampleOf())}\nBRAND_NEW_SECRET=change-me-x\n`;
+    const old = buildLocalEnv(exampleOf()).replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '');
+    const r = topUpLocalEnv(example, old);
+    assert.deepEqual(r.keys, ['QUESTION_OPTION_ID_SECRET']);
+    assert.deepEqual(r.unknown, ['BRAND_NEW_SECRET']);
+    assert.ok(r.keys.every((k) => INDEPENDENT.includes(k)));
+    assert.equal(INDEPENDENT.filter((k) => COUPLED.has(k)).length, 0);
+  });
+
+  it('adds a newline first when the old file did not end with one', () => {
+    const old = buildLocalEnv(exampleOf())
+      .replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '')
+      .trimEnd();
+    const { text } = topUpLocalEnv(withKey(exampleOf()), old);
+    assert.ok(text.startsWith('\n'));
+    assert.equal(parseEnv(old + text).QUESTION_OPTION_ID_SECRET?.length >= 32, true);
+  });
+
+  it('the command appends to the file, keeps mode 0600, prints names and no values, and says nothing is missing next time', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'local-env-topup-'));
+    try {
+      writeFileSync(join(dir, '.env.example'), withKey(exampleOf()));
+      const old = buildLocalEnv(exampleOf()).replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '');
+      writeFileSync(join(dir, '.env'), old, { mode: 0o600 });
+      const run = () => spawnSync('node', [SCRIPT, '--dir', dir, '--top-up'], { encoding: 'utf8' });
+      const first = run();
+      assert.equal(first.status, 0, first.stderr);
+      assert.match(
+        first.stdout,
+        /appended 1 missing secret\(s\) to \.env: QUESTION_OPTION_ID_SECRET/,
+      );
+      const merged = readFileSync(join(dir, '.env'), 'utf8');
+      assert.ok(merged.startsWith(old));
+      const value = parseEnv(merged).QUESTION_OPTION_ID_SECRET;
+      assert.ok(!first.stdout.includes(value) && !first.stderr.includes(value));
+      if (process.platform !== 'win32')
+        assert.equal(statSync(join(dir, '.env')).mode & 0o777, 0o600);
+      const second = run();
+      assert.equal(second.status, 0);
+      assert.match(second.stdout, /nothing appended/);
+      assert.equal(readFileSync(join(dir, '.env'), 'utf8'), merged);
+      // an .env that is not a development one is not touched
+      writeFileSync(join(dir, '.env'), 'APP_ENV=staging\n');
+      const notDev = run();
+      assert.equal(notDev.status, 1);
+      assert.match(notDev.stderr, /APP_ENV=development/);
+      assert.equal(readFileSync(join(dir, '.env'), 'utf8'), 'APP_ENV=staging\n');
+      // the last value wins when a file sets APP_ENV twice (dotenv and parseEnv agree)
+      writeFileSync(join(dir, '.env'), 'APP_ENV=development\nAPP_ENV=staging\n');
+      assert.equal(run().status, 1);
+      // without an .env it refuses instead of writing one
+      rmSync(join(dir, '.env'));
+      const none = run();
+      assert.equal(none.status, 1);
+      assert.match(none.stderr, /needs an existing \.env/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

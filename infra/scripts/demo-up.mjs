@@ -64,6 +64,11 @@ export function planSteps({ hasEnv, hasModules, startApps, startWorker = false, 
       name: 'write .env (random local secrets)',
       cmd: ['node', 'infra/scripts/local-env.mjs'],
     });
+  else
+    steps.push({
+      name: 'top up .env with secrets added since it was written (existing values untouched)',
+      cmd: ['node', 'infra/scripts/local-env.mjs', '--top-up'],
+    });
   steps.push(
     { name: 'check .env is a local development environment', check: 'env' },
     { name: 'check that the ports the demo needs are free', check: 'ports' },
