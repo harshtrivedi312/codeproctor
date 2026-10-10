@@ -844,10 +844,5 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
       await post('/confirm', c.token, { stream: 'ROOM_SCAN', segment: 0, seq: 0 }).expect(200);
       expect(await waitFor(c, 'VERIFIED')).toBe('VERIFIED');
     });
-      // Presign is refused for SCREEN in CONSENTED, so only the queue-trigger rule is checked here:
-      // with evidence on file but no ROOM_SCAN confirm, nothing moves the session.
-      await new Promise((r) => setTimeout(r, 2000));
-      expect(await status(c)).toBe('CONSENTED');
-    });
   });
 });
