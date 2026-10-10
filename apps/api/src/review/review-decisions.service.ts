@@ -13,12 +13,15 @@
 // and booleans only: never the answer text or the note. Lock waits are capped, so contention is a
 // 503 BUSY from the problem filter (section 8), never a hang. The reviewer is the token's user.
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { devReviewFlowEnabled, type Env } from '../config/env';
+import { LOCAL_STUB_NOTE } from '../grading/local-stub';
 import { CodedConflictException } from '../common/coded.exception';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import { formatHundredths, toHundredths } from '../grading/scoring';
 import { Prisma } from '../generated/prisma/client';
-import type { SessionStatus } from '../generated/prisma/enums';
+import type { QuestionScoring, SessionStatus } from '../generated/prisma/enums';
 import { SessionStateConflictError } from '../session/session-state.errors';
 import { SessionStateService } from '../session/session-state.service';
 import type {
@@ -55,7 +58,31 @@ export class ReviewDecisionsService {
     private readonly prisma: PrismaService,
     private readonly orgContext: OrgContextService,
     private readonly state: SessionStateService,
+    private readonly config: ConfigService<Env, true>,
   ) {}
+
+  /**
+   * DEVELOPMENT-ONLY STOPGAP (Delivery Lead ruling DL-72, 'go dev-only'). Only when APP_ENV is
+   * exactly 'development' (devReviewFlowEnabled): a CODING answer may be scored by hand when the
+   * local Judge0 stub left it undecided, that is scoring MANUAL_PENDING with the exact marker note
+   * only the grader writes (LOCAL_STUB_NOTE), or already MANUAL (reachable for a coding answer only
+   * through this path, so a changed decision keeps the previousCorrect chain). This is NOT
+   * production behaviour: BE-12 and FU-BEB-145 own the real coding review contract. In every other
+   * environment a CODING answer stays 409 ANSWER_NOT_MANUAL.
+   */
+  private devCodingManual(scoring: QuestionScoring, scoringNote: string | null): boolean {
+    if (
+      !devReviewFlowEnabled({
+        APP_ENV: this.config.get('APP_ENV', { infer: true }),
+        NODE_ENV: this.config.get('NODE_ENV', { infer: true }),
+      })
+    ) {
+      return false;
+    }
+    return (
+      scoring === 'MANUAL' || (scoring === 'MANUAL_PENDING' && scoringNote === LOCAL_STUB_NOTE)
+    );
+  }
 
   async scoreAnswer(
     reviewer: Reviewer,
@@ -76,7 +103,7 @@ export class ReviewDecisionsService {
       await this.assertReviewer(tx, reviewer, session.orgId);
       const question = await tx.sessionQuestion.findFirst({
         where: { id: sessionQuestionId, sessionId },
-        select: { questionVersionId: true, scoring: true },
+        select: { questionVersionId: true, scoring: true, scoringNote: true },
       });
       if (!question) throw new NotFoundException(NOT_FOUND);
       const version = await tx.questionVersion.findFirst({
@@ -86,7 +113,10 @@ export class ReviewDecisionsService {
       const kind = version
         ? await tx.question.findFirst({ where: { id: version.questionId }, select: { type: true } })
         : null;
-      if (kind?.type !== 'SHORT_ANSWER' || question.scoring === 'AUTO') {
+      const manualKind =
+        kind?.type === 'SHORT_ANSWER' ||
+        (kind?.type === 'CODING' && this.devCodingManual(question.scoring, question.scoringNote));
+      if (!manualKind || question.scoring === 'AUTO') {
         throw new CodedConflictException('This answer is not scored by hand.', 'ANSWER_NOT_MANUAL');
       }
 
@@ -107,10 +137,13 @@ export class ReviewDecisionsService {
       // Under the lock: the committed state of this answer and of every sibling.
       const before = await tx.sessionQuestion.findFirst({
         where: { id: sessionQuestionId, sessionId },
-        select: { points: true, score: true, scoring: true },
+        select: { points: true, score: true, scoring: true, scoringNote: true },
       });
       if (!before) throw new NotFoundException(NOT_FOUND);
-      if (before.scoring === 'AUTO') {
+      if (
+        before.scoring === 'AUTO' ||
+        (kind?.type === 'CODING' && !this.devCodingManual(before.scoring, before.scoringNote))
+      ) {
         throw new CodedConflictException('This answer is not scored by hand.', 'ANSWER_NOT_MANUAL');
       }
       // The previous decision is read from the last audit row of this answer (a score of 0 on a
