@@ -1,13 +1,25 @@
 # Runbook
 
-Operational procedures. Each section names who may run it and where. Staging and pilot
+Operational procedures. Each section names who may run it and where. Pilot
 credentials never exist on developer machines or in agent sessions (ADR 0009); procedures that
 need them run in GitHub Actions or on the server.
+
+There is no hosted staging database (owner decision C-65: staging is local only). The only non-pilot
+setup is [docs/local-run.md](local-run.md); the earlier "Staging database setup (DEP-01)" section was
+removed in PR #290 and can be read in the git history if a pilot step needs its wording (the
+`app_user` password and role checks, ADR 0006 sections 7.4 and 8.8, are DEP-03 work now).
+One requirement from it survives: a pilot database reached over any network needs certificate-verifying
+TLS (`verify-full` with a trusted root). `PGSSLMODE` does not reach Prisma's migration engine or the
+API's node-postgres driver, so each database URL needs its own parameter (confirm the spelling for Prisma 7
+and `pg`), and `sslmode=require` encrypts without checking the server. A database on the same host that
+never crosses a network (ADR 0017) does not need it.
+If the earlier plans left anything behind, the owner deletes it: the `staging` GitHub environment and its
+`STAGING_*` secrets, the R2 backup token, the read-only backup database role and the staging backup bucket.
 
 ## Database backups and restore
 
 Owner: Database B (ops) track. Serves NFR-03, FR-704 and ADR 0004 R-7. Files: `infra/backup/`.
-No scheduled workflow: staging is not backed up (C-63); the pilot backup runs on the pilot host (DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
+No scheduled workflow (C-63); the pilot backup runs on the pilot host (DEP-03). Tests: `infra/scripts/verify-backup.test.mjs`.
 
 ### What runs
 
@@ -23,7 +35,7 @@ and optionally `BACKUP_PREFIX` (default `db/`), `BACKUP_RETENTION_DAYS` (default
 `BACKUP_SSE` (for example `AES256` on AWS S3), `PG_BIN_DIR`. Timestamped mode must have `BACKUP_MODE=timestamped` set in the environment of every script that touches the bucket (`backup.sh`, `restore.sh`, `erasure-list.sh`). The scripts take no secrets as
 arguments, so nothing shows up in `ps`, and they never print a URL, key or password.
 
-Environments: staging is not backed up (C-63). Pilot and production write
+Environments: Pilot and production write
 to AWS S3 in the same region as the data, so candidate data stays in AWS; only configuration
 differs. Backups of pilot and production run on the server or in a pilot workflow that DEP-03
 adds. Turn on bucket default encryption and Block Public Access on the backup bucket (ARC-05).
@@ -86,7 +98,7 @@ mail is not sent: the candidate row is already anonymised and the list records n
 only if no notice was recorded" is unmet until FU-DBB-31b). `erasure_requested_at` is set from the list
 when the backup did not have it, so the erasure sweep finishes the purge and the completion row.
 
-### Restore drill (run on a throwaway server)
+### Local restore drill (run on a throwaway server)
 
 Locally, with a throwaway container (never the dev stack):
 
@@ -125,113 +137,7 @@ Run on the server or in a manually triggered workflow in the affected environmen
 5. The retention jobs are anchored and idempotent (ADR 0004 9.7): the next daily run deletes again
    anything the restore brought back that is past its limit.
 
-### Known limits
-
-- Row counts are taken in a separate read-only snapshot just before `pg_dump`. On a busy database
-  they can differ by the rows written in between; run the backup when traffic is lowest.
-
-## Staging database setup (DEP-01)
-
-Owner: Database B (ops) track, for DEP-01. Serves ADR 0006 sections 7.3 to 7.5 and 8.8, ADR 0009 and
-NFR-03. Staging holds synthetic data only (no real candidates) and is not backed up (C-63). Staging credentials
-live only in GitHub Actions secrets (environment `staging`) and on the staging server (D-38); no
-step below is run from a developer machine or an agent session.
-
-The steps run in this order. A person does steps 0, 1, 2 and 4 (they handle credentials); the deploy job does 3 and 5. Steps 6 and 7 are the
-backup note (C-63) and the pilot restore drill.
-
-### 0. Lock the `staging` environment first (a person, before any secret exists)
-
-In GitHub, create the `staging` environment and allow deployments from the `main` branch only, with no
-required reviewers (they would stall the schedule). Only then create secrets. Until this is done, a
-branch pushed by any session could run a workflow that names the environment and read its secrets.
-Every workflow job that uses a staging secret must also guard on `github.ref == 'refs/heads/main'` (for
-example, the deploy job); the restriction on the environment is what stops a different workflow file.
-
-### 1. The database and its owner role (a person, once)
-
-- PostgreSQL 16, reachable from the deploy job on a **direct** connection (not a pooler: `migrate
-  deploy` needs session features that Supabase and Neon poolers do not give).
-- A migration owner role that owns the database. It needs `CREATE` on the database and must be able
-  to create the `citext` and `pgcrypto` extensions (both are trusted extensions in PostgreSQL 13 and
-  later, so the database owner may create them). Give it `CREATEDB` as well if it is also the role that
-  runs an incident restore (see "Restoring for real"); otherwise name who grants it at that time.
-- **Supabase only:** its default privileges may expose new `public` tables to `anon` and `authenticated`
-  through the Data API. Turn the Data API off, or revoke those roles on `public` (including their default
-  privileges), **before step 3** (ADR 0006 section 7.5). On RDS, also check `rds.restrict_password_commands`
-  before step 4 (same section).
-- If that role can create roles (RDS master, Neon default owner, Postgres on EC2), the first
-  `migrate deploy` creates `app_user` itself. If it cannot, create the role first as an administrator:
-  `CREATE ROLE app_user LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`
-  (ADR 0006 section 7.5 lists each host).
-- Put the owner role's URL in the GitHub environment secret `STAGING_MIGRATION_DATABASE_URL`. It never
-  goes into the API's environment.
-
-### 2. Network
-
-Every connection must use TLS **with certificate verification**, for each client separately:
-`PGSSLMODE=verify-full` with a trusted root certificate (`PGSSLROOTCERT=system` or a CA from a secret)
-for psql (manual sessions), and the equivalent parameters in the two database URLs
-for Prisma's migration engine (`STAGING_MIGRATION_DATABASE_URL`) and the API's node-postgres driver
-(`STAGING_DATABASE_URL`). `PGSSLMODE` does not reach those two clients, and `sslmode=require` encrypts
-without checking the server, so a man-in-the-middle could capture the owner or `app_user` login. The
-deploy job must fail if a URL lacks the verifying parameter (FU-DBB-24(c)); until it does, the person
-creating each secret checks the parameter is there. Confirm the exact spelling for Prisma 7 and `pg`
-before the first deploy. If the database is not reachable
-from GitHub-hosted runners, the job runs over SSH on the staging server or on a self-hosted runner
-inside the network; decide this before step 3 (DEP-01).
-
-### 3. Apply the migrations (the deploy job)
-
-```bash
-pnpm exec prisma migrate deploy      # the secret STAGING_MIGRATION_DATABASE_URL, exported as MIGRATION_DATABASE_URL
-```
-
-Only `migrate deploy`. Never `migrate dev`, `migrate reset` or `db push` against staging (ADR 0009). A
-second run must print "No pending migrations". The migrations create `app_user` with no password (no
-password is ever in migration history) and grant it DML only; `audit_logs` is append-only for it and
-`_prisma_migrations` is closed to it.
-
-### 4. Give `app_user` its password (a person, once, and on every rotation)
-
-Connect as an administrator on the server and run `\password app_user` in psql (the client encrypts it, so
-the cleartext reaches no history and no server log), or set a SCRAM verifier computed in the job. Store the
-`app_user` `DATABASE_URL` as the secret `STAGING_DATABASE_URL`, and nowhere else. The password is never put
-on a command line or in a workflow input. To rotate: repeat, update the secret, restart the API.
-
-### 5. Check the role (the deploy job, after every migrate)
-
-Run these as the owner role; each must give the shown result. They are the same checks DB-08 runs
-(`infra/scripts/verify-schema.test.mjs`); the API's readiness check will repeat them at runtime (FU-DB-66).
-
-```sql
-SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
-  FROM pg_roles WHERE rolname = 'app_user';                                   -- f
-SELECT count(*) FROM pg_auth_members WHERE member = 'app_user'::regrole;       -- 0
-SELECT has_database_privilege('app_user', current_database(), 'CREATE');       -- f
-SELECT has_schema_privilege('app_user', 'public', 'CREATE');                   -- f
-SELECT (SELECT count(*) FROM pg_database WHERE datdba = r.oid)
-     + (SELECT count(*) FROM pg_namespace WHERE nspowner = r.oid)
-     + (SELECT count(*) FROM pg_class WHERE relowner = r.oid)
-     + (SELECT count(*) FROM pg_proc WHERE proowner = r.oid)
-  FROM pg_roles r WHERE r.rolname = 'app_user';                                 -- 0 (owns nothing)
-SELECT has_table_privilege('app_user', 'audit_logs', 'UPDATE');                -- f
-SELECT has_table_privilege('app_user', '_prisma_migrations', 'SELECT');        -- f
-SELECT has_database_privilege('app_user', current_database(), 'TEMPORARY');    -- f (the app_user_no_temp migration)
-```
-
-### 6. Backups (none on staging)
-
-Owner decision C-63: staging is synthetic and rebuilt from seed and migrations, so there is no scheduled
-staging backup, no backup workflow and no backup secrets. Pilot backups and restores are the section
-"Database backups and restore" above (`BACKUP_MODE=versioned`, run on the pilot host, DEP-03). The
-`timestamped` mode of `backup.sh` stays for local drills and the tests (`verify-backup.test.mjs`) only.
-The `staging` GitHub environment is the owner's to keep or delete. If backup secrets were already created
-(the earlier plan asked for them), the owner deletes them: any `STAGING_S3_BACKUP_*`, `STAGING_S3_ENDPOINT` and
-`STAGING_BACKUP_PG*` secrets in the `staging` environment, the R2 backup token, the read-only backup database
-role, and the staging backup bucket (synthetic data only).
-
-### 7. The restore drill (pilot)
+### Quarterly restore drill (pilot)
 
 Once a quarter, and before the pilot goes live, the owner proves a restore works: take a backup on the
 pilot host, restore the newest version, then an **older** version (`restore.sh --backup <version id>`, see
@@ -240,11 +146,10 @@ code 2 means the counts differ, any other failure is exit code 1). Treat a faile
 until a restore works, there is no backup. Never run it from a developer machine, because the pilot
 bucket credentials must stay off it.
 
-### Open items
+### Known limits
 
-- Staging runs no seed data from the repository's `db:seed` (it is local-only by design, ADR 0009).
-  Synthetic staging data comes from the QA fixtures (QA-A track); the database track provides none.
-- Whether runners can reach the database, and who runs the deploy job, are DEP-01 decisions.
+- Row counts are taken in a separate read-only snapshot just before `pg_dump`. On a busy database
+  they can differ by the rows written in between; run the backup when traffic is lowest.
 
 ## Provisioning a pilot organization (ADR 0006 section 8.9)
 
@@ -277,8 +182,8 @@ content in an SSH command line or heredoc that a log would show.
 ```
 
 `retentionDays` is optional (default 90; 7 to 730). `expectedDatabase` is required: the script compares
-it with `current_database()` and refuses to write if `DATABASE_URL` points anywhere else (a staging
-`app_user` URL would otherwise pass, and real admin data must never land in staging). `reissue` takes only
+it with `current_database()` and refuses to write if `DATABASE_URL` points anywhere else (any other
+database's `app_user` URL would otherwise pass; real admin data belongs only in the pilot database). `reissue` takes only
 `orgName`, `adminEmail` and `expectedDatabase`.
 Environment: `DATABASE_URL` (the `app_user` URL; the script refuses any other role, and a superuser or
 `BYPASSRLS` role, and has no `MIGRATION_DATABASE_URL` fallback) and `REDIS_URL`, plus `GITHUB_RUN_ID` if
