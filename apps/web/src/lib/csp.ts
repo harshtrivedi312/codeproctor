@@ -25,14 +25,15 @@ export interface CspOptions {
 }
 
 /**
- * The candidate test screen, /t/[token]/test, and nothing else (D-45 (P-05)). The pre-test
- * stepper and every other route do not match. A document keeps the CSP it was loaded with, so
- * entry to /t/[token]/test must be a full document navigation (window.location.assign or a server
- * redirect), not a client-side router push from another candidate page. The reverse holds too:
- * a client-side navigation out of the test route keeps the allowance, so keep links out of it.
+ * The candidate test document: /t/link (where the stepper hands over to the running test in the
+ * same document, FU-FEB-10 option (c)) and the token-in-path test route /t/[token]/test, nothing
+ * else (D-45 (P-05), P-17). The pre-test stepper's entry routes and every other route do not
+ * match. A document keeps the CSP it was loaded with, so the allowance applies only when the
+ * document itself was loaded at one of these paths (window.location.assign or a server
+ * redirect), not after a client-side router push from another candidate page.
  */
 export function isCandidateTestPath(pathname: string): boolean {
-  return /^\/t\/[^/]+\/test\/?$/.test(pathname);
+  return /^\/t\/[^/]+\/test\/?$/.test(pathname) || /^\/t\/link\/?$/.test(pathname);
 }
 
 /** Reduces a URL to its origin; returns null for anything that is not an http(s) URL. */

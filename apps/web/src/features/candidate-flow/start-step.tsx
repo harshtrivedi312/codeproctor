@@ -4,21 +4,18 @@ import { Check } from 'lucide-react';
 import * as React from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { mockingEnabled } from '@/lib/env';
 import { candidateApi } from './api';
+import { terminalForConflict } from './problems';
 import { StepFrame } from './step-frame';
+import type { Terminal } from './terminal-screens';
 
 /**
  * Start hands over to the test screen in the SAME document (FU-FEB-10, option (c)): the candidate
- * session token stays in memory and nothing is written to storage or a URL. The cost is the CSP:
- * the document keeps the stepper's policy, which has no WebAssembly allowance (D-45 limits that to
- * /t/[token]/test), so the in-browser ML detectors cannot run. They are not started, and today nothing is reported for them (FU-FEB-44 plans a DETECTOR_UNAVAILABLE or capability flag, so a reviewer can tell "off" from "no findings").
- * Owner decision still open: extend the CSP allowance to /t/link, or pick option (a) or (b).
- *
- * Until the real backend serves the test routes, Start is only available with mocks on, where the
- * whole path works end to end.
+ * session token stays in memory and nothing is written to storage or a URL. /t/link is the one
+ * route whose CSP allows WebAssembly (P-17), but the document that runs the test is the one
+ * /t/start loaded (the hand-off is a client-side navigation), so today the allowance does not
+ * apply; the in-browser detectors are placeholders (DETECTOR_UNAVAILABLE). See FU-FEB-67.
  */
-export const START_ENABLED: boolean = mockingEnabled;
 
 const DONE_ITEMS = [
   'You signed the consent document',
@@ -27,35 +24,68 @@ const DONE_ITEMS = [
   'Your room scan was received',
 ];
 
+type StartResult = Awaited<ReturnType<typeof candidateApi.startTest>>;
+/** A resumed test makes no start call. */
+type StartOutcome = StartResult | { ok: true; resumed: true };
+
+/** What the candidate reads when the start did not go through (null: nothing to show). */
+function messageFor(result: StartOutcome): string | null {
+  if (result.ok) return null;
+  if (result.kind !== 'problem') {
+    return 'We could not start. Check your internet connection and press the button again.';
+  }
+  switch (result.status) {
+    case 401:
+      return null; // the session ended: the flow shows its own screen
+    case 409:
+      return result.code === 'RANDOM_RULE_UNSATISFIABLE'
+        ? 'This test could not be set up for you. Please contact the person who invited you.'
+        : 'Some earlier steps are not finished yet. Reload this page, open your link again and finish the steps in order.';
+    case 429:
+      return `Please wait ${result.retryAfterSeconds ?? 10} seconds and press the button again.`;
+    default:
+      return 'The service had a problem. Wait a minute and press the button again.';
+  }
+}
+
 export function StartStep({
   resuming,
   onStarted,
   onSessionEnded,
+  onTerminal,
 }: {
   resuming: boolean;
   onStarted: () => void;
   onSessionEnded: () => void;
+  onTerminal: (terminal: Terminal) => void;
 }): React.JSX.Element {
+  // Guards a double click before React has re-rendered the disabled button.
+  const sent = React.useRef(false);
   const start = useMutation({
-    mutationFn: async () => {
-      // Never start the server clock when the test route cannot continue (see START_ENABLED).
-      if (!START_ENABLED) return { ok: false, kind: 'network' } as const;
-      return resuming ? ({ ok: true } as const) : candidateApi.startTest();
+    mutationFn: async (): Promise<StartOutcome> =>
+      resuming ? ({ ok: true, resumed: true } as const) : candidateApi.startTest(),
+    onError: () => {
+      sent.current = false;
     },
     onSuccess: (result) => {
-      if (result.ok) onStarted();
-      else if (result.kind === 'problem' && result.status === 401) onSessionEnded();
+      if (result.ok) {
+        onStarted(); // a started test is never started twice: the guard stays set
+        return;
+      }
+      sent.current = false;
+      if (result.kind !== 'problem') return;
+      if (result.status === 401) onSessionEnded();
+      // A link that has expired (or is used up) ends the flow with its own screen.
+      else if (result.status === 409 && result.code && result.code.startsWith('LINK_')) {
+        onTerminal(terminalForConflict(result.code));
+      }
     },
   });
-  const result = start.data;
-  const problem =
-    start.isError || (result && !result.ok && result.kind !== 'problem')
-      ? 'We could not start. Check your internet connection and press the button again.'
-      : result && !result.ok && result.kind === 'problem' && result.status !== 401
-        ? result.status === 409
-          ? 'Some earlier steps are not finished yet. Reload this page, open your link again and finish the steps in order.'
-          : 'The service had a problem. Wait a minute and press the button again.'
-        : null;
+  const problem = start.isError
+    ? 'We could not start. Check your internet connection and press the button again.'
+    : start.data
+      ? messageFor(start.data)
+      : null;
 
   return (
     <StepFrame
@@ -91,22 +121,15 @@ export function StartStep({
           {problem}
         </Alert>
       ) : null}
-      {!START_ENABLED ? (
-        <Alert
-          tone="info"
-          title="The test cannot be started from this page yet"
-          data-testid="start-unavailable"
-        >
-          This step is not connected to the live test screen yet, so the timer cannot start. Nothing
-          has been started and your progress is saved. Please contact your recruiter if you see this
-          message.
-        </Alert>
-      ) : null}
       <Button
         size="lg"
         className="min-h-11"
-        disabled={start.isPending || !START_ENABLED}
-        onClick={() => start.mutate()}
+        disabled={start.isPending}
+        onClick={() => {
+          if (sent.current) return;
+          sent.current = true;
+          start.mutate();
+        }}
       >
         {start.isPending ? 'Starting...' : resuming ? 'Continue my test' : 'Start the test'}
       </Button>
