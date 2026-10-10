@@ -111,9 +111,24 @@ export async function startMock(opts = {}) {
       }
       if (/^POST \/tests\/[^/]+\/invitations$/.test(key)) {
         if (!staffOk) return problem(res, 401, 'UNAUTHENTICATED');
+        // Mirrors CreateInvitationDto (whitelist plus forbidNonWhitelisted) and the window rules.
+        (st.invites ??= []).push(body); // the parsed bodies, for the tests
+        const keys = Object.keys(body).sort().join(',');
+        const cKeys = Object.keys(body.candidate ?? {})
+          .sort()
+          .join(',');
+        const t0 = Date.parse(body.windowStart ?? '');
+        const t1 = Date.parse(body.windowEnd ?? '');
+        const iso = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})$/;
         if (
-          !body.candidateEmail?.endsWith('@example.test') ||
-          !body.accommodations?.identityCheckWaiver
+          keys !== 'candidate,windowEnd,windowStart' ||
+          cKeys !== 'email,name' ||
+          !body.candidate.email?.endsWith('@example.test') ||
+          !iso.test(body.windowStart) ||
+          !iso.test(body.windowEnd) ||
+          !(t0 >= Date.now() - 5 * 60_000) ||
+          !(t1 > t0) ||
+          t1 - t0 > 7 * 24 * 3600_000
         ) {
           return problem(res, 400, 'VALIDATION_FAILED');
         }
@@ -122,7 +137,7 @@ export async function startMock(opts = {}) {
           candidateId: uuid(),
           invitationId: uuid(),
           sessionId: uuid(),
-          email: body.candidateEmail,
+          email: body.candidate.email,
           linkToken: crypto.randomBytes(32).toString('base64url'),
           status: 'INVITED',
           polls: 0,
@@ -137,8 +152,13 @@ export async function startMock(opts = {}) {
         });
         return send(res, 201, {
           id: s.invitationId,
+          testId: crypto.randomUUID(),
           candidateId: s.candidateId,
-          sessionId: s.sessionId,
+          status: 'INVITED',
+          windowStart: body.windowStart,
+          windowEnd: body.windowEnd,
+          createdAt: new Date().toISOString(),
+          mail: { outcome: opts.mailOutcome ?? 'queued' },
         });
       }
       const er = /^POST \/candidates\/([^/]+)\/erasure$/.exec(key);

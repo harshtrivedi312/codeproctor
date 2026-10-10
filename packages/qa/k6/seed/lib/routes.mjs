@@ -39,19 +39,18 @@ export const AVAILABLE = {
 export const UNAVAILABLE_MESSAGE = (what) =>
   `${what}: not available on main yet (route missing in apps/api); seeding stops here.`;
 
-// ASSUMED shape; ADR 0015 (Proposed) puts the waiver under accommodations.identityCheckWaiver.
-export function inviteBody({ name, email, runId, now = new Date() }) {
+// REAL (apps/api/src/invitations/dto/invitations.dto.ts): exactly { candidate: { email, name }, windowStart,
+// windowEnd }. Any other field is a 400 (whitelist plus forbidNonWhitelisted). windowStart may be at most
+// 5 minutes before the server time, the window at most INVITATION_MAX_WINDOW_DAYS (7) long, both ISO 8601
+// with a UTC offset. One invitation per request: there is no bulk route. The response is
+// { id, testId, candidateId, status, windowStart, windowEnd, createdAt, mail: { outcome } } with outcome
+// 'queued' | 'failed' | 'disabled'; there is no session id (the session is created with the invitation).
+export function inviteBody({ name, email, now = new Date() }) {
+  const start = new Date(now.getTime() - 60_000);
   return {
-    candidateName: name,
-    candidateEmail: email,
-    windowStart: new Date(now.getTime() - 60_000).toISOString(),
-    windowEnd: new Date(now.getTime() + 24 * 3600_000).toISOString(),
-    accommodations: {
-      identityCheckWaiver: {
-        reasonCode: 'OTHER',
-        reasonNote: `Synthetic load-test candidate (${runId}). No real person.`,
-      },
-    },
+    candidate: { email, name },
+    windowStart: start.toISOString(),
+    windowEnd: new Date(start.getTime() + 24 * 3600_000).toISOString(),
   };
 }
 

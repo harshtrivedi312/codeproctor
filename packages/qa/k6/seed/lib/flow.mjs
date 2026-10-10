@@ -48,18 +48,24 @@ export async function seedOne({
   const inv = await staff.call('POST', ROUTES.invite(cfg.testId), {
     step: 'invite',
     idempotent: false,
-    body: inviteBody({ name: cand.name, email: cand.email, runId }),
+    body: inviteBody({ name: cand.name, email: cand.email }),
   });
-  const body = Array.isArray(inv.json) ? inv.json[0] : (inv.json?.invitations?.[0] ?? inv.json);
+  const body = inv.json;
   const item = {
     index,
-    invitationId: id(body?.id ?? body?.invitationId, 'invitation id'),
+    invitationId: id(body?.id, 'invitation id'),
     candidateId: id(body?.candidateId, 'candidate id'),
-    sessionId: body?.sessionId ? id(body.sessionId, 'session id') : null,
+    sessionId: null, // the real response has no session id
     state: 'INVITED',
   };
   record(item);
   log(`${tag} invited`);
+  // The link and the OTP only exist as email: a mail that was not queued cannot be read from the sink.
+  const outcome = body?.mail?.outcome;
+  if (outcome !== 'queued') {
+    const shown = outcome === 'failed' || outcome === 'disabled' ? outcome : 'unknown';
+    throw new SeedError(`invite: mail was not queued (${shown}).`, { step: 'invite' });
+  }
 
   // 2. Link token and OTP (mail sink), then start: INVITED -> OPENED.
   const linkToken = await mail.getInviteToken(cand.email, since);
@@ -139,8 +145,9 @@ export async function seedOne({
     });
   }
 
-  // 5. Identity: waived by the invitation (nothing to upload; no face, no ID image, ADR 0015), or
-  // with --identity done with generated synthetic assets once the route exists.
+  // 5. Identity: the invitation API has no waiver field (apps/api invitations.dto.ts), so the identity
+  // check cannot be waived here; with --identity it runs with generated synthetic assets once the
+  // route is wired into this seeder (the route exists on main since #348).
   if (cfg.identity && !AVAILABLE.identity) {
     throw new SeedError(UNAVAILABLE_MESSAGE('identity step'), { step: 'identity' });
   }
