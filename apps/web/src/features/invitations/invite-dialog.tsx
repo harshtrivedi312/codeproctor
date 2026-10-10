@@ -26,11 +26,21 @@ import {
 } from './csv';
 import { getGeneration } from '@/lib/auth-session';
 import {
+  conflictText,
+  problemWords,
+  MAIL_NOT_SENT_TITLE,
+  MAIL_QUEUED_MESSAGE,
+  mailNextStep,
+  mailReason,
+  unprocessableText,
+} from './outcome';
+import {
   InviteFailure,
   invalidateAfterInvite,
   inviteInChunks,
   useInvite,
   type BulkOutcome,
+  type WindowAuto,
 } from './queries';
 import {
   ACCOMMODATION_DETECTORS,
@@ -40,6 +50,7 @@ import {
   MAX_NOTES,
   WAIVER_REASONS,
   WAIVER_REASON_LABEL,
+  INVITE_CAPABILITIES,
   inviteSchema,
   toAccommodations,
   toIso,
@@ -128,9 +139,15 @@ function InviteBody({
   const [csv, setCsv] = React.useState<{ fileName: string; parse: CsvParse } | null>(null);
   const [fileError, setFileError] = React.useState<string | null>(null);
   const [problem, setProblem] = React.useState<string | null>(null);
+  // A single invitation that exists but whose email was not queued: shown instead of a success.
+  const [mailNotSent, setMailNotSent] = React.useState<{ mail: string; windowEnd: string } | null>(
+    null,
+  );
   const [progress, setProgress] = React.useState<number | null>(null);
   const [outcome, setOutcome] = React.useState<BulkOutcome | null>(null);
   const stop = React.useRef({ aborted: false });
+  // The start was not chosen by the user (untouched, or clamped to now at submit).
+  const windowAuto = React.useRef<WindowAuto>({ startAuto: true, endAuto: true });
   React.useEffect(() => {
     const flag = stop.current;
     // React strict mode runs setup, cleanup, setup again: the flag must be reset on every setup.
@@ -144,17 +161,13 @@ function InviteBody({
     if (e instanceof InviteFailure) {
       if (e.status === 400)
         return (
-          [e.message, ...e.errors].filter(Boolean).join(' ') ||
+          problemWords(e.message, e.errors) ||
           'The server did not accept this invitation. Check the fields.'
         );
       if (e.status === 404)
         return 'This test no longer exists. Close this window and pick another test.';
-      if (e.status === 409)
-        return 'This candidate already has an open invitation to this test. Wait until it is used or expires, or invite them to another test.';
-      if (e.status === 422 && e.code === 'REASON_NOT_ENABLED') {
-        return 'This reason is not available yet in this build. Choose another reason.';
-      }
-      if (e.status === 422) return 'The window has already closed. Choose a later end.';
+      if (e.status === 409) return conflictText(e.message);
+      if (e.status === 422) return unprocessableText(e.code, e.message, e.errors);
       if (e.status === 429) {
         const mins = e.retryAfterSeconds ? Math.ceil(e.retryAfterSeconds / 60) : null;
         return `You have sent a lot of invitations this hour. Nothing was sent. Try again ${mins ? `in about ${mins} minute${mins === 1 ? '' : 's'}` : 'later'}.`;
@@ -163,8 +176,12 @@ function InviteBody({
         return 'Your role cannot send invitations. Ask a Super Admin if you think this is a mistake.';
       if (e.status === 401)
         return 'Your session ended before this could be sent. Sign in again; nothing was sent.';
+      if (e.status >= 500) {
+        return 'The server had a problem. The invitation was most likely not created and nothing was sent, but check the candidates list before you try again.';
+      }
     }
-    return 'We could not reach the server, so nothing was sent. Check your connection and try again.';
+    // A fetch that rejected: the request may have reached the server and been applied.
+    return 'The connection was lost before the server answered, so the invitation may have been created. Check the candidates list before inviting this candidate again.';
   };
 
   async function onFile(file: File | undefined): Promise<void> {
@@ -187,8 +204,8 @@ function InviteBody({
     const window = { windowStart: toIso(v.windowStart), windowEnd: toIso(v.windowEnd) };
     if (v.mode === 'one') {
       try {
-        const accommodations = toAccommodations(v);
-        await invite.mutateAsync({
+        const accommodations = INVITE_CAPABILITIES.accommodations ? toAccommodations(v) : null;
+        const created = await invite.mutateAsync({
           testId: test,
           body: {
             candidate: { email: v.email.trim(), name: v.name.trim() },
@@ -196,8 +213,13 @@ function InviteBody({
             ...(accommodations ? { accommodations } : {}),
           },
         });
-        toast.success('Invitation created. The candidate gets an email with a personal link.');
-        onOpenChange(false);
+        if (created.mail === 'queued') {
+          toast.success(MAIL_QUEUED_MESSAGE);
+          onOpenChange(false);
+        } else {
+          // Never claim it was sent: the invitation exists, the email does not.
+          setMailNotSent({ mail: created.mail, windowEnd: created.windowEnd });
+        }
       } catch (e) {
         setProblem(describe(e));
       }
@@ -213,7 +235,14 @@ function InviteBody({
     }
     setProgress(0);
     const startedIn = getGeneration();
-    const result = await inviteInChunks(test, csv.parse.valid, window, setProgress, stop.current);
+    const result = await inviteInChunks(
+      test,
+      csv.parse.valid,
+      window,
+      windowAuto.current,
+      setProgress,
+      stop.current,
+    );
     setProgress(null);
     setOutcome(result);
     // Whatever was created, the candidate list and the test (now in use) are stale.
@@ -227,7 +256,7 @@ function InviteBody({
     const rows = [
       ...problems,
       ...(outcome?.errors ?? []).map((e) => {
-        const sent = csv?.parse.valid.find((r) => r.row === e.row);
+        const sent = outcome?.rows.find((r) => r.row === e.row);
         return { row: e.row, message: e.message, email: sent?.email ?? '', name: sent?.name ?? '' };
       }),
     ];
@@ -238,6 +267,28 @@ function InviteBody({
     a.download = 'rows-not-invited.csv';
     a.click();
     // Revoke later: some browsers start the download after the click handler returns.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+
+  function inviteAnother(): void {
+    const chosen = form.getValues('testId');
+    form.reset({ ...defaults(testId ?? ''), testId: chosen });
+    setMailNotSent(null);
+    setProblem(null);
+    setClampNote(null);
+  }
+
+  function downloadMailNotSent(): void {
+    const rows = (outcome?.mailNotSent ?? []).flatMap((m) => {
+      const r = outcome?.rows.find((v) => v.row === m.row);
+      return r ? [r] : [];
+    });
+    const blob = new Blob([unsentRowsCsv(rows)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'invited-email-not-sent.csv';
+    a.click();
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 
@@ -257,7 +308,7 @@ function InviteBody({
     <>
       <DialogTitle>Invite candidates</DialogTitle>
       <DialogDescription>
-        Each candidate gets an email with a personal link. It opens the test until they start it,
+        Each candidate is sent an email with a personal link. It opens the test until they start it,
         inside the window you choose.
       </DialogDescription>
       <form
@@ -271,6 +322,10 @@ function InviteBody({
             initialWindow.current,
             new Date(),
           );
+          windowAuto.current = {
+            startAuto: !dirtyFields.windowStart || next.clamped,
+            endAuto: !dirtyFields.windowEnd,
+          };
           form.setValue('windowStart', next.windowStart);
           form.setValue('windowEnd', next.windowEnd);
           setClampNote(
@@ -286,6 +341,18 @@ function InviteBody({
         {clampNote ? (
           <Alert tone="info" role="status">
             {clampNote}
+          </Alert>
+        ) : null}
+        {mailNotSent ? (
+          <Alert tone="warning" role="alert" title={MAIL_NOT_SENT_TITLE}>
+            <span data-testid="mail-not-sent">
+              {mailReason(mailNotSent.mail)} {mailNextStep(mailNotSent.windowEnd)}
+            </span>
+            <div className="mt-2">
+              <Button type="button" variant="outline" size="sm" onClick={inviteAnother}>
+                Invite another candidate
+              </Button>
+            </div>
           </Alert>
         ) : null}
         {problem ? (
@@ -359,8 +426,15 @@ function InviteBody({
                 <Input
                   {...aria}
                   type="file"
+                  disabled={progress !== null}
                   accept=".csv,text/csv"
-                  onChange={(e) => void onFile(e.target.files?.[0])}
+                  onChange={(e) => {
+                    const input = e.currentTarget;
+                    const file = input.files?.[0];
+                    // Clear the control so choosing the same file again fires a change.
+                    input.value = '';
+                    void onFile(file);
+                  }}
                 />
               )}
             </Field>
@@ -456,7 +530,15 @@ function InviteBody({
           </Field>
         </div>
 
-        {mode === 'one' ? (
+        {mode === 'one' && !INVITE_CAPABILITIES.accommodations ? (
+          <p className="text-sm text-muted-foreground" data-testid="accommodations-unavailable">
+            Accommodations (extra time, assistive tools, identity check waiver) are not available
+            yet in this build. If this candidate needs one, ask an administrator before you send the
+            invitation.
+          </p>
+        ) : null}
+
+        {mode === 'one' && INVITE_CAPABILITIES.accommodations ? (
           <section aria-labelledby="acc-heading" className="space-y-3 rounded-md border p-4">
             <div>
               <h3 id="acc-heading" className="font-medium">
@@ -600,14 +682,41 @@ function InviteBody({
         {outcome ? (
           <Alert
             tone={
-              outcome.failed || outcome.notSent > 0 || outcome.errors.length > 0
+              outcome.failed ||
+              outcome.notSent > 0 ||
+              outcome.errors.length > 0 ||
+              outcome.mailNotSent.length > 0
                 ? 'warning'
                 : 'success'
             }
             role="status"
-            title={outcome.failed || outcome.notSent > 0 ? 'Upload stopped' : 'Upload finished'}
+            title={
+              outcome.failed || outcome.notSent > 0
+                ? 'Upload stopped'
+                : outcome.mailNotSent.length > 0
+                  ? 'Upload finished, but some emails could not be sent'
+                  : 'Upload finished'
+            }
           >
             <span data-testid="bulk-result">{uploadSummary(outcome, problems.length)}</span>
+            {outcome.mailNotSent.length > 0 ? (
+              <ul className="mt-2 list-disc pl-5" data-testid="bulk-mail-not-sent">
+                {outcome.mailNotSent.slice(0, 20).map((m) => {
+                  const r = outcome.rows.find((v) => v.row === m.row);
+                  return (
+                    <li key={m.row} className="break-all">
+                      Row {m.row}
+                      {r ? ` (${r.email})` : ''}: invited, but no email was sent.
+                    </li>
+                  );
+                })}
+                {outcome.mailNotSent.length > 20 ? (
+                  <li>
+                    And {outcome.mailNotSent.length - 20} more. Download the list to see them.
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
           </Alert>
         ) : null}
 
@@ -619,6 +728,12 @@ function InviteBody({
                 Download the rows not sent
               </Button>
             ) : null}
+            {mode === 'many' && (outcome?.mailNotSent.length ?? 0) > 0 ? (
+              <Button type="button" variant="outline" size="sm" onClick={downloadMailNotSent}>
+                <Download className="size-4" aria-hidden="true" />
+                Download the invited rows whose email was not sent
+              </Button>
+            ) : null}
             {mode === 'many' && (problems.length > 0 || (outcome?.errors.length ?? 0) > 0) ? (
               <Button type="button" variant="outline" size="sm" onClick={downloadProblems}>
                 <Download className="size-4" aria-hidden="true" />
@@ -628,13 +743,15 @@ function InviteBody({
           </div>
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              {outcome ? 'Close' : 'Cancel'}
+              {outcome || mailNotSent ? 'Close' : 'Cancel'}
             </Button>
             <Button
               type="submit"
               disabled={
                 isSubmitting ||
                 progress !== null ||
+                // The invitation exists: sending again is a 409. Close and see the candidate.
+                mailNotSent !== null ||
                 // After an upload, choose a file again (it clears the result) before sending more.
                 (mode === 'many' && outcome !== null)
               }
@@ -677,17 +794,34 @@ function stopCause(e: InviteFailure): string {
   if (e.status === 401) return 'Your session ended.';
   if (e.status === 403) return 'Your role cannot send invitations.';
   if (e.status === 404) return 'The test no longer exists.';
-  if (e.status === 422) return 'The window has already closed.';
+  if (e.status === 409) return e.message || 'The server refused the request.';
+  if (e.status === 422) {
+    if (e.code === 'REASON_NOT_ENABLED') return 'A waiver reason is not enabled yet.';
+    if (e.errors.length > 0)
+      return `The test cannot be given to candidates yet (${e.errors.join('; ')}).`;
+    return e.message ? `The server refused: ${e.message}.` : 'The server refused the request.';
+  }
   if (e.status === 400)
-    return [e.message, ...e.errors].filter(Boolean).join(' ') || 'The server did not accept a row.';
+    return problemWords(e.message, e.errors) || 'The server did not accept a row.';
   if (e.status >= 500 || e.status === 0) return 'The connection or the server failed.';
   return 'The server refused the request.';
+}
+
+/** What to do about invited rows that no email went out for. */
+function noMailAdvice(n: number): string {
+  if (n === 0) return '';
+  return ` ${plural(n, 'candidate has', 'candidates have')} an invitation but no email was sent, so they have not been told. Inviting them again is refused while the invitation is active. Download that list and ask an administrator.`;
 }
 
 /** The plain-words result of a CSV upload: what was created, what was not, and what to do next. */
 export function uploadSummary(o: BulkOutcome, fileProblems: number): string {
   const skipped = o.errors.length + fileProblems;
-  const made = `${plural(o.created, 'invitation', 'invitations')} created`;
+  const noMail = o.mailNotSent.length;
+  const made = `${plural(o.created, 'invitation', 'invitations')} created${
+    o.created > 0
+      ? ` (${o.created - noMail} queued for delivery${noMail > 0 ? `, ${noMail} with no email sent` : ''})`
+      : ''
+  }`;
   const rest = skipped > 0 ? `, ${plural(skipped, 'row', 'rows')} not invited` : '';
   if (o.stopped) {
     return `The upload was stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}, because the window was closed or you signed out. ${plural(o.notSent, 'row was', 'rows were')} not sent. Download the rows not sent and choose that file again.`;
@@ -695,13 +829,13 @@ export function uploadSummary(o: BulkOutcome, fileProblems: number): string {
   if (o.failed) {
     const may =
       o.uncertain > 0 ? `; ${plural(o.uncertain, 'row', 'rows')} of those may have been sent` : '';
-    return `The upload stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}. ${stopCause(o.failed)} ${plural(o.notSent, 'row was', 'rows were')} not confirmed${may}. Check the candidates list before trying again; people already invited are reported as already invited.`;
+    return `The upload stopped after ${plural(o.created, 'invitation', 'invitations')}${rest}. ${stopCause(o.failed)} ${plural(o.notSent, 'row was', 'rows were')} not confirmed${may}. Check the candidates list before trying again. Then download the rows not sent and choose that file; do not upload the whole file again.`;
   }
   if (o.notSent > 0) {
     const wait = o.retryAfterSeconds
       ? `in about ${plural(Math.ceil(o.retryAfterSeconds / 60), 'minute', 'minutes')}`
       : 'later';
-    return `${made}${rest}. You reached the hourly limit: ${plural(o.notSent, 'row was', 'rows were')} not sent. Download the rows not sent, then choose that file again ${wait}. The invitations already sent stay valid.`;
+    return `${made}${rest}. You reached the hourly limit: ${plural(o.notSent, 'row was', 'rows were')} not sent. Download the rows not sent, then choose that file again ${wait}. The invitations already sent stay valid.${noMailAdvice(noMail)}`;
   }
-  return `${made}${rest}.`;
+  return `${made}${rest}.${noMailAdvice(noMail)}`;
 }

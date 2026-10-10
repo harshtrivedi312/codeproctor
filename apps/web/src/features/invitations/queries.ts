@@ -4,7 +4,8 @@ import { ApiFailure } from '@/features/admin/queries';
 import { testKeys } from '@/features/tests/queries';
 import { api, type Schemas } from '@/lib/api/client';
 import { getGeneration } from '@/lib/auth-session';
-import { BULK_CHUNK, type CsvRowInput } from './csv';
+import type { CsvRowInput } from './csv';
+import { problemWords } from './outcome';
 
 /*
  * Invitation calls: WEB-ONLY and PROVISIONAL [BE-06b] (see docs/followups/frontend.md). Candidate
@@ -76,8 +77,12 @@ export function invalidateAfterInvite(qc: QueryClient, testId: string, startedIn
 }
 
 export interface BulkOutcome {
+  /** The rows of this upload (CSV row number, email, name), so a result never depends on later UI state. */
+  rows: CsvRowInput[];
   /** Rows sent so far that were accepted. */
   created: number;
+  /** Rows that were invited but whose email was not queued (the rows' CSV numbers). */
+  mailNotSent: { row: number; mail: 'failed' | 'disabled' }[];
   /** Rows the server refused, by the row number of the CSV (not the request) and reason. */
   errors: { row: number; message: string }[];
   /** Rows not sent because the hourly limit stopped the upload. */
@@ -95,20 +100,56 @@ export interface BulkOutcome {
 }
 
 /**
- * Sends the valid rows in chunks (at most BULK_CHUNK per request) and merges the answers. A 429
- * stops the upload and reports how many rows were not sent; the rows already invited stay invited.
- * `signal.aborted` and a changed session stop it too.
+ * The API refuses a start more than 5 minutes in the past (invitations.service.ts). An automatic
+ * start (untouched or clamped to now) is refreshed once it is this old, which leaves a margin of
+ * about a minute for clock skew and the request itself.
+ */
+export const START_REFRESH_MS = 60_000;
+
+/**
+ * A start the user chose is kept as typed until it is this old (measured from the start itself,
+ * not from the upload), then it moves to now and the end stays. Four minutes leaves the same
+ * margin under the API's 5-minute limit.
+ */
+export const START_MAX_AGE_MS = 4 * 60_000;
+
+/** What the user fixed in the window: an automatic start or end follows the clock in a long upload. */
+export interface WindowAuto {
+  startAuto: boolean;
+  endAuto: boolean;
+}
+
+/** Requests in flight at once during a CSV upload. Small: the API limits invitations per hour. */
+export const BULK_CONCURRENCY = 4;
+
+/**
+ * Sends the valid rows as single invitations (the API has no bulk route), at most
+ * BULK_CONCURRENCY at a time, and merges the answers per row. A 429, a 5xx, a lost connection or a
+ * failure that would hit every row (401, 403, 404, 422, a bad window) stops the upload: no new row
+ * is started, rows already invited stay invited, and the rows not confirmed are reported (and
+ * returned in file order so they can be downloaded). A 5xx or lost connection is never retried
+ * (the invitation may exist): those rows count as uncertain. `signal.aborted` and a changed
+ * session stop it too. Nothing here is silent: every row ends created, refused or not sent.
  */
 export async function inviteInChunks(
   testId: string,
   rows: readonly CsvRowInput[],
   window: { windowStart: string; windowEnd: string },
+  /**
+   * `startAuto`: the start was not chosen by the user (untouched or clamped to now); it is moved to
+   * the exact now whenever it is START_REFRESH_MS old, and an automatic end (`endAuto`) moves with
+   * it, so the length is kept. A chosen end never moves. A chosen start is kept until it is
+   * START_MAX_AGE_MS old, then it moves to now (the end stays).
+   */
+  auto: WindowAuto,
   onProgress?: (sent: number) => void,
   signal?: { aborted: boolean },
 ): Promise<BulkOutcome> {
   const startedIn = getGeneration();
   const out: BulkOutcome = {
+    rows: [...rows],
     created: 0,
+    mailNotSent: [],
     errors: [],
     notSent: 0,
     unsentRows: [],
@@ -117,52 +158,99 @@ export async function inviteInChunks(
     retryAfterSeconds: null,
     failed: null,
   };
-  for (let at = 0; at < rows.length; at += BULK_CHUNK) {
-    if (signal?.aborted || startedIn !== getGeneration()) {
-      out.notSent = rows.length - at;
-      out.unsentRows = rows.slice(at);
-      out.stopped = true;
-      return out;
+  let curStart = Date.parse(window.windowStart);
+  let curEnd = Date.parse(window.windowEnd);
+  const windowNow = (): { windowStart: string; windowEnd: string } => {
+    const now = Date.now();
+    const age = now - curStart;
+    if (auto.startAuto ? age >= START_REFRESH_MS : age >= START_MAX_AGE_MS) {
+      if (auto.startAuto && auto.endAuto) curEnd += age;
+      curStart = now;
     }
-    const chunk = rows.slice(at, at + BULK_CHUNK);
+    return {
+      windowStart: new Date(curStart).toISOString(),
+      windowEnd: new Date(curEnd).toISOString(),
+    };
+  };
+  const settled = new Set<number>();
+  const uncertainAt = new Set<number>();
+  let next = 0;
+  let halted = false;
+  let done = 0;
+
+  const sendRow = async (at: number): Promise<void> => {
+    const row = rows[at] as CsvRowInput;
     try {
-      const { data, error, response } = await api.POST('/v1/tests/{testId}/invitations/bulk', {
+      const { data, error, response } = await api.POST('/v1/tests/{testId}/invitations', {
         params: { path: { testId } },
-        body: {
-          ...window,
-          rows: chunk.map((r) => ({
-            email: r.email,
-            name: r.name,
-            ...(r.externalRef !== '' ? { externalRef: r.externalRef } : {}),
-          })),
-        },
+        // Only the fields the API's DTO accepts: externalRef and accommodations would be a 400.
+        body: { candidate: { email: row.email, name: row.name }, ...windowNow() },
       });
-      if (!data) return failFrom(response, error);
-      out.created += data.created;
-      // The server counts rows inside the chunk: map back to the CSV row of that chunk item.
-      for (const e of data.errors) {
-        const original = chunk[e.row - 1];
-        if (original) out.errors.push({ row: original.row, message: e.message });
+      if (!data) failFrom(response, error);
+      settled.add(at);
+      out.created += 1;
+      if (data.mail !== 'queued') {
+        out.mailNotSent.push({
+          row: row.row,
+          mail: data.mail === 'disabled' ? 'disabled' : 'failed',
+        });
       }
-      onProgress?.(Math.min(at + chunk.length, rows.length));
+      done += 1;
+      onProgress?.(done);
     } catch (e) {
-      out.notSent = rows.length - at;
-      out.unsentRows = rows.slice(at);
       if (e instanceof InviteFailure) {
-        if (e.status === 429) out.retryAfterSeconds = e.retryAfterSeconds;
-        else {
-          out.failed = e;
-          if (e.status >= 500) out.uncertain = chunk.length;
+        const rowOnly =
+          e.status === 409 ||
+          (e.status === 400 && !e.errors.some((m) => /^window/i.test(m)) && rowFault(e));
+        if (rowOnly) {
+          settled.add(at);
+          out.errors.push({ row: row.row, message: failureWords(e) });
+          done += 1;
+          onProgress?.(done);
+          return;
         }
-      } else {
-        // No answer: the request in flight may or may not have been applied.
-        out.failed = new InviteFailure(0, '', '', [], null);
-        out.uncertain = chunk.length;
+        halted = true;
+        if (e.status === 429) out.retryAfterSeconds ??= e.retryAfterSeconds;
+        else {
+          out.failed ??= e;
+          if (e.status >= 500) uncertainAt.add(at);
+        }
+        return;
       }
-      return out;
+      // No answer: the request may or may not have been applied.
+      halted = true;
+      out.failed ??= new InviteFailure(0, '', '', [], null);
+      uncertainAt.add(at);
     }
-  }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (!halted) {
+      if (signal?.aborted || startedIn !== getGeneration()) {
+        halted = true;
+        out.stopped = true;
+        return;
+      }
+      const at = next;
+      next += 1;
+      if (at >= rows.length) return;
+      await sendRow(at);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(BULK_CONCURRENCY, rows.length) }, worker));
+
+  out.unsentRows = rows.filter((_, at) => !settled.has(at));
+  out.notSent = out.unsentRows.length;
+  out.uncertain = uncertainAt.size;
   return out;
+}
+
+/** A 400 that names the candidate's fields is about this row only. */
+const rowFault = (e: InviteFailure): boolean => e.errors.some((m) => /^candidate/i.test(m));
+
+/** The API's own words for a refused row. */
+function failureWords(e: InviteFailure): string {
+  return problemWords(e.message, e.errors) || 'The server did not accept this row.';
 }
 
 export function useCandidateInvitations(candidateId: string | null) {

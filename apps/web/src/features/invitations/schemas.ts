@@ -157,7 +157,7 @@ export function inviteSchema(now: () => Date = () => new Date(), testFixed = fal
           issue('windowEnd', 'The window has already closed. Choose a later end.');
       }
       // Accommodations apply to ONE candidate; a bulk upload sends none (and never a waiver).
-      if (v.mode === 'one') {
+      if (v.mode === 'one' && INVITE_CAPABILITIES.accommodations) {
         const pct = v.extraTime.trim();
         if (pct !== '') {
           const n = Number(pct);
@@ -222,6 +222,15 @@ export function toAccommodations(v: InviteFormValues): Schemas['InvitationAccomm
 }
 
 export { MAX_EXTERNAL_REF };
+
+/**
+ * What the real invitation API accepts today. CreateInvitationDto (apps/api/src/invitations/dto)
+ * takes candidate { email, name }, windowStart and windowEnd only, and the global ValidationPipe is
+ * whitelist + forbidNonWhitelisted: ANY other field (accommodations, externalRef, timeZone) is a
+ * 400. So accommodations are off until the API accepts them. Flip this one flag to bring the
+ * controls and the field back (tests flip it to exercise the code path).
+ */
+export const INVITE_CAPABILITIES: { accommodations: boolean } = { accommodations: false };
 
 /**
  * ADR 0015 section 7: REFUSED_BIOMETRIC_PROCESSING cannot be chosen until a consent variant ships;

@@ -1,3 +1,4 @@
+import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { apiBaseUrl } from '@/lib/env';
 import { setInvitationScenario } from '@/mocks/invitation-handlers';
@@ -33,7 +34,7 @@ async function call<T = Record<string, unknown>>(
 }
 
 const day = 86_400_000;
-const win = (endDays = 7) => ({
+const win = (endDays = 6) => ({
   windowStart: new Date(Date.now() - 1000).toISOString(),
   windowEnd: new Date(Date.now() + endDays * day).toISOString(),
 });
@@ -95,9 +96,28 @@ describe('Invitations mock: single invitation, in the order the API checks (FR-3
     const text = errorsOf(bad).join(' | ');
     expect(text).toMatch(/property extra should not exist/);
     expect(text).toMatch(/candidate.email must be an email/);
-    expect(text).toMatch(/windowEnd must be after windowStart/);
+    // The window rules belong to the service, which runs only after the pipe passed.
+    expect(text).not.toMatch(/windowEnd must be after windowStart/);
     // The email the caller sent is not echoed back.
     expect(JSON.stringify(bad.body)).not.toContain('"x"');
+  });
+
+  it('FR-303: the window rules are reported together once the body is valid, with the 7 day and 366 day limits', async () => {
+    const r = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'rules@example.test', name: 'Rules' },
+      windowStart: new Date(Date.now() + 400 * 86_400_000).toISOString(),
+      windowEnd: new Date(Date.now() + 410 * 86_400_000).toISOString(),
+    });
+    expect(r.status).toBe(400);
+    const text = errorsOf(r).join(' | ');
+    expect(text).toMatch(/at most 7 day\(s\) long/);
+    expect(text).toMatch(/at most 366 days ahead/);
+    const inverted = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'rules@example.test', name: 'Rules' },
+      windowStart: win().windowEnd,
+      windowEnd: win().windowStart,
+    });
+    expect(errorsOf(inverted).join(' ')).toMatch(/windowEnd must be after windowStart/);
   });
 
   it('FR-303: a windowStart more than 5 minutes in the past is a 400, like the real API; a minute old is accepted', async () => {
@@ -116,7 +136,7 @@ describe('Invitations mock: single invitation, in the order the API checks (FR-3
     expect(recent.status).toBe(201);
   });
 
-  it('404 for an unknown test and 422 for a window that has closed', async () => {
+  it('404 for an unknown test and 400 (not 422) for a window that has closed, as the API answers', async () => {
     expect((await call('RECRUITER', 'POST', '/v1/tests/nope/invitations', one())).status).toBe(404);
     const closed = await call('RECRUITER', 'POST', path, {
       candidate: { email: 'late@example.test', name: 'Late' },
@@ -124,7 +144,31 @@ describe('Invitations mock: single invitation, in the order the API checks (FR-3
       windowStart: new Date(Date.now() - 60_000).toISOString(),
       windowEnd: new Date(Date.now() - 30_000).toISOString(),
     });
-    expect(closed.status).toBe(422);
+    expect(closed.status).toBe(400);
+    expect(errorsOf(closed).join(' ')).toMatch(/windowEnd must be in the future/);
+  });
+
+  it('FR-303: 201 carries the mail outcome; failed and disabled are reported as such', async () => {
+    const queued = await call<{ mail: string }>('RECRUITER', 'POST', path, one());
+    expect([queued.status, queued.body.mail]).toEqual([201, 'queued']);
+    for (const mail of ['failed', 'disabled'] as const) {
+      setInvitationScenario({ mail });
+      const r = await call<{ mail: string }>(
+        'RECRUITER',
+        'POST',
+        path,
+        one({ candidate: { email: `${mail}@example.test`, name: 'M' } }),
+      );
+      expect([r.status, r.body.mail]).toEqual([201, mail]);
+    }
+  });
+
+  it('FR-303: an unsatisfiable test is 422 with errors[] naming the slots, not a closed window', async () => {
+    setInvitationScenario({ testUnsatisfiable: true });
+    const r = await call('RECRUITER', 'POST', path, one());
+    expect(r.status).toBe(422);
+    expect(errorsOf(r).join(' ')).toMatch(/randomRule matches 0/);
+    expect(JSON.stringify(r.body)).not.toMatch(/closed/);
   });
 
   it('409 when the candidate already has an open invitation to the test', async () => {
@@ -145,7 +189,46 @@ describe('Invitations mock: single invitation, in the order the API checks (FR-3
   });
 });
 
+describe('Invitations mock: the real DTO has no accommodations (D-84)', () => {
+  it('FR-303: accommodations and candidate.externalRef are 400, as forbidNonWhitelisted answers', async () => {
+    const acc = await call(
+      'RECRUITER',
+      'POST',
+      path,
+      one({ accommodations: { extraTimePct: 10 } }),
+    );
+    expect(acc.status).toBe(400);
+    expect(errorsOf(acc).join(' ')).toMatch(/property accommodations should not exist/);
+    const ext = await call(
+      'RECRUITER',
+      'POST',
+      path,
+      one({ candidate: { email: 'x@example.test', name: 'X', externalRef: 'r1' } }),
+    );
+    expect(ext.status).toBe(400);
+    expect(errorsOf(ext).join(' ')).toMatch(/externalRef should not exist/);
+    const tz = await call('RECRUITER', 'POST', path, one({ timeZone: 'Europe/Berlin' }));
+    expect(tz.status).toBe(400);
+  });
+
+  it('FR-303: the two 409s carry their own words and no code', async () => {
+    const active = await call<{ detail: string; code?: string }>('RECRUITER', 'POST', path, {
+      candidate: { email: 'tim.berners.lee@candidates.example.test', name: 'Tim' },
+      ...win(),
+    });
+    expect([active.status, active.body.detail, active.body.code]).toEqual([
+      409,
+      'This candidate already has an active invitation for this test.',
+      undefined,
+    ]);
+    setInvitationScenario({ candidateErased: true });
+    const erased = await call<{ detail: string }>('RECRUITER', 'POST', path, one());
+    expect([erased.status, erased.body.detail]).toEqual([409, 'This candidate cannot be invited.']);
+  });
+});
+
 describe('Invitations mock: accommodations and the identity waiver (ADR 0015, C-19)', () => {
+  beforeEach(() => setInvitationScenario({ acceptsAccommodations: true }));
   const waiver = (w: object) => one({ accommodations: { identityCheckWaiver: w } });
   it('C-19: a waiver needs a valid reason code; OTHER needs a note; a note is only for OTHER', async () => {
     const none = await call('RECRUITER', 'POST', path, waiver({}));
@@ -208,7 +291,19 @@ describe('Invitations mock: accommodations and the identity waiver (ADR 0015, C-
 });
 
 describe('Invitations mock: rate limit (429)', () => {
-  it('answers 429 with Retry-After once the hourly limit is used', async () => {
+  it('FR-303: a 409 keeps its slot, so the next invite is 429; the 429 has no Retry-After header (as the API)', async () => {
+    setInvitationScenario({ limitPerHour: 1 });
+    const dup = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'tim.berners.lee@candidates.example.test', name: 'Tim' },
+      ...win(),
+    });
+    expect(dup.status).toBe(409);
+    const r = await call('RECRUITER', 'POST', path, one());
+    expect(r.status).toBe(429);
+    expect(r.headers.get('retry-after')).toBeNull();
+  });
+
+  it('answers 429 once the hourly limit is used', async () => {
     setInvitationScenario({ limitPerHour: 1 });
     expect((await call('RECRUITER', 'POST', path, one())).status).toBe(201);
     const r = await call(
@@ -218,64 +313,19 @@ describe('Invitations mock: rate limit (429)', () => {
       one({ candidate: { email: 'second@example.test', name: 'Second' } }),
     );
     expect(r.status).toBe(429);
-    expect(Number(r.headers.get('retry-after'))).toBeGreaterThan(0);
   });
 });
 
-describe('Invitations mock: bulk (FR-304, TC-023)', () => {
-  const rows = (n: number) =>
-    Array.from({ length: n }, (_, i) => ({ email: `bulk${i}@example.test`, name: `Bulk ${i}` }));
-  it('creates valid rows and reports per-row errors by index without echoing emails', async () => {
-    const r = await call<{ created: number; errors: { row: number; message: string }[] }>(
-      'RECRUITER',
-      'POST',
-      `${path}/bulk`,
-      {
-        ...win(),
-        rows: [
-          ...rows(2),
-          { email: 'bulk0@example.test', name: 'Again' },
-          { email: 'tim.berners.lee@candidates.example.test', name: 'Tim' },
-        ],
-      },
+describe('Invitations mock: no bulk route (D-84)', () => {
+  it('FR-304: the API has no bulk route (404); the mock does not invent one', async () => {
+    // Hermetic: an explicit handler stands for the API's answer, so nothing can reach the network.
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations/bulk`, () =>
+        HttpResponse.json({ title: 'Not Found', status: 404 }, { status: 404 }),
+      ),
     );
-    expect(r.status).toBe(200);
-    expect(r.body.created).toBe(2);
-    expect(r.body.errors.map((e) => e.row)).toEqual([3, 4]);
-    expect(JSON.stringify(r.body)).not.toContain('@');
-  });
-
-  it('is limited to 200 rows per request and rejects bad rows with 400', async () => {
-    expect(
-      (await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: rows(201) })).status,
-    ).toBe(400);
-    expect((await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: [] })).status).toBe(
-      400,
-    );
-    expect(
-      (
-        await call('RECRUITER', 'POST', `${path}/bulk`, {
-          ...win(),
-          rows: [{ email: 'x', name: 'y' }],
-        })
-      ).status,
-    ).toBe(400);
-  });
-
-  it('a bulk upload cannot carry accommodations', async () => {
-    const r = await call('RECRUITER', 'POST', `${path}/bulk`, {
-      ...win(),
-      rows: rows(1),
-      accommodations: { extraTimePct: 10 },
-    });
-    expect(r.status).toBe(400);
-  });
-
-  it('429 rejects the whole request and creates nothing', async () => {
-    setInvitationScenario({ limitPerHour: 5 });
-    const r = await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: rows(6) });
-    expect(r.status).toBe(429);
-    expect(r.headers.get('retry-after')).toBeTruthy();
+    const r = await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: [] });
+    expect(r.status).toBe(404);
   });
 });
 

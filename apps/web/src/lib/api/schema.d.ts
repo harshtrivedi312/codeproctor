@@ -795,25 +795,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/tests/{testId}/invitations/bulk": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                testId: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at most 200 rows per request). Rows that fail are reported by index and reason, the others are invited (TC-023). A waiver is never accepted here. */
-        post: operations["createInvitationsBulk"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/admin/candidates/{candidateId}/invitations": {
         parameters: {
             query?: never;
@@ -1479,7 +1460,6 @@ export interface components {
         InviteCandidate: {
             email: string;
             name: string;
-            externalRef?: string;
         };
         CreateInvitation: {
             candidate: components["schemas"]["InviteCandidate"];
@@ -1489,6 +1469,11 @@ export interface components {
             windowEnd: string;
             accommodations?: components["schemas"]["InvitationAccommodations"];
         };
+        /**
+         * @description What happened to the invitation email (FR-303). queued: accepted for delivery, not proof of delivery. failed: the mail could not be queued; the invitation still exists but nothing was sent. disabled: no mail provider is configured; nothing was sent. There is no resend route yet, and a new invite for the same candidate and test is a 409 until the window ends.
+         * @enum {string}
+         */
+        MailOutcome: "queued" | "failed" | "disabled";
         InvitationResult: {
             id: string;
             testId: string;
@@ -1498,21 +1483,9 @@ export interface components {
             windowStart: string;
             /** Format: date-time */
             windowEnd: string;
-        };
-        BulkInvitations: {
-            rows: components["schemas"]["InviteCandidate"][];
             /** Format: date-time */
-            windowStart: string;
-            /** Format: date-time */
-            windowEnd: string;
-        };
-        BulkInvitationResult: {
-            created: number;
-            /** @description By row index (1 is the first row of THIS request) and reason; no email is echoed */
-            errors: {
-                row: number;
-                message: string;
-            }[];
+            createdAt: string;
+            mail: components["schemas"]["MailOutcome"];
         };
         StatusStep: {
             status: components["schemas"]["SessionStatus"];
@@ -4204,6 +4177,15 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Missing or expired access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
             403: components["responses"]["Forbidden"];
             /** @description No such test in your organisation */
             404: {
@@ -4214,7 +4196,7 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
-            /** @description This candidate already has an open invitation to this test */
+            /** @description This candidate already has an active invitation to this test, or the candidate has asked for erasure. No code; the detail text differs. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4223,7 +4205,7 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The window ends in the past, or the waiver reason is not enabled (code REASON_NOT_ENABLED) */
+            /** @description The test cannot be given to candidates right now (a random slot has no question left to draw, or a question was archived). detail is "Request validation failed" and errors[] names the slots, for example sections[0].questions[0].randomRule matches 0 ...; nothing is created. A window that ends in the past is a 400, not a 422. A waiver reason that is not enabled would carry code REASON_NOT_ENABLED (ADR 0015). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4232,72 +4214,7 @@ export interface operations {
                     "application/json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Too many invitations this hour; Retry-After says when */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Problem"];
-                };
-            };
-            500: components["responses"]["ServerError"];
-            503: components["responses"]["Busy"];
-        };
-    };
-    createInvitationsBulk: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                testId: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["BulkInvitations"];
-            };
-        };
-        responses: {
-            /** @description How many were invited and which rows were not */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BulkInvitationResult"];
-                };
-            };
-            /** @description Validation failed (too many rows, window, an unknown field) */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Problem"];
-                };
-            };
-            403: components["responses"]["Forbidden"];
-            /** @description No such test in your organisation */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The window ends in the past */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too many invitations this hour; nothing was invited; Retry-After says when */
+            /** @description Too many invitations this hour. The API sends no Retry-After header. A 404, 409 or 422 attempt keeps its slot. */
             429: {
                 headers: {
                     [name: string]: unknown;

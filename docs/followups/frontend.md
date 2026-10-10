@@ -790,6 +790,16 @@ None of this exists in the API yet. Every route, body, limit and error word belo
 - **FU-FEA-SFR-5 [Frontend A]** Nonce compare-and-clear for the sign-out marker: write a per-sign-out nonce as the value and clear it only if it still matches. This closes a narrow cross-tab race where tab C's late `confirmSignedOut` clears tab A's marker. Today a superseded tab stays signed out until it signs in or reloads, which fails safe.
 **Review of PR #364 (MANUAL_PENDING; no blockers):** ask the hub to add one sentence to section 7 "Effect on the verdict" saying a failed compare-and-set answers `VERDICT_ALREADY_SET` or `SESSION_NOT_UNDER_REVIEW`, which win over `MANUAL_PENDING`; the verdict is also blocked on undecided HIGH flags (TC-078) and a missing identity decision (ADR 0004, `docs/prompts/backend.md:151`) with no contract code yet (the panel shows its generic message); name the three codes in the verdict 409 description in openapi; add a test that a verdict 409 `MANUAL_PENDING` shows "Some short answers still need scoring".
 
+**Invite dialog, mail outcome and unsupported fields (D-84 pilot):**
+
+- Re-enable the accommodation controls (`INVITE_CAPABILITIES.accommodations` in `features/invitations/schemas.ts`) when `CreateInvitationDto` accepts `accommodations` (ADR 0015, FR-304); until then the dialog sends only `candidate{email,name}`, `windowStart`, `windowEnd` (the API pipe is `forbidNonWhitelisted`).
+- Send the browser time zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) once the DTO accepts `timeZone` (migration `invitations_time_zone`, C-53).
+- Add a resend/revoke UI when FU-BE-167 / FU-BE-246 land (today a not-emailed invitation can only be fixed by an administrator).
+- Bulk CSV posts single invitations at concurrency 4 (the bulk route does not exist); 500 rows hit `INVITATION_RATE_LIMIT` sooner; `BULK_CHUNK` in `csv.ts` is unused; the CSV `external_ref` column is parsed and ignored; a candidate-field 400 is assumed to start with `candidate` (class-validator nested path), otherwise the row stops the upload instead of being a row error.
+- The invite 409s have no `code` (plain strings): the web shows the API's `detail`; ask Backend for codes. `REASON_NOT_ENABLED` does not exist in `apps/api/src`; the web handler is dead until it does.
+- S7 (nit): the dialog does not check the client-side maximum window (`INVITATION_MAX_WINDOW_DAYS`, default 7, and start at most 30 days ahead); the API's 400 text is shown instead. Add the same check to `inviteSchema`, with the limit read from config once the API exposes it.
+- S6 (nit): closing the dialog during a CSV upload stops new requests but the requests in flight (at most 4) still finish, and the result is not shown. Warn before closing, or keep the result in a toast.
+- Edge: a window of exactly 7 days plus the start clamp (the start moved to now at submit, end kept by length) can exceed the API maximum by the elapsed minutes; the API answers 400 and the text is shown. Clamp the length at submit.
 ## PILOT-AUDIT (D-84, Frontend A, branch frontend/pilot-reviewer-audit): staff web vs the merged API
 
 Scope: REVIEWER path, RECRUITER invite flow, staff auth. Read against apps/api/src/{review,invitations,tests,auth}, route-permissions.ts and the e2e specs.

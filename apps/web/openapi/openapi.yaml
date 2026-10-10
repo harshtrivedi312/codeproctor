@@ -1807,7 +1807,7 @@ paths:
       - name: testId
         in: path
         required: true
-        schema: { type: string }
+        schema: { type: string, format: uuid }
     post:
       operationId: createInvitation
       summary: WEB-ONLY [BE-06b]. Invite one candidate to a test (invitation:create).
@@ -1830,6 +1830,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: Missing or expired access token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such test in your organisation
@@ -1837,67 +1842,24 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: This candidate already has an open invitation to this test
+          description: This candidate already has an active invitation to this test, or the
+            candidate has asked for erasure. No code; the detail text differs.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: The window ends in the past, or the waiver reason is not enabled
-            (code REASON_NOT_ENABLED)
+          description: The test cannot be given to candidates right now (a random slot has
+            no question left to draw, or a question was archived). detail is
+            "Request validation failed" and errors[] names the slots, for example
+            sections[0].questions[0].randomRule matches 0 ...; nothing is created. A
+            window that ends in the past is a 400, not a 422. A waiver reason that is
+            not enabled would carry code REASON_NOT_ENABLED (ADR 0015).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
         '429':
-          description: Too many invitations this hour; Retry-After says when
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '503':
-          $ref: '#/components/responses/Busy'
-        '500':
-          $ref: '#/components/responses/ServerError'
-  /v1/tests/{testId}/invitations/bulk:
-    parameters:
-      - name: testId
-        in: path
-        required: true
-        schema: { type: string }
-    post:
-      operationId: createInvitationsBulk
-      summary: WEB-ONLY [BE-06b]. Invite several candidates (the CSV upload sends at
-        most 200 rows per request). Rows that fail are reported by index and
-        reason, the others are invited (TC-023). A waiver is never accepted
-        here.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/BulkInvitations' }
-      responses:
-        '200':
-          description: How many were invited and which rows were not
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/BulkInvitationResult' }
-        '400':
-          description: Validation failed (too many rows, window, an unknown field)
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404':
-          description: No such test in your organisation
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '422':
-          description: The window ends in the past
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Problem' }
-        '429':
-          description: Too many invitations this hour; nothing was invited; Retry-After
-            says when
+          description: Too many invitations this hour. The API sends no Retry-After header.
+            A 404, 409 or 422 attempt keeps its slot.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -3126,7 +3088,6 @@ components:
       properties:
         email: { type: string, maxLength: 254 }
         name: { type: string, minLength: 1, maxLength: 200 }
-        externalRef: { type: string, maxLength: 200 }
     CreateInvitation:
       type: object
       additionalProperties: false
@@ -3135,10 +3096,20 @@ components:
         candidate: { $ref: '#/components/schemas/InviteCandidate' }
         windowStart: { type: string, format: date-time }
         windowEnd: { type: string, format: date-time }
+        # NOT ACCEPTED by the API yet: CreateInvitationDto has no such field and the
+        # ValidationPipe forbids unknown fields (a 400). The web does not send it.
         accommodations: { $ref: '#/components/schemas/InvitationAccommodations' }
+    MailOutcome:
+      type: string
+      enum: [queued, failed, disabled]
+      description: 'What happened to the invitation email (FR-303). queued: accepted for
+        delivery, not proof of delivery. failed: the mail could not be queued; the
+        invitation still exists but nothing was sent. disabled: no mail provider is
+        configured; nothing was sent. There is no resend route yet, and a new invite for
+        the same candidate and test is a 409 until the window ends.'
     InvitationResult:
       type: object
-      required: [id, testId, candidateId, status, windowStart, windowEnd]
+      required: [id, testId, candidateId, status, windowStart, windowEnd, createdAt, mail]
       properties:
         id: { type: string }
         testId: { type: string }
@@ -3146,35 +3117,8 @@ components:
         status: { $ref: '#/components/schemas/SessionStatus' }
         windowStart: { type: string, format: date-time }
         windowEnd: { type: string, format: date-time }
-    BulkInvitations:
-      type: object
-      additionalProperties: false
-      required: [rows, windowStart, windowEnd]
-      properties:
-        rows:
-          {
-            type: array,
-            minItems: 1,
-            maxItems: 200,
-            items: { $ref: '#/components/schemas/InviteCandidate' },
-          }
-        windowStart: { type: string, format: date-time }
-        windowEnd: { type: string, format: date-time }
-    BulkInvitationResult:
-      type: object
-      required: [created, errors]
-      properties:
-        created: { type: integer }
-        errors:
-          type: array
-          description: By row index (1 is the first row of THIS request) and reason; no
-            email is echoed
-          items:
-            type: object
-            required: [row, message]
-            properties:
-              row: { type: integer, minimum: 1 }
-              message: { type: string }
+        createdAt: { type: string, format: date-time }
+        mail: { $ref: '#/components/schemas/MailOutcome' }
     StatusStep:
       type: object
       required: [status, at]

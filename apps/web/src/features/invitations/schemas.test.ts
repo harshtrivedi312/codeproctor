@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { inviteSchema, toAccommodations, windowAtSubmit, type InviteFormValues } from './schemas';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  INVITE_CAPABILITIES,
+  inviteSchema,
+  toAccommodations,
+  windowAtSubmit,
+  type InviteFormValues,
+} from './schemas';
 
 const NOW = new Date('2026-06-01T09:00:00');
 const base: InviteFormValues = {
@@ -22,6 +28,20 @@ const paths = (v: Partial<InviteFormValues>) => {
   const r = schema.safeParse({ ...base, ...v });
   return r.success ? [] : r.error.issues.map((i) => i.path.join('.'));
 };
+
+beforeEach(() => {
+  INVITE_CAPABILITIES.accommodations = true;
+});
+afterEach(() => {
+  INVITE_CAPABILITIES.accommodations = false;
+});
+
+describe('FR-303: accommodations are off while the API does not accept them (D-84)', () => {
+  it('ignores accommodation fields when switched off', () => {
+    INVITE_CAPABILITIES.accommodations = false;
+    expect(paths({ extraTime: '999', waiver: true })).toEqual([]);
+  });
+});
 
 describe('FR-303 FR-305 ADR 0015: the invite form rules', () => {
   it('accepts a plain invitation', () => expect(paths({})).toEqual([]));
