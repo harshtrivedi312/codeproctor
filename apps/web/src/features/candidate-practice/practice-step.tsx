@@ -180,8 +180,8 @@ export function PracticeStep({
                 if (lastSent.current !== null && clicked - lastSent.current < RUN_COOLDOWN_MS)
                   return;
                 lastSent.current = clicked;
-                setLastRun(Date.now());
-                setNow(Date.now());
+                setLastRun(clicked);
+                setNow(clicked);
                 run.mutate({ language: active, code });
               }}
             >

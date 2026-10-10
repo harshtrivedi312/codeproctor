@@ -274,6 +274,7 @@ export function CandidateFlow({
             resuming={resuming}
             onStarted={() => setInTest(true)}
             onSessionEnded={endSession}
+            onTerminal={finishWith}
           />
         );
         break;

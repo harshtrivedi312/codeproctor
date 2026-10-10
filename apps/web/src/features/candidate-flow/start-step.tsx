@@ -5,13 +5,16 @@ import * as React from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { candidateApi } from './api';
+import { terminalForConflict } from './problems';
 import { StepFrame } from './step-frame';
+import type { Terminal } from './terminal-screens';
 
 /**
  * Start hands over to the test screen in the SAME document (FU-FEB-10, option (c)): the candidate
  * session token stays in memory and nothing is written to storage or a URL. /t/link is the one
- * route whose CSP allows WebAssembly (D-45, P-17), so the in-browser detectors may run there once
- * they ship; until then they report DETECTOR_UNAVAILABLE.
+ * route whose CSP allows WebAssembly (P-17), but the document that runs the test is the one
+ * /t/start loaded (the hand-off is a client-side navigation), so today the allowance does not
+ * apply; the in-browser detectors are placeholders (DETECTOR_UNAVAILABLE). See FU-FEB-67.
  */
 
 const DONE_ITEMS = [
@@ -21,40 +24,68 @@ const DONE_ITEMS = [
   'Your room scan was received',
 ];
 
+type StartResult = Awaited<ReturnType<typeof candidateApi.startTest>>;
+/** A resumed test makes no start call. */
+type StartOutcome = StartResult | { ok: true; resumed: true };
+
+/** What the candidate reads when the start did not go through (null: nothing to show). */
+function messageFor(result: StartOutcome): string | null {
+  if (result.ok) return null;
+  if (result.kind !== 'problem') {
+    return 'We could not start. Check your internet connection and press the button again.';
+  }
+  switch (result.status) {
+    case 401:
+      return null; // the session ended: the flow shows its own screen
+    case 409:
+      return result.code === 'RANDOM_RULE_UNSATISFIABLE'
+        ? 'This test could not be set up for you. Please contact the person who invited you.'
+        : 'Some earlier steps are not finished yet. Reload this page, open your link again and finish the steps in order.';
+    case 429:
+      return `Please wait ${result.retryAfterSeconds ?? 10} seconds and press the button again.`;
+    default:
+      return 'The service had a problem. Wait a minute and press the button again.';
+  }
+}
+
 export function StartStep({
   resuming,
   onStarted,
   onSessionEnded,
+  onTerminal,
 }: {
   resuming: boolean;
   onStarted: () => void;
   onSessionEnded: () => void;
+  onTerminal: (terminal: Terminal) => void;
 }): React.JSX.Element {
   // Guards a double click before React has re-rendered the disabled button.
   const sent = React.useRef(false);
   const start = useMutation({
-    mutationFn: async () => {
-      return resuming ? ({ ok: true } as const) : candidateApi.startTest();
-    },
+    mutationFn: async (): Promise<StartOutcome> =>
+      resuming ? ({ ok: true, resumed: true } as const) : candidateApi.startTest(),
     onError: () => {
       sent.current = false;
     },
     onSuccess: (result) => {
-      // Sent again only when the start did not go through: a started test is never started twice.
-      if (!result.ok) sent.current = false;
-      if (result.ok) onStarted();
-      else if (result.kind === 'problem' && result.status === 401) onSessionEnded();
+      if (result.ok) {
+        onStarted(); // a started test is never started twice: the guard stays set
+        return;
+      }
+      sent.current = false;
+      if (result.kind !== 'problem') return;
+      if (result.status === 401) onSessionEnded();
+      // A link that has expired (or is used up) ends the flow with its own screen.
+      else if (result.status === 409 && result.code && result.code.startsWith('LINK_')) {
+        onTerminal(terminalForConflict(result.code));
+      }
     },
   });
-  const result = start.data;
-  const problem =
-    start.isError || (result && !result.ok && result.kind !== 'problem')
-      ? 'We could not start. Check your internet connection and press the button again.'
-      : result && !result.ok && result.kind === 'problem' && result.status !== 401
-        ? result.status === 409
-          ? 'Some earlier steps are not finished yet. Reload this page, open your link again and finish the steps in order.'
-          : 'The service had a problem. Wait a minute and press the button again.'
-        : null;
+  const problem = start.isError
+    ? 'We could not start. Check your internet connection and press the button again.'
+    : start.data
+      ? messageFor(start.data)
+      : null;
 
   return (
     <StepFrame
