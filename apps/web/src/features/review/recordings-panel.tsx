@@ -201,7 +201,9 @@ function RecordingRow({
       ) : null}
       {state === 'error' ? (
         <Alert tone="error" role="alert" className="mt-2">
-          We could not load this recording. Press Play to try again.
+          We could not load this recording. Press Play to try again. If it keeps failing, the
+          recording storage may not be reachable from this browser: ask your administrator to check
+          the storage address and its browser access (CORS) settings.
         </Alert>
       ) : null}
     </li>

@@ -442,6 +442,21 @@ describe('Candidate erasure (NFR-05, D-19, TC-094)', () => {
     expect(within(row).queryByRole('button', { name: /Erase data/ })).not.toBeInTheDocument();
   });
 
+  it('FR-303: when the API has no candidate list route (404) the page says so and keeps Invite candidates', async () => {
+    server.use(
+      http.get('*/v1/admin/candidates', () =>
+        HttpResponse.json(
+          { status: 404, title: 'Not Found', detail: 'Route not found.' },
+          { status: 404 },
+        ),
+      ),
+    );
+    renderAsStaff(<CandidatesPage />, MOCK_USERS.recruiter);
+    expect(await screen.findByText(/candidate list is not available/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /try again/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Invite candidates' })).toBeInTheDocument();
+  });
+
   it('D-19: a request that is already waiting shows the waiting state and no erase button', async () => {
     renderAsStaff(<CandidatesPage />, MOCK_USERS.admin);
     await findRow('Barbara Liskov');

@@ -22,7 +22,8 @@ export function RequireRole({
   fallback,
   children,
 }: RequireRoleProps): React.JSX.Element | null {
-  const { status, role, signedOutByUser, loginPath, refreshBusy, retryRefresh } = useAuth();
+  const { status, role, signedOutByUser, loginPath, refreshBusy, refreshRetryAfter, retryRefresh } =
+    useAuth();
   const router = useRouter();
   const pathname = usePathname();
 
@@ -74,5 +75,30 @@ export function RequireRole({
       </>
     );
   }
-  return <>{children}</>;
+  // Signed in, but the background sign-in check was refused as rate limited or busy: nobody was
+  // signed out. Say so, so the next 401 does not come as a surprise.
+  const banner =
+    status === 'authenticated' && refreshBusy ? (
+      <div
+        role="status"
+        className="mb-4 flex flex-wrap items-center gap-3 rounded-md border bg-card p-3 text-sm"
+      >
+        <p>
+          The sign-in check is rate limited; we did not sign you out. Try again{' '}
+          {refreshRetryAfter
+            ? `in about ${Math.ceil(refreshRetryAfter / 60)} minute(s)`
+            : 'in a minute'}
+          .
+        </p>
+        <Button variant="outline" size="sm" onClick={retryRefresh}>
+          Try again
+        </Button>
+      </div>
+    ) : null;
+  return (
+    <>
+      {banner}
+      {children}
+    </>
+  );
 }

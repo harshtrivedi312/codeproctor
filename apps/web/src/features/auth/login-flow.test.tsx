@@ -95,6 +95,14 @@ describe('LoginForm', () => {
     expect(router.replace).not.toHaveBeenCalledWith('/admin');
   });
 
+  it('FR-101: a 429 from the sign-in limit says to wait, not that the server broke', async () => {
+    server.use(http.post('*/v1/auth/login', () => new HttpResponse(null, { status: 429 })));
+    renderWithAuth(<LoginForm />);
+    await signIn(MOCK_USERS.recruiter.email, MOCK_USERS.recruiter.password);
+    expect(await screen.findByRole('status')).toHaveTextContent(/Wait one minute/);
+    expect(getAccessToken()).toBeNull();
+  });
+
   it('FR-101: wrong password shows the neutral failed-sign-in message and stays on the page', async () => {
     renderWithAuth(<LoginForm />);
     await signIn(MOCK_USERS.recruiter.email, 'wrong-password');

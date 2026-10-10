@@ -1,5 +1,11 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { buildCsp, generateNonce, isCandidateTestPath, parseOrigins } from '@/lib/csp';
+import {
+  buildCsp,
+  generateNonce,
+  isCandidateTestPath,
+  parseOrigins,
+  uploadOriginsFor,
+} from '@/lib/csp';
 
 /**
  * Sets a strict CSP with a per-request nonce on every page response (NFR-04). Next.js reads the
@@ -10,7 +16,10 @@ export function middleware(request: NextRequest): NextResponse {
   const csp = buildCsp({
     nonce,
     apiOrigin: process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000',
-    uploadOrigins: parseOrigins(process.env.NEXT_PUBLIC_UPLOAD_ORIGINS),
+    uploadOrigins: uploadOriginsFor(
+      parseOrigins(process.env.NEXT_PUBLIC_UPLOAD_ORIGINS),
+      process.env.NODE_ENV === 'development',
+    ),
     isDev: process.env.NODE_ENV === 'development',
     // D-45 (P-05): WebAssembly compilation for the in-browser detectors on /t/[token]/test only.
     // Matches the request path before any rewrite, so a future rewrite into the route fails closed.
