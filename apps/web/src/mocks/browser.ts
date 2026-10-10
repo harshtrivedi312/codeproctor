@@ -6,6 +6,7 @@ import {
   setMockPlain503,
 } from './fault-handlers';
 import { handlers } from './handlers';
+import { setInvitationScenario } from './invitation-handlers';
 
 export const worker = setupWorker(...handlers);
 
@@ -16,7 +17,12 @@ export const worker = setupWorker(...handlers);
 declare global {
   interface Window {
     __cpMockFaults?: typeof faultSwitches;
+    /** Demo and e2e: choose the mail outcome of the invitation mock, for example { mail: 'disabled' }. */
+    __cpMockInvitations?: { setInvitationScenario: typeof setInvitationScenario };
   }
 }
 const faultSwitches = { setMockBusy, setMockAuditFailure, setMockPlain503, resetMockFaults };
-if (typeof window !== 'undefined') window.__cpMockFaults = faultSwitches;
+if (typeof window !== 'undefined') {
+  window.__cpMockFaults = faultSwitches;
+  window.__cpMockInvitations = { setInvitationScenario };
+}

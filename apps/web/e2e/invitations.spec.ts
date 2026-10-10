@@ -14,7 +14,43 @@ async function signInAt(page: Page, target: string) {
 }
 
 test.describe('FR-303 FR-304 FR-305 invitations', () => {
-  test('FR-303 C-19: invite one candidate with a waived identity check, which needs a reason', async ({
+  async function openInviteDialog(page: Page) {
+    await signInAt(page, '/admin/tests');
+    await page
+      .getByRole('link', { name: /Frontend and algorithms/ })
+      .first()
+      .click();
+    await page.getByRole('button', { name: 'Invite candidates' }).click();
+    return page.getByRole('dialog');
+  }
+
+  test('FR-303: invite one candidate; the mail is queued for delivery (not "sent")', async ({
+    page,
+  }) => {
+    const dialog = await openInviteDialog(page);
+    await dialog.getByLabel('Candidate name').fill('Pia Playwright');
+    await dialog.getByLabel('Candidate email').fill('pia.playwright@example.test');
+    await dialog.getByRole('button', { name: 'Send invitation' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText(/queued for delivery/)).toBeVisible();
+  });
+
+  test('FR-303: accommodations and the identity waiver are not offered while the API cannot take them', async ({
+    page,
+  }) => {
+    const dialog = await openInviteDialog(page);
+    await expect(dialog.getByTestId('accommodations-unavailable')).toBeVisible();
+    await expect(dialog.getByLabel('No face match / no identity check')).toHaveCount(0);
+    await expect(dialog.getByLabel('Extra time (%)')).toHaveCount(0);
+    await expectNoAxeViolations(page);
+  });
+
+  // Re-enable when the DTO accepts accommodations (ADR 0015, INVITE_CAPABILITIES.accommodations in
+  // features/invitations/schemas.ts; followup in docs/followups/frontend.md). The waiver, its
+  // reason and the video-call advice are covered by the unit tests with the capability switched on.
+  test.skip('FR-303 C-19: invite one candidate with a waived identity check, which needs a reason', async () => {});
+
+  test('FR-303: with no mail provider the invitation exists but the dialog never says it was sent', async ({
     page,
   }) => {
     await signInAt(page, '/admin/tests');
@@ -22,20 +58,22 @@ test.describe('FR-303 FR-304 FR-305 invitations', () => {
       .getByRole('link', { name: /Frontend and algorithms/ })
       .first()
       .click();
+    await page.evaluate(() =>
+      window.__cpMockInvitations?.setInvitationScenario({ mail: 'disabled' }),
+    );
     await page.getByRole('button', { name: 'Invite candidates' }).click();
     const dialog = page.getByRole('dialog');
-    await dialog.getByLabel('Candidate name').fill('Pia Playwright');
-    await dialog.getByLabel('Candidate email').fill('pia.playwright@example.test');
-    await dialog.getByLabel('No face match / no identity check').check();
-    await expect(dialog.getByText(/Check the candidate’s ID on a video call/)).toBeVisible();
+    await dialog.getByLabel('Candidate name').fill('Quinn Quiet');
+    await dialog.getByLabel('Candidate email').fill('quinn.quiet@example.test');
+    await dialog.getByRole('button', { name: 'Send invitation' }).click();
+    const warning = dialog.getByRole('alert');
+    await expect(warning).toContainText('Invitation created, but the email could not be sent');
+    await expect(warning).toContainText(/no email was sent/i);
+    await expect(dialog.getByRole('button', { name: 'Close' })).toBeEnabled();
     await expectNoAxeViolations(page);
-    await dialog.getByRole('button', { name: 'Send invitation' }).click();
-    await expect(dialog.getByText(/Choose why the identity check is waived/)).toBeVisible();
-    await dialog
-      .getByLabel(/Why is the identity check waived/)
-      .selectOption('CANNOT_COMPLETE_ID_CHECK');
-    await dialog.getByRole('button', { name: 'Send invitation' }).click();
-    await expect(dialog).toBeHidden();
+    await dialog.getByRole('button', { name: 'Invite another candidate' }).click();
+    await expect(dialog.getByTestId('mail-not-sent')).toHaveCount(0);
+    await expect(dialog.getByLabel('Candidate email')).toHaveValue('');
   });
 
   test('FR-304 TC-023: a CSV shows a row preview before anything is sent', async ({ page }) => {
@@ -59,6 +97,8 @@ test.describe('FR-303 FR-304 FR-305 invitations', () => {
     await expectNoAxeViolations(page);
     await dialog.getByRole('button', { name: 'Invite 1 candidate' }).click();
     await expect(dialog.getByTestId('bulk-result')).toContainText('1 invitation created');
+    await expect(dialog.getByTestId('bulk-result')).toContainText('1 queued for delivery');
+    await expectNoAxeViolations(page);
   });
 
   test('FR-303 ADR 0002: the candidates page shows each status and a timeline', async ({
