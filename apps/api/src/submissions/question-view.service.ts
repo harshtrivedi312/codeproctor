@@ -1,7 +1,8 @@
 // GET /candidate/questions/:sessionQuestionId (ADR 0013 CS-4.6 `render-question`, FR-301, FR-501,
 // TC-011). The candidate-safe projection of ONE question of the open section:
-//   { sessionQuestionId, type, title, statementMd, languages, limits, starterCode, samples, mcq? }
-// Nothing else: never a hidden test case or its variant override, the reference solution, the
+//   { sessionQuestionId, type, title, statementMd, languages, limits, starterCode, samples, mcq?, saved }
+// where `saved` is the candidate's OWN latest autosave of this question (read per request, never cached:
+// the planned qview cache of FU-BEB-156 must merge it on top of the cached projection). Nothing else: never a hidden test case or its variant override, the reference solution, the
 // validation report, the MCQ correct option ids or a short answer's accepted answers. The object is
 // built field by field (an allowlist), so a new column on a table cannot leak by accident.
 //
