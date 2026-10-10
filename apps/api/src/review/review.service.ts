@@ -26,6 +26,7 @@ import {
   runTests,
 } from './review-mappers';
 import type { RecordingKind } from './review-mappers';
+import { reviewStatement } from './review-statement';
 import { RecordingStoragePort } from './recording-storage.port';
 
 /** FR-703: playback URLs are valid for 15 minutes. */
@@ -175,6 +176,7 @@ export class ReviewService {
         select: {
           id: true,
           questionVersionId: true,
+          variantId: true,
           points: true,
           score: true,
           scoring: true,
@@ -216,12 +218,26 @@ export class ReviewService {
       }),
     ]);
 
-    const versions = sqs.length
-      ? await db.questionVersion.findMany({
-          where: { id: { in: sqs.map((s) => s.questionVersionId) } },
-          select: { id: true, title: true, statementMd: true, questionId: true },
-        })
-      : [];
+    // The variant each session question was dealt, org-scoped, loaded with the versions. Only what
+    // is needed to show the statement the candidate saw (FR-105); params never leave this method.
+    const variantIds = [
+      ...new Set(sqs.flatMap((s) => (s.variantId === null ? [] : [s.variantId]))),
+    ];
+    const [versions, variants] = await Promise.all([
+      sqs.length
+        ? db.questionVersion.findMany({
+            where: { id: { in: sqs.map((s) => s.questionVersionId) } },
+            select: { id: true, title: true, statementMd: true, questionId: true },
+          })
+        : [],
+      variantIds.length
+        ? db.questionVariant.findMany({
+            where: { id: { in: variantIds } },
+            select: { id: true, params: true, renderedStatement: true },
+          })
+        : [],
+    ]);
+    const variantById = new Map(variants.map((x) => [x.id, x]));
     const questions = versions.length
       ? await db.question.findMany({
           where: { id: { in: versions.map((v) => v.questionId) } },
@@ -252,7 +268,10 @@ export class ReviewService {
         sessionQuestionId: s.id,
         type,
         title: v?.title ?? '',
-        statement: v?.statementMd ?? '',
+        statement: reviewStatement(
+          v?.statementMd ?? '',
+          s.variantId === null ? null : variantById.get(s.variantId),
+        ),
         points: Number(s.points),
         score: num(s.score),
         scoring: s.scoring,
