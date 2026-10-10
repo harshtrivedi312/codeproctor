@@ -82,6 +82,8 @@ interface AuthContextValue {
   signOutRevoked: (reason: SessionRevokedReason) => Promise<void>;
   /** The silent refresh got 503 BUSY and gave up: nobody was signed out; offer a manual retry. */
   refreshBusy: boolean;
+  /** Seconds the 429 asked to wait, when it said. */
+  refreshRetryAfter: number | null;
   retryRefresh: () => void;
   setPending: (pending: PendingChallenge | null) => void;
   /** Called after a successful login or 2FA verify. */
@@ -106,6 +108,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     busyStore.subscribe,
     () => busyStore.get().refreshBusy,
     () => false,
+  );
+  const refreshRetryAfter = React.useSyncExternalStore(
+    busyStore.subscribe,
+    () => busyStore.get().refreshRetryAfter,
+    () => null,
   );
   const retryRefresh = React.useCallback(() => void refreshSession(), []);
   const [status, setStatus] = React.useState<AuthStatus>('loading');
@@ -328,6 +335,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       loginPath,
       signOutRevoked,
       refreshBusy,
+      refreshRetryAfter,
       retryRefresh,
       setPending,
       signIn,
@@ -343,6 +351,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       loginPath,
       signOutRevoked,
       refreshBusy,
+      refreshRetryAfter,
       retryRefresh,
       signIn,
       signOut,

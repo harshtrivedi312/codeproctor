@@ -100,8 +100,22 @@ export function answerBody(answer: ReviewAnswer): AnswerBody {
   if (Array.isArray(a)) return { kind: 'options', ids: a.map((x) => String(x)) };
   if (typeof a === 'object') {
     const o = a as Record<string, unknown>;
-    if (Array.isArray(o['selectedOptionIds'])) {
-      return { kind: 'options', ids: o['selectedOptionIds'].map((x) => String(x)) };
+    // A coding answer whose code was never saved: { language, code: null }.
+    if (o['code'] === null) {
+      return {
+        kind: 'code',
+        language: typeof o['language'] === 'string' ? o['language'] : '',
+        code: '',
+      };
+    }
+    // The API stores { optionIds } for MCQ and { text } for SHORT_ANSWER (grading/answer-shapes.ts);
+    // the other member names are kept for older rows and the e2e fixtures.
+    for (const key of ['optionIds', 'selectedOptionIds', 'selected']) {
+      const v = o[key];
+      if (Array.isArray(v)) return { kind: 'options', ids: v.map((x) => String(x)) };
+    }
+    if (typeof o['text'] === 'string' && o['code'] === undefined) {
+      return { kind: 'text', text: o['text'] };
     }
     if (typeof o['code'] === 'string') {
       return {
@@ -118,12 +132,18 @@ export type ScoringState = 'auto' | 'pending' | 'manual';
 export function scoringState(a: ReviewAnswer): ScoringState {
   return a.scoring === 'MANUAL_PENDING' ? 'pending' : a.scoring === 'MANUAL' ? 'manual' : 'auto';
 }
-export const canScoreManually = (a: ReviewAnswer): boolean =>
-  a.type === 'SHORT_ANSWER' && a.scoring !== 'AUTO';
 
 /**
- * Scoring and the verdict apply only to a session UNDER_REVIEW with no verdict yet
- * (docs/api-contract.md section 7: GRADED, COMPLETED and APPEALED sessions are 409).
+ * Follows the answer's own `scoring` field, not its type: MANUAL and MANUAL_PENDING answers show the
+ * controls. The API stays the judge (today it scores SHORT_ANSWER only): any other answer is 409
+ * ANSWER_NOT_MANUAL, and the card then remembers that scoring was refused.
+ */
+export const canScoreManually = (a: ReviewAnswer): boolean => a.scoring !== 'AUTO';
+
+/**
+ * Scoring and the verdict apply only to a session UNDER_REVIEW with no verdict yet: the API takes
+ * the session lock with `status = UNDER_REVIEW` and answers 409 SESSION_NOT_UNDER_REVIEW for
+ * GRADED, COMPLETED and APPEALED sessions (docs/api-contract.md section 7).
  */
 export const isDecidable = (s: ReviewSession): boolean =>
   s.session.status === 'UNDER_REVIEW' && verdictOf(s) === null;
