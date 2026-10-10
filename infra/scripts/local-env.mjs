@@ -14,7 +14,7 @@
 // nothing else (database and object-store passwords stay as they are). It prints the names only.
 //
 // Local development only: the values are for a database on this machine. It never overwrites a file
-// that exists (delete it first to start again), and it never prints a value. Staging, pilot and
+// that exists or rewrites a value in it (delete it first to start again), and it never prints a value. Staging, pilot and
 // production load their secrets from their own stores (ADR 0009), not from this script.
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -28,7 +28,7 @@ const NAME = 'local-env';
  * secret is the MinIO login, the Judge0 ones belong to databases that may already exist): never
  * appended by `--top-up`, since a new value would disagree with what is already running.
  */
-const COUPLED = new Set([
+export const COUPLED = new Set([
   'POSTGRES_PASSWORD',
   'APP_USER_PASSWORD',
   'DATABASE_URL',
@@ -41,6 +41,18 @@ const COUPLED = new Set([
   'JUDGE0_REDIS_PASSWORD',
 ]);
 
+/**
+ * What `--top-up` may append: independent random secrets only. An allowlist, so a future key that
+ * depends on something already running is never appended by default.
+ */
+export const INDEPENDENT = [
+  'JWT_ACCESS_SECRET',
+  'COOKIE_SECRET',
+  'JWT_CANDIDATE_SECRET',
+  'OTP_PEPPER',
+  'QUESTION_OPTION_ID_SECRET',
+];
+
 const hex = (bytes) => randomBytes(bytes).toString('hex');
 const b64 = (bytes) => randomBytes(bytes).toString('base64');
 
@@ -50,6 +62,29 @@ const b64 = (bytes) => randomBytes(bytes).toString('base64');
  * API supports them, the commented demo lines (the dev mail sink, the execution stub) are switched on.
  */
 export function buildLocalEnv(example, supports = { smtpDev: false, execStub: false }) {
+  const values = generatedValues();
+  const lines = example.split('\n').map((line) => {
+    const m = /^([A-Za-z0-9_]+)=(.*)$/.exec(line);
+    if (m === null || !(m[1] in values)) return line;
+    return `${m[1]}=${values[m[1]]}`;
+  });
+  let text = lines.join('\n');
+  if (!/^WORKER_HMAC_KEY=/m.test(text)) text += workerBlock();
+  if (supports.smtpDev) {
+    text = text
+      .replace(/^EMAIL_PROVIDER=noop$/m, 'EMAIL_PROVIDER=smtp-dev')
+      .replace(/^# (SMTP_DEV_HOST=.*)$/m, '$1')
+      .replace(/^# (SMTP_DEV_PORT=.*)$/m, '$1');
+  }
+  if (supports.execStub) text = text.replace(/^# (JUDGE0_MODE=stub)$/m, '$1');
+  // Anything still marked change-me would stop the API or ship a known value: refuse instead.
+  const left = [...text.matchAll(/^([A-Za-z0-9_]+)=.*change-me/gm)].map((m) => m[1]);
+  if (left.length > 0) throw new Error(`no local value is known for: ${left.join(', ')}`);
+  return text;
+}
+
+/** A fresh set of the generated local values (keys that .env.example marks change-me). */
+function generatedValues() {
   const postgresPassword = hex(16);
   const appUserPassword = hex(16);
   const minioPassword = hex(16);
@@ -72,52 +107,35 @@ export function buildLocalEnv(example, supports = { smtpDev: false, execStub: fa
     JUDGE0_DB_PASSWORD: hex(16),
     JUDGE0_REDIS_PASSWORD: hex(16),
   };
-  const lines = example.split('\n').map((line) => {
-    const m = /^([A-Za-z0-9_]+)=(.*)$/.exec(line);
-    if (m === null || !(m[1] in values)) return line;
-    return `${m[1]}=${values[m[1]]}`;
-  });
-  let text = lines.join('\n');
-  if (!/^WORKER_HMAC_KEY=/m.test(text)) text += workerBlock();
-  if (supports.smtpDev) {
-    text = text
-      .replace(/^EMAIL_PROVIDER=noop$/m, 'EMAIL_PROVIDER=smtp-dev')
-      .replace(/^# (SMTP_DEV_HOST=.*)$/m, '$1')
-      .replace(/^# (SMTP_DEV_PORT=.*)$/m, '$1');
-  }
-  if (supports.execStub) text = text.replace(/^# (JUDGE0_MODE=stub)$/m, '$1');
-  // Anything still marked change-me would stop the API or ship a known value: refuse instead.
-  const left = [...text.matchAll(/^([A-Za-z0-9_]+)=.*change-me/gm)].map((m) => m[1]);
-  if (left.length > 0) throw new Error(`no local value is known for: ${left.join(', ')}`);
-  return text;
+  return values;
 }
 
 /**
- * The lines to append to an existing .env (pure apart from randomness): for every key that
- * .env.example still marks `change-me`, that has a generator here, is independent of other values
- * and is NOT defined in `existing` (commented out or absent), a fresh random value. Keys that
- * `existing` already defines, even with an empty or placeholder value, are never touched.
- * Returns { keys, text }; `text` is '' when nothing is missing.
+ * The lines to append to an existing .env (pure apart from randomness): a fresh random value for every
+ * key that .env.example still marks `change-me`, that is in INDEPENDENT (an allowlist: nothing else is
+ * ever appended) and that `existing` does not define. A key counts as defined for `KEY=`, `export
+ * KEY=`, ` KEY =` and any value, even an empty or placeholder one; only a commented-out line does not.
+ * Returns { keys, text, unknown }: `text` is '' when nothing is missing; `unknown` names the
+ * `change-me` keys of the example that have no independent generator (the script cannot fill them).
  */
 export function topUpLocalEnv(example, existing) {
-  const generated = parseGenerated(buildLocalEnv(example));
+  const generated = generatedValues();
   const wanted = [...example.matchAll(/^([A-Za-z0-9_]+)=.*change-me/gm)].map((m) => m[1]);
-  const defined = new Set([...existing.matchAll(/^([A-Za-z0-9_]+)=/gm)].map((m) => m[1]));
-  const keys = wanted.filter((k) => !COUPLED.has(k) && !defined.has(k) && k in generated);
-  if (keys.length === 0) return { keys, text: '' };
+  const defined = new Set(
+    [...existing.matchAll(/^\s*(?:export\s+)?([A-Za-z0-9_]+)\s*=/gm)].map((m) => m[1]),
+  );
+  const keys = wanted.filter((k) => INDEPENDENT.includes(k) && !defined.has(k));
+  const unknown = wanted.filter(
+    (k) => !INDEPENDENT.includes(k) && !COUPLED.has(k) && !defined.has(k),
+  );
+  if (keys.length === 0) return { keys, text: '', unknown };
   const lead = existing === '' || existing.endsWith('\n') ? '' : '\n';
   const block = [
     '# --- appended by `node infra/scripts/local-env.mjs --top-up`: secrets added to .env.example later ---',
     ...keys.map((k) => `${k}=${generated[k]}`),
     '',
   ].join('\n');
-  return { keys, text: `${lead}${block}` };
-}
-
-function parseGenerated(text) {
-  const out = {};
-  for (const m of text.matchAll(/^([A-Za-z0-9_]+)=(.*)$/gm)) out[m[1]] = m[2];
-  return out;
+  return { keys, text: `${lead}${block}`, unknown };
 }
 
 /** The face-match worker's local settings (apps/worker/tools/be08/run-local.sh): a fresh signing key per machine. */
@@ -178,18 +196,32 @@ function main() {
       console.error(`${NAME}: --top-up needs an existing .env; run without it to write one.`);
       process.exit(1);
     }
-    const { keys, text } = topUpLocalEnv(
-      readFileSync(examplePath, 'utf8'),
-      readFileSync(envPath, 'utf8'),
-    );
-    if (keys.length === 0) {
-      console.log('.env has every secret .env.example asks for; nothing appended.');
-      return;
+    try {
+      const existing = readFileSync(envPath, 'utf8');
+      // Local development only (ADR 0009): never write into an .env that is not one.
+      if (!/^\s*APP_ENV\s*=\s*development\s*$/m.test(existing)) {
+        console.error(
+          `${NAME}: .env does not say APP_ENV=development; --top-up is for a local run only.`,
+        );
+        process.exit(1);
+      }
+      const { keys, text, unknown } = topUpLocalEnv(readFileSync(examplePath, 'utf8'), existing);
+      if (unknown.length > 0)
+        console.error(
+          `${NAME}: warning: .env.example asks for ${unknown.join(', ')} and this script has no local value for it; set it by hand.`,
+        );
+      if (keys.length === 0) {
+        console.log('.env has every secret this script can generate; nothing appended.');
+        return;
+      }
+      appendFileSync(envPath, text, { mode: 0o600 });
+      console.log(
+        `appended ${keys.length} missing secret(s) to .env: ${keys.join(', ')} (existing values untouched).`,
+      );
+    } catch (error) {
+      console.error(`${NAME}: ${error instanceof Error ? error.message : 'failed.'}`);
+      process.exit(1);
     }
-    appendFileSync(envPath, text);
-    console.log(
-      `appended ${keys.length} missing secret(s) to .env: ${keys.join(', ')} (existing values untouched).`,
-    );
     return;
   }
   if (existsSync(envPath)) {

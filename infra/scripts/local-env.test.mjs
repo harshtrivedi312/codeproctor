@@ -17,7 +17,7 @@ import { parseEnv } from 'node:util';
 import { after, before, describe, it } from 'node:test';
 import { findProblems } from './local-db-guard.mjs';
 import { REPO_ROOT } from './test-support.mjs';
-import { buildLocalEnv, detectSupport, topUpLocalEnv } from './local-env.mjs';
+import { COUPLED, INDEPENDENT, buildLocalEnv, detectSupport, topUpLocalEnv } from './local-env.mjs';
 
 const SCRIPT = `${REPO_ROOT}infra/scripts/local-env.mjs`;
 
@@ -193,15 +193,40 @@ describe('local-env --top-up (an .env written before a secret was added)', () =>
   });
 
   it('never appends a coupled value (database or object-store passwords) or a key that is already defined', () => {
-    const example = withKey(exampleOf());
-    const old = buildLocalEnv(exampleOf())
-      .replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '')
-      .replace(/^POSTGRES_PASSWORD=.*\n?/gm, '')
-      .replace(/^MINIO_ROOT_PASSWORD=.*\n?/gm, '')
-      .replace(/^OTP_PEPPER=.*$/m, 'OTP_PEPPER=');
-    const r = topUpLocalEnv(example, old);
+    // Every coupled key removed from the old file: none may come back, only the independent one.
+    let old = buildLocalEnv(exampleOf());
+    for (const k of [...COUPLED, 'QUESTION_OPTION_ID_SECRET'])
+      old = old.replace(new RegExp(`^${k}=.*\\n?`, 'gm'), '');
+    old = old.replace(/^OTP_PEPPER=.*$/m, 'OTP_PEPPER=');
+    const r = topUpLocalEnv(withKey(exampleOf()), old);
     assert.deepEqual(r.keys, ['QUESTION_OPTION_ID_SECRET'], 'an empty OTP_PEPPER is still defined');
-    assert.doesNotMatch(r.text, /POSTGRES_PASSWORD|MINIO_ROOT_PASSWORD|OTP_PEPPER/);
+    for (const k of [...COUPLED, 'OTP_PEPPER']) assert.doesNotMatch(r.text, new RegExp(k));
+  });
+
+  it('a key is defined for `export KEY=`, leading space and spaces around `=`; a commented-out line is not', () => {
+    const base = buildLocalEnv(exampleOf());
+    const without = base.replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '');
+    const example = withKey(exampleOf());
+    for (const line of [
+      'export QUESTION_OPTION_ID_SECRET=mine',
+      '  QUESTION_OPTION_ID_SECRET=mine',
+      'QUESTION_OPTION_ID_SECRET = mine',
+    ]) {
+      assert.deepEqual(topUpLocalEnv(example, `${without}\n${line}\n`).keys, [], line);
+    }
+    assert.deepEqual(topUpLocalEnv(example, `${without}\n# QUESTION_OPTION_ID_SECRET=old\n`).keys, [
+      'QUESTION_OPTION_ID_SECRET',
+    ]);
+  });
+
+  it('only the allowlist is ever appended, and a change-me key without a generator is reported, not thrown', () => {
+    const example = `${withKey(exampleOf())}\nBRAND_NEW_SECRET=change-me-x\n`;
+    const old = buildLocalEnv(exampleOf()).replace(/^QUESTION_OPTION_ID_SECRET=.*\n?/gm, '');
+    const r = topUpLocalEnv(example, old);
+    assert.deepEqual(r.keys, ['QUESTION_OPTION_ID_SECRET']);
+    assert.deepEqual(r.unknown, ['BRAND_NEW_SECRET']);
+    assert.ok(r.keys.every((k) => INDEPENDENT.includes(k)));
+    assert.equal(INDEPENDENT.filter((k) => COUPLED.has(k)).length, 0);
   });
 
   it('adds a newline first when the old file did not end with one', () => {
@@ -236,6 +261,12 @@ describe('local-env --top-up (an .env written before a secret was added)', () =>
       assert.equal(second.status, 0);
       assert.match(second.stdout, /nothing appended/);
       assert.equal(readFileSync(join(dir, '.env'), 'utf8'), merged);
+      // an .env that is not a development one is not touched
+      writeFileSync(join(dir, '.env'), 'APP_ENV=staging\n');
+      const notDev = run();
+      assert.equal(notDev.status, 1);
+      assert.match(notDev.stderr, /APP_ENV=development/);
+      assert.equal(readFileSync(join(dir, '.env'), 'utf8'), 'APP_ENV=staging\n');
       // without an .env it refuses instead of writing one
       rmSync(join(dir, '.env'));
       const none = run();
