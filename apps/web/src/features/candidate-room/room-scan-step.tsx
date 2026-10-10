@@ -24,6 +24,9 @@ type Mode = 'rotate' | 'stationary';
 const MAX_SEND_ATTEMPTS = 3;
 /** How many times a taken seq number is skipped before giving up. */
 const MAX_SEQ_ADVANCES = 8;
+/** Confirm retries after a 503 (the check could not be queued; the chunk is stored). */
+const CONFIRM_503_RETRIES = 3;
+const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export const ROOM_COPY = {
   intro:
@@ -236,7 +239,23 @@ export function RoomScanStep({
           conflicts += 1;
           continue;
         }
-        const confirm = await candidateApi.confirmMedia(ref);
+        let confirm = await candidateApi.confirmMedia(ref);
+        // 503 + Retry-After: the chunk is stored but the check could not be queued. The same
+        // confirm recovers it, so retry in place (bounded) instead of uploading the clip again.
+        for (
+          let wait = 0;
+          wait < CONFIRM_503_RETRIES &&
+          !confirm.ok &&
+          confirm.kind === 'problem' &&
+          confirm.status === 503;
+          wait += 1
+        ) {
+          const seconds = Math.min(Math.max(confirm.retryAfterSeconds ?? 2, 1), 15);
+          await (deps.sleep ?? defaultSleep)(seconds * 1000);
+          if (!mountedRef.current) return;
+          confirm = await candidateApi.confirmMedia(ref);
+          if (!mountedRef.current) return;
+        }
         if (!mountedRef.current) return;
         if (confirm.ok) {
           advanceRoomSeq();
@@ -250,6 +269,11 @@ export function RoomScanStep({
         if (confirm.kind === 'problem' && confirm.status === 401) {
           onSessionEnded();
           return;
+        }
+        if (confirm.kind === 'problem' && confirm.status === 503) {
+          message =
+            'The service is busy and could not take your recording yet. Wait a minute, then press "Send this recording" again.';
+          break;
         }
         // 409 UPLOAD_NOT_FOUND and 422 UPLOAD_MISMATCH: ask for a new URL and upload again.
         if (confirm.kind === 'problem' && (confirm.status === 409 || confirm.status === 422)) {
