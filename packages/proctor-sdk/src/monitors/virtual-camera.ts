@@ -39,15 +39,19 @@ export type VirtualCameraCheck =
   | { kind: 'LABELS_HIDDEN' }
   | { kind: 'UNSUPPORTED' };
 
-export async function checkVirtualCamera(
-  media: Pick<MediaDevices, 'enumerateDevices'> | undefined,
-): Promise<VirtualCameraCheck> {
-  if (!media || typeof media.enumerateDevices !== 'function') return { kind: 'UNSUPPORTED' };
-  const devices = await media.enumerateDevices();
+/** The pure part: classify an already enumerated device list. */
+export function classifyCameras(devices: readonly DeviceLike[]): VirtualCameraCheck {
   const cams = devices.filter((d) => d.kind === 'videoinput');
   if (cams.length > 0 && cams.every((d) => d.label === '')) return { kind: 'LABELS_HIDDEN' };
   const label = findVirtualCamera(cams);
   return label ? { kind: 'VIRTUAL', label } : { kind: 'CLEAN' };
+}
+
+export async function checkVirtualCamera(
+  media: Pick<MediaDevices, 'enumerateDevices'> | undefined,
+): Promise<VirtualCameraCheck> {
+  if (!media || typeof media.enumerateDevices !== 'function') return { kind: 'UNSUPPORTED' };
+  return classifyCameras(await media.enumerateDevices());
 }
 
 /**
