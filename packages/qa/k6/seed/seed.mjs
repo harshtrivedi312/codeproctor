@@ -52,7 +52,7 @@ function plan(cfg, runId) {
           `manifest        ${cfg.manifest ?? 'n/a'}`,
           `rate            ${cfg.rps} req/s, ${cfg.concurrency} candidates in parallel`,
           'per candidate   invite -> mail token + OTP -> start -> consent -> system check -> room scan -> start test',
-          '                (identity waived by the invitation; proctor-key is left uncalled for k6)',
+          '                (identity: gated, --identity; proctor-key is left uncalled for k6)',
         ]),
     `routes          ${Object.keys(ROUTES).length} (see lib/routes.mjs; ASSUMED ones are marked there)`,
   ].join('\n');

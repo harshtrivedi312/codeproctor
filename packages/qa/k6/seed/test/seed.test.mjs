@@ -97,7 +97,7 @@ test('TC-090 seed: happy path writes k6 sessions (0600) and leaves proctor-key u
   }
 });
 
-test('TC-090 seed: waiver, consent age confirmation and state order are sent', async () => {
+test('TC-090 seed: the steps run in state order, from the invitation to the test start', async () => {
   const m = await startMock();
   const dir = tmp();
   try {
@@ -769,6 +769,73 @@ test('TC-094 seed: a custom --manifest name needs SEED_OUT to clean up, and says
     const ok = await run(['--cleanup', '--run-id', runId, '--manifest', custom], env);
     assert.equal(ok.code, 0, ok.all);
     assert.ok(!fs.existsSync(env.SEED_OUT));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: the invitation carries only candidate{email,name}, windowStart and windowEnd (FR-303, one per request)', async () => {
+  const m = await startMock();
+  const dir = tmp();
+  try {
+    const r = await run(['--count', '2'], envFor(m, dir));
+    assert.equal(r.code, 0, r.all);
+    const posts = m.st.invites ?? [];
+    assert.equal(posts.length, 2);
+    for (const b of posts) {
+      assert.deepEqual(Object.keys(b).sort(), ['candidate', 'windowEnd', 'windowStart']);
+      assert.deepEqual(Object.keys(b.candidate).sort(), ['email', 'name']);
+      const t0 = Date.parse(b.windowStart);
+      const t1 = Date.parse(b.windowEnd);
+      assert.ok(t0 >= Date.now() - 5 * 60_000 && t1 > t0 && t1 - t0 <= 7 * 24 * 3600_000);
+    }
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: an invitation whose mail was not queued stops that candidate with a named error', async () => {
+  const m = await startMock({ mailOutcome: 'failed' });
+  const dir = tmp();
+  try {
+    const r = await run(['--count', '1'], envFor(m, dir));
+    assert.equal(r.code, 1);
+    assert.match(r.err, /invite: mail was not queued \(failed\)/);
+    assert.ok(!fs.existsSync(path.join(dir, 'sessions.json')));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: the mock refuses what the real invitation DTO refuses (extra field, newline in the name, past window)', async () => {
+  const m = await startMock();
+  try {
+    const login = await fetch(`${m.url}/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: MOCK.email, password: MOCK.password }),
+    });
+    const cookieless = await login.json();
+    const token = cookieless.session?.accessToken ?? cookieless.accessToken;
+    const post = (b) =>
+      fetch(`${m.url}/tests/${MOCK.testId}/invitations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(b),
+      });
+    const now = Date.now();
+    const ok = {
+      candidate: { email: 'a-b.1@example.test', name: 'K6SEED x 001' },
+      windowStart: new Date(now - 60_000).toISOString(),
+      windowEnd: new Date(now + 3600_000).toISOString(),
+    };
+    assert.equal((await post(ok)).status, 201);
+    assert.equal((await post({ ...ok, accommodations: {} })).status, 400);
+    assert.equal((await post({ ...ok, candidate: { ...ok.candidate, name: 'a\nb' } })).status, 400);
+    assert.equal(
+      (await post({ ...ok, windowStart: new Date(now - 10 * 60_000).toISOString() })).status,
+      400,
+    );
   } finally {
     await m.close();
   }

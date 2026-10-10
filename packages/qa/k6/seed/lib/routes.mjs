@@ -2,13 +2,13 @@
 //
 // Marker: REAL = checked against apps/api on main (candidate-auth.controller.ts,
 // candidate-session.controller.ts, dto/candidate.dto.ts). DOC = pinned by FSD section 4 or an ADR
-// but not implemented on main yet. ASSUMED = not pinned anywhere (staff invite body, erasure).
+// but not implemented on main yet. ASSUMED = not pinned anywhere (erasure).
 // AVAILABLE says which candidate steps exist on main; a step that is not available fails the seed
 // with a named "not available on main yet" error instead of guessing a route.
 export const ROUTES = {
   login: '/auth/login', // REAL (apps/api/src/auth); body { email, password } -> { status, session?, challengeToken? }
   verify2fa: '/auth/2fa/verify', // REAL; body { challengeToken, code } -> { accessToken, user }
-  invite: (testId) => `/tests/${testId}/invitations`, // DOC path; ASSUMED single-invite body below
+  invite: (testId) => `/tests/${testId}/invitations`, // REAL path and body (inviteBody below)
   erase: (candidateId) => `/candidates/${encodeURIComponent(candidateId)}/erasure`, // ASSUMED (TC-094, ADR 0004 R-6: no route in fsd 4)
   // REAL, public, no token. Body { invitationToken } -> 200 { state, ... }; sends nothing (TC-021).
   link: '/candidate/session/link',
@@ -32,26 +32,25 @@ export const ROUTES = {
 // Mutable on purpose: the tests switch a step on to exercise the code behind it against the mock.
 export const AVAILABLE = {
   systemCheck: false,
-  roomScan: false, // presign, upload, confirm; identity is waived by the invitation (C-25, ADR 0015)
+  roomScan: false, // presign, upload, confirm; identity is a separate step (not waivable through the invitation API)
   identity: false, // --identity: the identity step with generated synthetic assets (ADR 0013 5.5)
 };
 
 export const UNAVAILABLE_MESSAGE = (what) =>
   `${what}: not available on main yet (route missing in apps/api); seeding stops here.`;
 
-// ASSUMED shape; ADR 0015 (Proposed) puts the waiver under accommodations.identityCheckWaiver.
-export function inviteBody({ name, email, runId, now = new Date() }) {
+// REAL (apps/api/src/invitations/dto/invitations.dto.ts): exactly { candidate: { email, name }, windowStart,
+// windowEnd }. Any other field is a 400 (whitelist plus forbidNonWhitelisted). windowStart may be at most
+// 5 minutes before the server time, the window at most INVITATION_MAX_WINDOW_DAYS (7) long, both ISO 8601
+// with a UTC offset. One invitation per request: there is no bulk route. The response is
+// { id, testId, candidateId, status, windowStart, windowEnd, createdAt, mail: { outcome } } with outcome
+// 'queued' | 'failed' | 'disabled'; there is no session id (the session is created with the invitation).
+export function inviteBody({ name, email, now = new Date() }) {
+  const start = new Date(now.getTime() - 60_000);
   return {
-    candidateName: name,
-    candidateEmail: email,
-    windowStart: new Date(now.getTime() - 60_000).toISOString(),
-    windowEnd: new Date(now.getTime() + 24 * 3600_000).toISOString(),
-    accommodations: {
-      identityCheckWaiver: {
-        reasonCode: 'OTHER',
-        reasonNote: `Synthetic load-test candidate (${runId}). No real person.`,
-      },
-    },
+    candidate: { email, name },
+    windowStart: start.toISOString(),
+    windowEnd: new Date(start.getTime() + 24 * 3600_000).toISOString(),
   };
 }
 

@@ -4,7 +4,9 @@
 // on a reserved domain only. Message bodies are parsed in memory and never logged.
 import { SeedError } from './redact.mjs';
 
-export const DEFAULT_LINK_RE = '/(?:invite|i|start)/([A-Za-z0-9_-]{32,})'; // ASSUMED link format
+// REAL: the invitation email links to `<web origin>/t#<token>` (invitations.service.ts INVITE_PATH), the token is
+// 32 random bytes in base64url (43 characters, newOpaqueToken).
+export const DEFAULT_LINK_RE = '/t#([A-Za-z0-9_-]{32,})';
 export const OTP_RE = /(?<![\d])(\d{6})(?![\d])/;
 
 export function createMailpitSource({
