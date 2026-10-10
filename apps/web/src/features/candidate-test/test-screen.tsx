@@ -233,8 +233,11 @@ export function TestScreen({
       if (finishedSection.next) {
         queryClient.setQueryData(['candidate-session'], finishedSection.next);
       } else if (finishedSection.pending) {
-        // The close was accepted; the next section opens when the server's job runs.
-        const fresh = await source.readSession();
+        // The close was accepted; the next section opens when the server's job runs. After the last
+        // section there is none: only the state is read (its questions are closed).
+        const fresh = await source.readSession({
+          stateOnly: current.section.position === current.section.totalSections,
+        });
         if (fresh && 'submitted' in fresh) {
           setFinishedSection({ ...finishedSection, submitted: true, pending: false });
         } else if (fresh && fresh.section.id !== finishedSection.sectionId) {
@@ -328,6 +331,7 @@ function TestScreenInner({
   const [finishError, setFinishError] = React.useState<string | null>(null);
   const [resetOpen, setResetOpen] = React.useState(false);
 
+  const runGate = React.useRef(false);
   const [running, setRunning] = React.useState(false);
   const [lastRunAt, setLastRunAt] = React.useState<number | null>(null);
   const [now, setNow] = React.useState(0);
@@ -557,6 +561,9 @@ function TestScreenInner({
   };
 
   const run = async () => {
+    // Quick clicks in the same tick all see the old render: the gate is a ref, set at once.
+    if (runGate.current) return;
+    runGate.current = true;
     const questionId = question.id;
     const started = performance.now(); // monotonic: the OS clock cannot shorten the cooldown
     setLastRunAt(started);
@@ -578,6 +585,7 @@ function TestScreenInner({
     } catch {
       fail('The run could not finish. Check your connection and press Run again.');
     } finally {
+      runGate.current = false;
       setRunning(false);
       setRunningId(null);
     }
@@ -651,7 +659,7 @@ function TestScreenInner({
         if (outcome.acceptedOnly) {
           // Accepted (202): finished for good. The server does not say what is next, so look: the
           // next open section, the end of the test, or "not open yet" (the candidate re-checks).
-          const fresh = await source.readSession();
+          const fresh = await source.readSession({ stateOnly: isLastSection });
           if (fresh && 'submitted' in fresh) markFinished(null, undefined, true);
           else if (fresh && fresh.section.id !== section.id) markFinished(fresh.section.id, fresh);
           else markFinished(null, undefined, false, true);
@@ -772,9 +780,11 @@ function TestScreenInner({
         </p>
       )}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(320px,2fr)_3fr]">
+      {/* Below lg the two panes stack: the page scrolls and each pane keeps a usable height (small
+          laptops, 800x600), instead of the question being squeezed to a strip. */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(320px,2fr)_3fr] lg:overflow-visible">
         <aside
-          className="flex min-h-0 flex-col border-b lg:border-b-0 lg:border-r"
+          className="flex min-h-72 flex-col border-b lg:min-h-0 lg:border-b-0 lg:border-r"
           aria-label="Question"
         >
           <nav aria-label="Questions in this section" className="flex flex-wrap gap-2 border-b p-3">
