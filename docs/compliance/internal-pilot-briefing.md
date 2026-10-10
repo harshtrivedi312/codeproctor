@@ -19,7 +19,7 @@ We are trying out our own proctored coding test, CodeProctor, on ourselves befor
 - Your typing in the code editor (timing, pastes and how your code changes).
 - Browser events such as leaving full-screen, switching windows, pasting and sharing your screen.
 
-Please do not show anything private on your screen, and take the test alone in a quiet room, because the microphone and camera will pick up whatever is around you. If you would rather not use your own ID, say so before the day and we will discuss it.
+Please do not show anything private on your screen, and take the test alone in a quiet room, because the microphone and camera will pick up whatever is around you. If you are not comfortable with any of this, you can simply decline; there is no alternative way to take part.
 
 ## Who sees it, and where it lives
 
