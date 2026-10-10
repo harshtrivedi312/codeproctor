@@ -326,27 +326,44 @@ describe('room scan step (FR-404, TC-035)', () => {
     expect(seen.filter((r) => r.url.endsWith('/media/presign'))).toHaveLength(1);
   });
 
-  it('FR-404: confirm that keeps answering 503 gives up after a few tries and keeps the recording', async () => {
+  it('FR-404 TC-035 D-61: confirm that keeps answering 503 stops after the retries, offers Try again, and never uploads a second clip', async () => {
     await signIn();
+    let confirms = 0;
+    let failing = true;
+    const seen = recordRequests();
     server.use(
-      http.post(`${apiBaseUrl}/v1/candidate/session/media/confirm`, () =>
-        HttpResponse.json({ code: 'SERVICE_UNAVAILABLE' }, { status: 503 }),
-      ),
+      http.post(`${apiBaseUrl}/v1/candidate/session/media/confirm`, () => {
+        confirms += 1;
+        return failing
+          ? HttpResponse.json({ code: 'SERVICE_UNAVAILABLE' }, { status: 503 })
+          : HttpResponse.json({ uploaded: true, sizeBytes: 5 });
+      }),
     );
     const { deps } = fakeRoomDeps();
+    const sleep = vi.fn(() => Promise.resolve());
+    const onDone = vi.fn();
     const user = userEvent.setup();
     renderWithQuery(
-      <RoomScanStep
-        deps={{ ...deps, sleep: () => Promise.resolve() }}
-        onDone={vi.fn()}
-        onSessionEnded={vi.fn()}
-      />,
+      <RoomScanStep deps={{ ...deps, sleep }} onDone={onDone} onSessionEnded={vi.fn()} />,
     );
     await recordRotation(user);
     await user.click(await screen.findByRole('button', { name: /send this recording/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/service is busy/i);
-    expect(screen.getByRole('button', { name: /send this recording/i })).toBeEnabled();
+    // 1 confirm plus 3 retries, each retry after the 2 s fallback wait.
+    expect(confirms).toBe(4);
+    expect(sleep).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledWith(2000);
+    // The stored clip keeps its number and cannot be replaced by a new recording.
+    expect(currentRoomSeq()).toBe(0);
+    expect(screen.queryByRole('button', { name: /record again/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId('room-done')).not.toBeInTheDocument();
+    // Try again confirms the SAME chunk: no presign, no upload.
+    failing = false;
+    await user.click(screen.getByRole('button', { name: /try again/i }));
+    expect(await screen.findByTestId('room-done')).toBeInTheDocument();
+    expect(seen.filter((r) => r.url.endsWith('/media/presign'))).toHaveLength(1);
+    expect(confirms).toBe(5);
+    expect(currentRoomSeq()).toBe(1);
   });
 
   it('FR-404: a double click on send uploads once', async () => {

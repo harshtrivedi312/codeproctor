@@ -162,6 +162,10 @@ export function RoomScanStep({
     }
   }
 
+  // The number of a stored clip whose confirm answered 503 more often than we retry.
+  const pendingConfirmSeq = React.useRef<number | null>(null);
+  const [confirmOnly, setConfirmOnly] = React.useState(false);
+
   function discard(): void {
     if (clipRef.current?.url) URL.revokeObjectURL(clipRef.current.url);
     clipRef.current = null;
@@ -184,60 +188,67 @@ export function RoomScanStep({
         setPhase('review');
         return;
       }
-      let seq = currentRoomSeq();
+      // After a confirm 503 that ran out of retries the chunk is stored: only its confirm is
+      // sent again, under the same number, and never a new upload (a second clip for a reviewer).
+      let seq = pendingConfirmSeq.current ?? currentRoomSeq();
+      let skipUpload = pendingConfirmSeq.current !== null;
       let tries = 0;
       let conflicts = 0;
       let message: string | null = null;
       while (tries < MAX_SEND_ATTEMPTS && conflicts < MAX_SEQ_ADVANCES) {
         const ref = { stream: 'ROOM_SCAN', segment: seq, seq } as const;
-        const presign = await candidateApi.presignMedia({
-          ...ref,
-          bytes: blob.size,
-          contentType: 'video/webm',
-          startedAt: startedAt.toISOString(),
-          durationMs,
-        });
-        if (!mountedRef.current) return;
-        if (!presign.ok) {
-          if (presign.kind !== 'problem') break;
-          if (presign.status === 401) {
-            onSessionEnded();
-            return;
+        if (skipUpload) {
+          skipUpload = false;
+        } else {
+          const presign = await candidateApi.presignMedia({
+            ...ref,
+            bytes: blob.size,
+            contentType: 'video/webm',
+            startedAt: startedAt.toISOString(),
+            durationMs,
+          });
+          if (!mountedRef.current) return;
+          if (!presign.ok) {
+            if (presign.kind !== 'problem') break;
+            if (presign.status === 401) {
+              onSessionEnded();
+              return;
+            }
+            if (presign.status === 409 && presign.code === 'SEQ_CONFLICT') {
+              // This number is taken by another clip: use the next one.
+              seq = advanceRoomSeq();
+              conflicts += 1;
+              continue;
+            }
+            if (presign.status === 409 && presign.code === 'SESSION_NOT_ACTIVE') {
+              message =
+                'Your session is no longer active, so the recording cannot be sent. Open the link from your invitation email again.';
+            } else if (presign.status === 429) {
+              message = `Too many tries in a row. Wait ${presign.retryAfterSeconds ?? 60} seconds, then press "Send this recording" again.`;
+            }
+            break;
           }
-          if (presign.status === 409 && presign.code === 'SEQ_CONFLICT') {
-            // This number is taken by another clip: use the next one.
+          if ('alreadyUploaded' in presign.data) {
+            // Only a confirmed chunk answers this way, and this component never leaves one
+            // unconfirmed unless it finished. So the number belongs to an older clip: use a fresh one.
             seq = advanceRoomSeq();
             conflicts += 1;
             continue;
           }
-          if (presign.status === 409 && presign.code === 'SESSION_NOT_ACTIVE') {
-            message =
-              'Your session is no longer active, so the recording cannot be sent. Open the link from your invitation email again.';
-          } else if (presign.status === 429) {
-            message = `Too many tries in a row. Wait ${presign.retryAfterSeconds ?? 60} seconds, then press "Send this recording" again.`;
+          const priorPut = attemptedSeqs.current.has(seq);
+          const outcome = await deps.upload(presign.data.url, presign.data.headers, blob);
+          if (!mountedRef.current) return;
+          attemptedSeqs.current.add(seq);
+          if (outcome === 'failed') {
+            tries += 1;
+            continue;
           }
-          break;
-        }
-        if ('alreadyUploaded' in presign.data) {
-          // Only a confirmed chunk answers this way, and this component never leaves one
-          // unconfirmed unless it finished. So the number belongs to an older clip: use a fresh one.
-          seq = advanceRoomSeq();
-          conflicts += 1;
-          continue;
-        }
-        const priorPut = attemptedSeqs.current.has(seq);
-        const outcome = await deps.upload(presign.data.url, presign.data.headers, blob);
-        if (!mountedRef.current) return;
-        attemptedSeqs.current.add(seq);
-        if (outcome === 'failed') {
-          tries += 1;
-          continue;
-        }
-        if (outcome === 'exists' && !priorPut) {
-          // A 412 on our first PUT of this number: the stored object is not ours.
-          seq = advanceRoomSeq();
-          conflicts += 1;
-          continue;
+          if (outcome === 'exists' && !priorPut) {
+            // A 412 on our first PUT of this number: the stored object is not ours.
+            seq = advanceRoomSeq();
+            conflicts += 1;
+            continue;
+          }
         }
         let confirm = await candidateApi.confirmMedia(ref);
         // 503 + Retry-After: the chunk is stored but the check could not be queued. The same
@@ -258,6 +269,8 @@ export function RoomScanStep({
         }
         if (!mountedRef.current) return;
         if (confirm.ok) {
+          pendingConfirmSeq.current = null;
+          setConfirmOnly(false);
           advanceRoomSeq();
           attemptedSeqs.current.clear();
           if (clipRef.current?.url) URL.revokeObjectURL(clipRef.current.url);
@@ -271,20 +284,32 @@ export function RoomScanStep({
           return;
         }
         if (confirm.kind === 'problem' && confirm.status === 503) {
+          // Stored but not confirmed: keep its number and confirm it again, never upload again.
+          pendingConfirmSeq.current = seq;
+          setConfirmOnly(true);
           message =
-            'The service is busy and could not take your recording yet. Wait a minute, then press "Send this recording" again.';
+            'The service is busy and could not take your recording yet. Wait a minute, then press "Try again". Your recording is already stored and is not sent twice.';
           break;
         }
         // 409 UPLOAD_NOT_FOUND and 422 UPLOAD_MISMATCH: ask for a new URL and upload again.
         if (confirm.kind === 'problem' && (confirm.status === 409 || confirm.status === 422)) {
+          if (pendingConfirmSeq.current !== null) {
+            // The stored chunk is gone: only now is a new upload the right thing.
+            pendingConfirmSeq.current = null;
+            setConfirmOnly(false);
+            seq = advanceRoomSeq();
+          }
           tries += 1;
           continue;
         }
         break;
       }
-      // A failed clip never keeps its number: the next try (or a re-record) starts fresh.
-      advanceRoomSeq();
-      attemptedSeqs.current.clear();
+      // A failed clip never keeps its number: the next try (or a re-record) starts fresh. The one
+      // exception is a stored clip waiting for its confirm (above).
+      if (pendingConfirmSeq.current === null) {
+        advanceRoomSeq();
+        attemptedSeqs.current.clear();
+      }
       if (conflicts >= MAX_SEQ_ADVANCES) {
         message =
           'We could not find a free place for the recording. Press "Send this recording" again.';
@@ -434,17 +459,23 @@ export function RoomScanStep({
               disabled={phase === 'sending'}
               onClick={() => void send()}
             >
-              {phase === 'sending' ? 'Sending...' : 'Send this recording'}
+              {phase === 'sending'
+                ? 'Sending...'
+                : confirmOnly
+                  ? 'Try again'
+                  : 'Send this recording'}
             </Button>
-            <Button
-              size="lg"
-              variant="outline"
-              className="min-h-11"
-              disabled={phase === 'sending'}
-              onClick={discard}
-            >
-              Record again
-            </Button>
+            {confirmOnly ? null : (
+              <Button
+                size="lg"
+                variant="outline"
+                className="min-h-11"
+                disabled={phase === 'sending'}
+                onClick={discard}
+              >
+                Record again
+              </Button>
+            )}
           </div>
         </div>
       ) : null}
