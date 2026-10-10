@@ -2582,45 +2582,63 @@ describe('Staff authentication (FR-101, FR-102, FR-104, FR-107)', () => {
       });
 
       it('TC-003, FR-104: a TOTP sign-in whose family commits before a disable but finishes after it gets an access token the guard refuses (held, same-second race)', async () => {
-        const u = await createUser({ totp: SECRET });
-        const { challengeToken } = (await login(u.email).expect(200)).body as Body;
-        const code = authenticator.clone({ epoch: Date.now() - 30_000 }).generate(SECRET);
-        // Hold the sign-in right after its refresh family committed (clearFailures runs next).
-        let release: () => void = () => undefined;
-        const gate = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        let reached: () => void = () => undefined;
-        const atGate = new Promise<void>((resolve) => {
-          reached = resolve;
-        });
+        // The held sign-in must reach clearFailures. On a loaded CI runner the verify itself can
+        // answer 503 BUSY first (the gate is then never reached and the test hung for 120 s), so
+        // the wait for the gate races the sign-in's own answer and the attempt is retried.
         const target = authService as unknown as {
           clearFailures: (...args: unknown[]) => Promise<void>;
         };
         const real = target.clearFailures.bind(authService);
-        const hold = jest
-          .spyOn(target, 'clearFailures')
-          .mockImplementationOnce(async (...args: unknown[]) => {
-            reached();
-            await gate;
-            return real(...args);
+        let u: Awaited<ReturnType<typeof createUser>> | undefined;
+        let signIn: Promise<request.Response> | undefined;
+        for (let attempt = 0; attempt < 3 && signIn === undefined; attempt += 1) {
+          const candidate = await createUser({ totp: SECRET });
+          const { challengeToken } = (await login(candidate.email).expect(200)).body as Body;
+          const code = authenticator.clone({ epoch: Date.now() - 30_000 }).generate(SECRET);
+          // Hold the sign-in right after its refresh family committed (clearFailures runs next).
+          let release: () => void = () => undefined;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
           });
-        let signIn: Promise<request.Response>;
-        try {
-          signIn = Promise.resolve(post('2fa/verify', null, { challengeToken, code }));
-          await atGate;
-          // The disable commits while the sign-in is held.
-          await post('2fa/disable', await accessFor(u.id), {
-            currentPassword: PASSWORD,
-            totpCode: goodCode(),
-          }).expect(204);
-          // Let the clock pass the marker's second before the sign-in finishes: with the access
-          // token signed before the family commits the token is still refused, with the old order
-          // (signed after) it would carry a later iat and be accepted.
-          await pastMarker(u.id);
-          release();
-        } finally {
-          hold.mockRestore();
+          let reached: () => void = () => undefined;
+          const atGate = new Promise<'gate'>((resolve) => {
+            reached = () => resolve('gate');
+          });
+          const hold = jest
+            .spyOn(target, 'clearFailures')
+            .mockImplementationOnce(async (...args: unknown[]) => {
+              reached();
+              await gate;
+              return real(...args);
+            });
+          try {
+            const attemptSignIn = Promise.resolve(
+              post('2fa/verify', null, { challengeToken, code }),
+            );
+            const first = await Promise.race([
+              atGate,
+              attemptSignIn.then(() => 'answered-first' as const),
+            ]);
+            if (first === 'answered-first') continue; // BUSY or similar under load: try again
+            u = candidate;
+            signIn = attemptSignIn;
+            // The disable commits while the sign-in is held.
+            await post('2fa/disable', await accessFor(candidate.id), {
+              currentPassword: PASSWORD,
+              totpCode: goodCode(),
+            }).expect(204);
+            // Let the clock pass the marker's second before the sign-in finishes: with the access
+            // token signed before the family commits the token is still refused, with the old
+            // order (signed after) it would carry a later iat and be accepted.
+            await pastMarker(candidate.id);
+            release();
+          } finally {
+            release();
+            hold.mockRestore();
+          }
+        }
+        if (signIn === undefined || u === undefined) {
+          throw new Error('the held sign-in never reached its gate in 3 attempts');
         }
         const done = await signIn;
         expect(done.status).toBe(200);

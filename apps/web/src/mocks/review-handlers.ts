@@ -77,7 +77,8 @@ function answers(pendingShort: boolean): Answer[] {
       score: 20,
       scoring: 'AUTO',
       scoringNote: null,
-      answer: { selectedOptionIds: ['o-2'] },
+      // The API stores { optionIds } (grading/answer-shapes.ts).
+      answer: { optionIds: ['o-2'] },
     },
     {
       sessionQuestionId: 'sq-3',
@@ -88,7 +89,9 @@ function answers(pendingShort: boolean): Answer[] {
       score: pendingShort ? null : 30,
       scoring: pendingShort ? 'MANUAL_PENDING' : 'AUTO',
       scoringNote: null,
-      answer: 'Calling it many times has the same effect on the server as calling it once.',
+      answer: {
+        text: 'Calling it many times has the same effect on the server as calling it once.',
+      },
     },
   ];
 }
@@ -345,13 +348,14 @@ export function createReviewHandlers(options: { latencyMs: number }) {
         } | null;
         if (!body || typeof body.correct !== 'boolean')
           return problem(400, 'correct must be a boolean');
-        if (b.verdict?.verdict)
+        // The API's check order: 404, then ANSWER_NOT_MANUAL, then the session status.
+        if (a.type !== 'SHORT_ANSWER' || a.scoring === 'AUTO') {
+          return problem(409, 'This answer is not scored by hand.', 'ANSWER_NOT_MANUAL');
+        }
+        if (b.verdict?.verdict || ['COMPLETED', 'APPEALED'].includes(b.session.status))
           return problem(409, 'A verdict is already set.', 'VERDICT_ALREADY_SET');
         if (b.session.status !== 'UNDER_REVIEW') {
           return problem(409, 'The session is not under review.', 'SESSION_NOT_UNDER_REVIEW');
-        }
-        if (a.type !== 'SHORT_ANSWER' || a.scoring === 'AUTO') {
-          return problem(409, 'This answer is not scored by hand.', 'ANSWER_NOT_MANUAL');
         }
         a.scoring = 'MANUAL';
         a.score = body.correct ? a.points : 0;
@@ -379,7 +383,7 @@ export function createReviewHandlers(options: { latencyMs: number }) {
       if (v !== 'CLEAN' && v !== 'SUSPICIOUS' && v !== 'VIOLATION') {
         return problem(400, 'verdict must be CLEAN, SUSPICIOUS or VIOLATION');
       }
-      if (b.verdict?.verdict)
+      if (b.verdict?.verdict || ['COMPLETED', 'APPEALED'].includes(b.session.status))
         return problem(409, 'A verdict is already set.', 'VERDICT_ALREADY_SET');
       if (b.session.status !== 'UNDER_REVIEW') {
         return problem(409, 'The session is not under review.', 'SESSION_NOT_UNDER_REVIEW');

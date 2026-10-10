@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildCsp, isCandidateTestPath, parseOrigins } from './csp';
+import { buildCsp, isCandidateTestPath, parseOrigins, uploadOriginsFor } from './csp';
 
 describe('CSP (NFR-04)', () => {
   const base = { nonce: 'abc123', apiOrigin: 'https://api.example.com/v1' };
@@ -26,6 +26,11 @@ describe('CSP (NFR-04)', () => {
     expect(csp).toContain("'unsafe-eval'");
     expect(csp).toContain('ws://localhost:*');
     expect(csp).not.toContain('upgrade-insecure-requests');
+  });
+  it('FR-703: a dev server with no configured upload origin allows the local MinIO; production never does', () => {
+    expect(uploadOriginsFor([], true)).toEqual(['http://127.0.0.1:9000']);
+    expect(uploadOriginsFor([], false)).toEqual([]);
+    expect(uploadOriginsFor(['https://s3.example.com'], true)).toEqual(['https://s3.example.com']);
   });
   it('drops values that are not http(s) origins', () => {
     expect(parseOrigins('javascript:alert(1) not-a-url https://ok.example.com')).toEqual([

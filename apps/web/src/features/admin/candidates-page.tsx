@@ -14,7 +14,7 @@ import type { Schemas } from '@/lib/api/client';
 import { ConfirmDialog } from './confirm-dialog';
 import { formatDate } from './format';
 import { PageHeader } from './page-header';
-import { useCandidates, useRequestErasure } from './queries';
+import { ApiFailure, useCandidates, useRequestErasure } from './queries';
 
 type Candidate = Schemas['CandidateSummary'];
 
@@ -158,11 +158,17 @@ function CandidatesContent(): React.JSX.Element {
         isLoading={candidates.isLoading}
         error={
           candidates.isError
-            ? {
-                title: 'We could not load the candidates',
-                hint: 'Check your connection, then try again.',
-                onRetry: () => void candidates.refetch(),
-              }
+            ? candidates.error instanceof ApiFailure && candidates.error.status === 404
+              ? {
+                  // The candidate list route is not in the API yet (only POST /tests/:id/invitations is).
+                  title: 'The candidate list is not available in this version yet',
+                  hint: 'You can still invite people: choose Invite candidates above, or open a test and invite from there. Invitations are emailed to the candidate.',
+                }
+              : {
+                  title: 'We could not load the candidates',
+                  hint: 'Check your connection, then try again.',
+                  onRetry: () => void candidates.refetch(),
+                }
             : null
         }
         getRowId={(c) => c.id}

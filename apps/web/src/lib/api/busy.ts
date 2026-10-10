@@ -73,6 +73,8 @@ export interface BusyState {
   exhausted: boolean;
   /** The silent refresh got BUSY and gave up: the session is unchanged, nothing was signed out. */
   refreshBusy: boolean;
+  /** Seconds from the Retry-After of a 429 on the refresh, when it had one (this tab's own call). */
+  refreshRetryAfter: number | null;
   /** A staff write got a 500: the action may have happened. Cleared by dismiss. */
   writeFailed: boolean;
 }
@@ -81,6 +83,7 @@ let state: BusyState = {
   retrying: false,
   exhausted: false,
   refreshBusy: false,
+  refreshRetryAfter: null,
   writeFailed: false,
 };
 let waiting = 0;
@@ -91,6 +94,7 @@ function set(next: Partial<BusyState>): void {
     merged.retrying === state.retrying &&
     merged.exhausted === state.exhausted &&
     merged.refreshBusy === state.refreshBusy &&
+    merged.refreshRetryAfter === state.refreshRetryAfter &&
     merged.writeFailed === state.writeFailed
   )
     return;
@@ -121,7 +125,10 @@ export const busyStore = {
     if (state.exhausted) set({ exhausted: false });
   },
   setRefreshBusy(on: boolean): void {
-    set({ refreshBusy: on });
+    set(on ? { refreshBusy: true } : { refreshBusy: false, refreshRetryAfter: null });
+  },
+  setRefreshRetryAfter(seconds: number | null): void {
+    set({ refreshRetryAfter: seconds });
   },
   writeFailed(): void {
     set({ writeFailed: true });
@@ -132,7 +139,13 @@ export const busyStore = {
   /** Session changed: nothing here belongs to the next person. */
   reset(): void {
     waiting = 0;
-    set({ retrying: false, exhausted: false, refreshBusy: false, writeFailed: false });
+    set({
+      retrying: false,
+      exhausted: false,
+      refreshBusy: false,
+      refreshRetryAfter: null,
+      writeFailed: false,
+    });
   },
 };
 

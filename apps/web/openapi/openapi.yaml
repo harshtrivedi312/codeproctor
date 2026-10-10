@@ -1996,10 +1996,15 @@ paths:
   /v1/review/sessions/{sessionId}/recordings/{recordingId}/playback:
     get:
       operationId: getReviewPlayback
-      summary: REAL. A presigned GET for one recording, valid 900 s (review_session:read).
+      summary: REAL. A presigned GET for one recording, valid 900 s (review_session:read). The part urls point at the S3_ENDPOINT host and need that origin in the web CSP connect-src and the bucket CORS.
       parameters:
-        - { name: sessionId, in: path, required: true, schema: { type: string } }
-        - { name: recordingId, in: path, required: true, schema: { type: string } }
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: recordingId,
+            in: path,
+            required: true,
+            schema: { type: string, pattern: '^(SCREEN|WEBCAM|AUDIO)-\\d{1,9}$' },
+          }
       responses:
         '200':
           description: The signed URL or ordered parts. Never cache or store it.
@@ -2025,10 +2030,15 @@ paths:
   /v1/review/sessions/{sessionId}/answers/{sessionQuestionId}:
     patch:
       operationId: scoreReviewAnswer
-      summary: Manual scoring of a short answer (review_verdict:set, docs/api-contract.md section 7).
+      summary: REAL (BE-13). Manual scoring of an answer (review_verdict:set, docs/api-contract.md section 7). correct true gives the full points, false gives 0.
       parameters:
-        - { name: sessionId, in: path, required: true, schema: { type: string } }
-        - { name: sessionQuestionId, in: path, required: true, schema: { type: string } }
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: sessionQuestionId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       requestBody:
         required: true
         content:
@@ -2040,6 +2050,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ScoredAnswer' }
+        '400':
+          description: Not a UUID, or an invalid body (correct must be a boolean, note 1 to 1000 characters without control characters)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such session or answer
@@ -2056,9 +2071,9 @@ paths:
   /v1/review/sessions/{sessionId}/verdict:
     post:
       operationId: setReviewVerdict
-      summary: Final verdict (review_verdict:set). 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). The request body (SetVerdict) is the web's; it is not defined in section 7 yet.
+      summary: REAL (BE-13). Final verdict (review_verdict:set), 200 with the stored review row. 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7).
       parameters:
-        - { name: sessionId, in: path, required: true, schema: { type: string } }
+        - { name: sessionId, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
         required: true
         content:
@@ -2070,6 +2085,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ReviewVerdict' }
+        '400':
+          description: Not a UUID, or an invalid body (verdict enum, note 1 to 2000 characters)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: No such session
@@ -3455,9 +3475,10 @@ components:
         scoringNote: { type: string, nullable: true }
         answer:
           description: >-
-            CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored
-            jsonb value (MCQ option ids, or the short-answer text) or null. The
-            web copes with any JSON value.
+            CODING: { language, code } or null. MCQ: the stored jsonb, written
+            by the candidate flow as { optionIds: string[] } (opaque candidate
+            option ids, no labels). SHORT_ANSWER: { text }. Or null. The web
+            copes with any JSON value.
           nullable: true
         runResults: { type: array, items: { $ref: '#/components/schemas/ReviewRunResult' } }
     ReviewEvent:
