@@ -9,7 +9,7 @@ import {
   ERASURE_ALERT_DAY,
   ERASURE_ANONYMISE_DAY,
   TIER_FAILURE_ALERT_DAYS,
-  ERASURE_AUDIT_ACTIONS,
+  ERASURE_RESERVED_ACTIONS,
   ERASURE_RERUN_BASE_SECONDS,
   FENCE_POLL_FAST_SECONDS,
   FENCE_POLL_FAST_WINDOW_SECONDS,
@@ -179,7 +179,7 @@ export class ErasureService {
       }
     }
     if (heldAny) {
-      const key = { candidateId, requestId, action: ERASURE_AUDIT_ACTIONS.DELAY_NOTIFIED };
+      const key = { candidateId, requestId, action: ERASURE_RESERVED_ACTIONS.DELAY_NOTIFIED };
       if (!(await inOrg(() => this.repo.onceDone(key)))) {
         await this.notices.enqueueDelayed({ orgId, candidateId, requestId });
         await inOrg(() => this.repo.writeOnce({ orgId, ...key }));
@@ -262,7 +262,7 @@ export class ErasureService {
         const key = {
           candidateId,
           requestId,
-          action: ERASURE_AUDIT_ACTIONS.ALERT_RAISED,
+          action: ERASURE_RESERVED_ACTIONS.ALERT_RAISED,
           since: `deadline:${Math.floor(since.getTime() / 1000)}`,
         };
         if (!(await inOrg(() => this.repo.onceDone(key)))) {
@@ -318,7 +318,7 @@ export class ErasureService {
     const key = {
       candidateId: a.candidateId,
       requestId: a.requestId,
-      action: ERASURE_AUDIT_ACTIONS.ALERT_RAISED,
+      action: ERASURE_RESERVED_ACTIONS.ALERT_RAISED,
       since: `prefix:${Math.floor(a.since.getTime() / 1000)}`,
     };
     if (await this.repo.inOrg(a.orgId, () => this.repo.onceDone(key))) return;

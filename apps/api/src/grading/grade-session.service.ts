@@ -8,6 +8,8 @@
 //      race rolls everything back) and the scores;
 //   4. queue analyze-session (BE-12). BE-12 also owns GRADED -> UNDER_REVIEW (C-28: every session
 //      ends UNDER_REVIEW; there is no GRADED -> COMPLETED edge).
+//      DEV-ONLY STOPGAP (DL-72): with APP_ENV exactly development, devMoveToReview also does
+//      GRADED -> UNDER_REVIEW here; BE-12 and FU-BEB-145 own the real behaviour.
 // Hidden-test results are stored without stdin, stdout, expected output or variant data
 // (CS-4.4: `{ testCaseId, passed, status, timeMs, memoryKb }`). Only the close snapshot is graded,
 // never final_code. The close writes one snapshot per coding question of a started section (empty
@@ -16,6 +18,8 @@
 // no snapshot lookup. A save that differs from the snapshot is flagged with an audit row and
 // grading goes on. A runner failure (INTERNAL_ERROR) fails the job: retried, never scored as wrong.
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { devReviewFlowEnabled, type Env } from '../config/env';
 import { OrgContextService } from '../database/org-context';
 import { PrismaService } from '../database/prisma.service';
 import type { QuestionScoring, QuestionType } from '../generated/prisma/enums.js';
@@ -101,6 +105,7 @@ export class GradeSessionService {
     private readonly closeSection: CloseSectionService,
     private readonly queue: GradingQueue,
     private readonly optionIds: OptionIdService,
+    private readonly config: ConfigService<Env, true>,
   ) {}
 
   /** Call from no scope (a job callback). */
@@ -120,7 +125,9 @@ export class GradeSessionService {
     if (head === null) return 'skipped';
     if (head.status === 'GRADED') {
       // A retry after a failed enqueue: grading is done, the hand-off is not.
+      // Enqueue first: a failed enqueue must leave the session GRADED so the retry enqueues again.
       await this.queue.enqueueAnalyze(orgId, sessionId);
+      await this.devMoveToReview(orgId, sessionId, now);
       return 'already-graded';
     }
     if (head.status !== 'SUBMITTED') return 'skipped';
@@ -138,8 +145,45 @@ export class GradeSessionService {
       this.store(orgId, sessionId, outcomes, now),
     );
     if (!wrote) return 'lost-race';
+    // Enqueue first (see above): the move is idempotent, the enqueue is deduplicated by job id.
     await this.queue.enqueueAnalyze(orgId, sessionId);
+    await this.devMoveToReview(orgId, sessionId, now);
     return 'graded';
+  }
+
+  /**
+   * DEVELOPMENT-ONLY STOPGAP (Delivery Lead ruling DL-72, 'go dev-only'). Only when APP_ENV is
+   * exactly 'development' (devReviewFlowEnabled): GRADED -> UNDER_REVIEW right after grading, so the
+   * local pilot can reach the review routes. This is NOT production behaviour: BE-12 owns the real
+   * GRADED -> UNDER_REVIEW hand-off (analyze-session) and FU-BEB-145 tracks it. Every other
+   * environment is untouched. Idempotent: a session that is no longer GRADED (already
+   * UNDER_REVIEW or COMPLETED, or moved by another run) is left alone.
+   */
+  private async devMoveToReview(orgId: string, sessionId: string, now: Date): Promise<void> {
+    if (
+      !devReviewFlowEnabled({
+        APP_ENV: this.config.get('APP_ENV', { infer: true }),
+        NODE_ENV: this.config.get('NODE_ENV', { infer: true }),
+      })
+    ) {
+      return;
+    }
+    try {
+      await this.orgContext.runInOrg(orgId, () =>
+        this.prisma.client.$transaction(async (tx) => {
+          await this.states.transition({
+            sessionId,
+            from: 'GRADED',
+            to: 'UNDER_REVIEW',
+            now,
+            db: tx,
+          });
+        }),
+      );
+    } catch (e) {
+      if (e instanceof SessionStateConflictError) return;
+      throw e;
+    }
   }
 
   private async load(sessionId: string): Promise<LoadedQuestion[]> {
