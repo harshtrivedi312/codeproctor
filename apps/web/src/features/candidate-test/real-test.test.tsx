@@ -248,7 +248,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(JSON.stringify(saved[0])).toContain('print(7)');
   }, 20_000);
 
-  it('FR-504 TC-045 D-84: the server keeps one answer per question, so only the language shown is saved, and a switch counts once the candidate typed in it', async () => {
+  it('FR-504 TC-045 D-84: the server keeps one answer per question, so only the language last typed in is saved, and a switch alone sends nothing', async () => {
     await startedSession();
     const saved: Record<string, unknown>[] = [];
     server.use(
@@ -317,6 +317,9 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(JSON.stringify(saved[0])).toContain('print(5)');
     expect(screen.getByRole('button', { name: /question 1/i })).toHaveTextContent(
       /saved in python/i,
+    );
+    expect(screen.getByTestId('answer-language-hint')).toHaveTextContent(
+      /saved answer is in python/i,
     );
   }, 20_000);
 
