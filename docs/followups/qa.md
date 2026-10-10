@@ -929,3 +929,5 @@ Hub cases listed for completeness (not QA load; titles and owners as relayed by 
 | TC-111 | Schedule view and review windows (FR-307) | hub, Frontend and Backend |
 
 "One KMS key" (an earlier QA placeholder) is covered by ADR 0017 and has no separate case; QA does not add one.
+
+- FU-QA-FLAG-1 (hub, PR #415): the flag decision route is `PUT /review/sessions/:sessionId/flags/:eventId` (api-contract section 7.1); update `apps/api/test/support/be03-routes.ts` (path, audit entityType `session` with `eventId` in metadata, note required) with FU-BE-235 and FU-BE-268.
