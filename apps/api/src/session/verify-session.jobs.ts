@@ -1,5 +1,6 @@
 // The `verify-session` job: CONSENTED to VERIFIED (ADR 0002 section 2, ADR 0013 CS-4.7). The system
-// check, identity and room-scan routes (BE-08b, BE-10, Integrity B) call `enqueueVerifySession`
+// check route (BE-10), the identity route (BE-08b) and the media confirm of a ROOM_SCAN chunk (BE-09)
+// call `enqueueVerifySession`
 // when their step is done; this job re-checks every condition itself and makes the change, once,
 // through SessionStateService, inside the locked transaction of SessionJobProcessor.
 //

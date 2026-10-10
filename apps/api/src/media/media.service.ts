@@ -106,6 +106,9 @@ export class MediaService {
       if (existing.segment !== req.segment) throw seqConflict();
       if (existing.uploadedAt !== null) {
         this.log('presign', ctx, req, 'already-uploaded');
+        // The SDK treats this as done and never confirms again: a first confirm whose queue failed
+        // is recovered here (idempotent and cheap), so the session is not stranded in CONSENTED.
+        await this.queueVerifyAfterRoomScan(ctx, req, session.status);
         return { alreadyUploaded: true };
       }
     }
@@ -138,7 +141,10 @@ export class MediaService {
         const winner = await this.findRow(ctx, req.stream, req.seq);
         this.log('presign', ctx, req, 'race');
         if (winner === null || winner.segment !== req.segment) throw seqConflict();
-        if (winner.uploadedAt !== null) return { alreadyUploaded: true };
+        if (winner.uploadedAt !== null) {
+          await this.queueVerifyAfterRoomScan(ctx, req, session.status);
+          return { alreadyUploaded: true };
+        }
         await this.updatePending(ctx, req, startedAt, key);
       }
     } else {
@@ -246,8 +252,8 @@ export class MediaService {
    */
   private async queueVerifyAfterRoomScan(
     ctx: CandidateContext,
-    ref: ChunkRef,
-    status: string,
+    ref: { readonly stream: MediaStream },
+    status: SessionStatus,
   ): Promise<void> {
     if (ref.stream !== 'ROOM_SCAN' || status !== 'CONSENTED') return;
     try {

@@ -801,7 +801,7 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
     }
     const scan = { stream: 'ROOM_SCAN', segment: 0, seq: 0, contentType: 'video/webm' } as const;
 
-    it('FR-404, FR-605: system check and identity first, room scan LAST: the confirm takes the session to VERIFIED', async () => {
+    it('FR-404, TC-035, FR-605: system check and identity first, room scan LAST: the confirm takes the session to VERIFIED', async () => {
       const c = await consented({ identity: true, systemCheck: true });
       await upload(c, { ...scan });
       expect(await status(c)).toBe('CONSENTED');
@@ -809,7 +809,7 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
       expect(await waitFor(c, 'VERIFIED')).toBe('VERIFIED');
     });
 
-    it('FR-404: with the identity check still missing the confirmed room scan leaves the session CONSENTED (the job re-checks)', async () => {
+    it('FR-404, TC-035: with the identity check still missing the confirmed room scan leaves the session CONSENTED (the job re-checks)', async () => {
       const c = await consented({ identity: false, systemCheck: true });
       await upload(c, { ...scan });
       await post('/confirm', c.token, { stream: 'ROOM_SCAN', segment: 0, seq: 0 }).expect(200);
@@ -821,7 +821,7 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
       expect(await waitFor(c, 'VERIFIED')).toBe('VERIFIED');
     });
 
-    it('FR-404: a failed queue is a 503 and the retried confirm (the chunk is already stored) queues it again', async () => {
+    it('FR-404, TC-035: a failed queue is a 503 and the retried confirm (the chunk is already stored) queues it again', async () => {
       const c = await consented({ identity: true, systemCheck: true });
       await upload(c, { ...scan });
       const { VerifySessionJobs } = jest.requireActual<
@@ -842,6 +842,28 @@ describe('Candidate media presign and confirm (FR-701, FR-702, FR-703, TC-070, T
       expect((await rows(c.sessionId))[0]?.uploadedAt).not.toBeNull();
       expect(await status(c)).toBe('CONSENTED');
       await post('/confirm', c.token, { stream: 'ROOM_SCAN', segment: 0, seq: 0 }).expect(200);
+      expect(await waitFor(c, 'VERIFIED')).toBe('VERIFIED');
+    });
+
+    it('FR-404, TC-035: if the SDK presigns again after the failed queue, the already-uploaded answer re-queues verify-session', async () => {
+      const c = await consented({ identity: true, systemCheck: true });
+      await upload(c, { ...scan });
+      const { VerifySessionJobs } = jest.requireActual<
+        typeof import('../session/verify-session.jobs')
+      >('../session/verify-session.jobs');
+      const jobs = app.get(VerifySessionJobs);
+      const spy = jest
+        .spyOn(jobs, 'enqueueVerifySession')
+        .mockRejectedValueOnce(new Error('queue down'));
+      try {
+        await post('/confirm', c.token, { stream: 'ROOM_SCAN', segment: 0, seq: 0 }).expect(503);
+      } finally {
+        spy.mockRestore();
+      }
+      // The SDK, past the presign expiry, presigns again and is told the chunk is already stored.
+      const again = await post('/presign', c.token, body({ ...scan, bytes: 2 * MIB }));
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ alreadyUploaded: true });
       expect(await waitFor(c, 'VERIFIED')).toBe('VERIFIED');
     });
   });
