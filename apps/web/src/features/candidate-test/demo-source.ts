@@ -27,6 +27,8 @@ export const demoSource: TestSource = {
   },
 
   async saveDraft(questionId, body) {
+    // The placeholder routes have no short-answer question: nothing to save.
+    if (body.kind === 'text') return { ok: true, savedAt: new Date().toISOString() };
     try {
       const { data, response } = await api.PUT('/v1/candidate/questions/{questionId}/draft', {
         params: { path: { questionId } },

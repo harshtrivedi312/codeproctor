@@ -12,6 +12,8 @@ import type { Schemas } from '@/lib/api/client';
 import { TestLoadError } from './adr-source';
 import { demoSource } from './demo-source';
 import {
+  kindOf,
+  MAX_SHORT_ANSWER_CHARS,
   savedWorkOf,
   type DraftBody,
   type DraftResult,
@@ -72,6 +74,8 @@ const CodeEditor = dynamic(() => import('./code-editor'), {
 interface Drafts {
   code: Record<string, string>;
   mcq: Record<string, string>;
+  /** Typed answers of short-answer questions, by question id. */
+  text: Record<string, string>;
 }
 
 function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
@@ -93,16 +97,24 @@ function seedFrom(questions: readonly TestQuestion[]): {
     drafts: Drafts;
     langs: Record<string, CodeLanguage>;
     saved: SavedOnServer;
-  } = { drafts: { code: {}, mcq: {} }, langs: {}, saved: { code: {}, mcq: {} } };
+  } = {
+    drafts: { code: {}, mcq: {}, text: {} },
+    langs: {},
+    saved: { code: {}, mcq: {}, text: {} },
+  };
   for (const q of questions) {
     const work = savedWorkOf(q);
     if (work === null) continue;
-    if (q.type === 'coding' && 'code' in work) {
+    const kind = kindOf(q);
+    if (kind === 'short' && 'text' in work) {
+      out.drafts.text[q.id] = work.text;
+      out.saved.text[q.id] = work.text;
+    } else if (kind === 'coding' && 'code' in work) {
       if (q.languages && !q.languages.includes(work.language)) continue;
       out.drafts.code[codeKey(q.id, work.language)] = work.code;
       out.langs[q.id] = work.language;
       out.saved.code[q.id] = { language: work.language, code: work.code };
-    } else if (q.type === 'mcq' && 'optionIds' in work) {
+    } else if (kind === 'mcq' && 'optionIds' in work) {
       const first = work.optionIds[0];
       if (first === undefined || !q.options?.some((o) => o.id === first)) continue;
       out.drafts.mcq[q.id] = first;
@@ -116,6 +128,7 @@ function seedFrom(questions: readonly TestQuestion[]): {
 type SavedOnServer = {
   code: Record<string, { language: CodeLanguage; code: string }>;
   mcq: Record<string, string>;
+  text: Record<string, string>;
 };
 const activeLanguage = (
   q: Schemas['Question'],
@@ -365,11 +378,28 @@ function TestScreenInner({
   const [saved, setSaved] = React.useState<SavedOnServer>(seed.saved);
   const autosave = useAutosave(autosaveValue, async (snapshot) => {
     const previous = savedRef.current;
-    const next: SavedOnServer = { code: { ...previous.code }, mcq: { ...previous.mcq } };
+    const next: SavedOnServer = {
+      code: { ...previous.code },
+      mcq: { ...previous.mcq },
+      text: { ...previous.text },
+    };
     const jobs: Promise<DraftResult>[] = [];
     const requestStart = performance.now();
     for (const q of questions) {
-      if (q.type === 'mcq') {
+      const kind = kindOf(q);
+      if (kind === 'unsupported') continue;
+      if (kind === 'short') {
+        const text = snapshot.drafts.text[q.id];
+        if (text === undefined || previous.text[q.id] === text) continue;
+        jobs.push(
+          source.saveDraft(q.id, { kind: 'text', text }).then((r) => {
+            if (r.ok) next.text[q.id] = text;
+            return r;
+          }),
+        );
+        continue;
+      }
+      if (kind === 'mcq') {
         const selectedOptionId = snapshot.drafts.mcq[q.id];
         if (selectedOptionId === undefined || previous.mcq[q.id] === selectedOptionId) continue;
         jobs.push(
@@ -506,12 +536,18 @@ function TestScreenInner({
   const starter = question.starterCode?.[language] ?? '';
   const value = drafts.code[codeKey(question.id, language)] ?? starter;
   const isAnswered = (q: Schemas['Question']): boolean => {
-    if (q.type === 'mcq') return drafts.mcq[q.id] !== undefined;
+    const kind = kindOf(q);
+    if (kind === 'unsupported') return false;
+    if (kind === 'short') return drafts.text[q.id] !== undefined;
+    if (kind === 'mcq') return drafts.mcq[q.id] !== undefined;
     return Object.keys(drafts.code).some((k) => k.startsWith(`${q.id}:`));
   };
 
   const isSaved = (q: Schemas['Question']): boolean => {
-    if (q.type === 'mcq') return saved.mcq[q.id] === drafts.mcq[q.id];
+    const kind = kindOf(q);
+    if (kind === 'unsupported') return true;
+    if (kind === 'short') return saved.text[q.id] === drafts.text[q.id];
+    if (kind === 'mcq') return saved.mcq[q.id] === drafts.mcq[q.id];
     const lang = answerLangs[q.id];
     if (lang === undefined) return true; // nothing typed yet
     const code = drafts.code[codeKey(q.id, lang)];
@@ -756,7 +792,7 @@ function TestScreenInner({
                     ? '(not started)'
                     : !isSaved(q)
                       ? '(not saved yet)'
-                      : q.type !== 'mcq' &&
+                      : kindOf(q) === 'coding' &&
                           answerLangs[q.id] &&
                           answerLangs[q.id] !== activeLanguage(q, languages)
                         ? `(saved in ${LANGUAGE_LABELS[answerLangs[q.id] as CodeLanguage]})`
@@ -776,7 +812,7 @@ function TestScreenInner({
               {question.title} · {question.points} points
             </p>
             <Markdown>{question.statementMarkdown}</Markdown>
-            {question.type === 'coding' && question.sampleTests && (
+            {kindOf(question) === 'coding' && question.sampleTests && (
               <section className="mt-6" aria-label="Sample tests">
                 <h2 className="text-base font-semibold">Sample tests</h2>
                 <p className="text-sm text-muted-foreground">
@@ -789,7 +825,7 @@ function TestScreenInner({
                 </ul>
               </section>
             )}
-            {question.type === 'mcq' && question.options && (
+            {kindOf(question) === 'mcq' && question.options && (
               <fieldset className="mt-4 space-y-2" disabled={readOnly}>
                 <legend className="sr-only">Answer options</legend>
                 {question.options.map((o) => (
@@ -815,7 +851,40 @@ function TestScreenInner({
         </aside>
 
         <section className="flex min-h-[420px] min-w-0 flex-col" aria-label="Your answer">
-          {question.type === 'coding' ? (
+          {kindOf(question) === 'unsupported' ? (
+            <p className="p-4 text-sm" data-testid="question-unsupported">
+              This question cannot be shown on this page. Your time keeps running. Please tell the
+              person running the test, and do not close this page. The other questions work as
+              usual.
+            </p>
+          ) : kindOf(question) === 'short' ? (
+            <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
+              <label htmlFor={`short-${question.id}`} className="text-sm font-medium">
+                Your answer
+              </label>
+              <textarea
+                id={`short-${question.id}`}
+                className="min-h-[200px] w-full flex-1 rounded-md border bg-card p-3 text-sm"
+                value={drafts.text[question.id] ?? ''}
+                readOnly={readOnly}
+                maxLength={MAX_SHORT_ANSWER_CHARS}
+                aria-describedby={`short-count-${question.id}`}
+                onChange={(e) => {
+                  const text = e.target.value;
+                  const id = question.id;
+                  setDrafts((d) => ({ ...d, text: { ...d.text, [id]: text } }));
+                }}
+              />
+              <p
+                id={`short-count-${question.id}`}
+                className="text-xs text-muted-foreground"
+                data-testid="short-count"
+              >
+                {(drafts.text[question.id] ?? '').length} of {MAX_SHORT_ANSWER_CHARS} characters. It
+                is saved automatically, and you can change it until you finish the section.
+              </p>
+            </div>
+          ) : kindOf(question) === 'coding' ? (
             <>
               <div className="flex flex-wrap items-center gap-3 border-b px-3 py-2">
                 <label className="flex items-center gap-2 text-sm">
