@@ -874,7 +874,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** REAL. A presigned GET for one recording, valid 900 s (review_session:read). */
+        /** REAL. A presigned GET for one recording, valid 900 s (review_session:read). The part urls point at the S3_ENDPOINT host and need that origin in the web CSP connect-src and the bucket CORS. */
         get: operations["getReviewPlayback"];
         put?: never;
         post?: never;
@@ -897,7 +897,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Manual scoring of a short answer (review_verdict:set, docs/api-contract.md section 7). */
+        /** REAL (BE-13). Manual scoring of an answer (review_verdict:set, docs/api-contract.md section 7). correct true gives the full points, false gives 0. */
         patch: operations["scoreReviewAnswer"];
         trace?: never;
     };
@@ -910,7 +910,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Final verdict (review_verdict:set). 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). The request body (SetVerdict) is the web's; it is not defined in section 7 yet. */
+        /** REAL (BE-13). Final verdict (review_verdict:set), 200 with the stored review row. 409 VERDICT_ALREADY_SET or SESSION_NOT_UNDER_REVIEW (checked first), else 409 MANUAL_PENDING while a manual answer is pending (TC-099, docs/api-contract.md section 7). */
         post: operations["setReviewVerdict"];
         delete?: never;
         options?: never;
@@ -1731,7 +1731,7 @@ export interface components {
             /** @enum {string} */
             scoring: "AUTO" | "MANUAL" | "MANUAL_PENDING";
             scoringNote: string | null;
-            /** @description CODING: { language, code } or null. MCQ and SHORT_ANSWER: the stored jsonb value (MCQ option ids, or the short-answer text) or null. The web copes with any JSON value. */
+            /** @description CODING: { language, code } or null. MCQ: the stored jsonb, written by the candidate flow as { optionIds: string[] } (opaque candidate option ids, no labels). SHORT_ANSWER: { text }. Or null. The web copes with any JSON value. */
             answer: unknown;
             runResults?: components["schemas"]["ReviewRunResult"][];
         };
@@ -4498,6 +4498,15 @@ export interface operations {
                     "application/json": components["schemas"]["ScoredAnswer"];
                 };
             };
+            /** @description Not a UUID, or an invalid body (correct must be a boolean, note 1 to 1000 characters without control characters) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
             403: components["responses"]["Forbidden"];
             /** @description No such session or answer */
             404: {
@@ -4542,6 +4551,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReviewVerdict"];
+                };
+            };
+            /** @description Not a UUID, or an invalid body (verdict enum, note 1 to 2000 characters) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
                 };
             };
             403: components["responses"]["Forbidden"];

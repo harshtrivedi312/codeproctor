@@ -2,7 +2,7 @@
 //
 //   pnpm demo:down [--infra]
 //
-// Stops the API and the web app (the process groups recorded in .demo/pids.json) and removes the
+// Stops the API, the web app and the worker (the process groups recorded in .demo/pids.json) and removes the
 // record. With --infra it also stops the containers (pnpm dev:infra:down, in the demo's own compose project
 // `codeproctor-demo`); the data stays in the Docker volumes. Never deletes data: `pnpm db:reset` (a person, local only) is the way to a clean database.
 import { spawnSync } from 'node:child_process';

@@ -117,7 +117,7 @@ describe('FR-902 review session', () => {
     renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
     await screen.findByRole('heading', { name: 'Priya Nair' });
     expect(screen.getByRole('button', { name: 'Set verdict' })).toBeDisabled();
-    expect(screen.getByText(/1 short answer is still waiting/)).toBeInTheDocument();
+    expect(screen.getByText(/1 answer is still waiting/)).toBeInTheDocument();
     await u.type(
       screen.getByLabelText('Note (optional)', { selector: 'textarea#note-sq-3' }),
       'Good',
@@ -144,7 +144,7 @@ describe('FR-902 review session', () => {
     renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
     await screen.findByRole('heading', { name: 'Priya Nair' });
     await u.click(screen.getByRole('button', { name: /^Incorrect/ }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/scored automatically/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/cannot be scored by hand/);
   });
 
   it('FR-902 D-23: a 409 on scoring reloads the session so the screen shows the truth', async () => {
@@ -189,11 +189,110 @@ describe('FR-902 review session', () => {
     expect(alert).not.toHaveTextContent(/short answers still need scoring/);
   });
 
-  it('FR-902 C-28: scoring controls and the verdict form are hidden unless the session is under review with no verdict', async () => {
+  it('FR-902 C-28: scoring controls and the verdict form are hidden once a verdict is set or the session is past review', async () => {
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/rs-5`, () =>
+        HttpResponse.json({
+          ...bundleNoPending(),
+          session: { ...bundleNoPending().session, status: 'COMPLETED' },
+        }),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-5" />, U);
+    await screen.findByRole('heading', { name: 'Marco Silva' });
+    expect(screen.queryByRole('button', { name: 'Set verdict' })).not.toBeInTheDocument();
+    expect(screen.getByText(/only while the session is under review/)).toBeInTheDocument();
+  });
+
+  it('FR-902: a GRADED session shows the explanation and no verdict form or scoring controls', async () => {
     renderAsStaff(<ReviewSessionPage sessionId="rs-5" />, U);
     await screen.findByRole('heading', { name: 'Aisha Khan' });
     expect(screen.queryByRole('button', { name: 'Set verdict' })).not.toBeInTheDocument();
-    expect(screen.getByText(/only while the session is under review/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Graded, waiting for automatic analysis before review/),
+    ).toBeInTheDocument();
+  });
+
+  it('FR-901: the real answer shapes { optionIds } and { text } are shown as options and text, not JSON', async () => {
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    expect(screen.getByText('o-2')).toBeInTheDocument();
+    expect(screen.getByText('Option ids (labels not available yet)')).toBeInTheDocument();
+    expect(screen.getByText(/Calling it many times/)).not.toHaveTextContent('{"text"');
+    expect(screen.queryByText(/"optionIds"/)).not.toBeInTheDocument();
+  });
+
+  it('FR-902 D-23: a MANUAL_PENDING coding answer (local stub, real API shape) shows the controls; a 409 ANSWER_NOT_MANUAL turns them into read-only text', async () => {
+    const u = userEvent.setup();
+    const b = {
+      ...bundleNoPending(),
+      answers: [
+        {
+          sessionQuestionId: 'sq-9',
+          type: 'CODING',
+          title: 'Stubbed',
+          statement: 's',
+          points: 10,
+          score: null,
+          scoring: 'MANUAL_PENDING',
+          scoringNote: 'not graded (local stub)',
+          answer: { language: 'python', code: 'print(1)' },
+          runResults: [],
+        },
+      ],
+    };
+    server.use(
+      http.get(`${apiBaseUrl}/v1/review/sessions/rs-2`, () => HttpResponse.json(b)),
+      http.patch(`${apiBaseUrl}/v1/review/sessions/:s/answers/:q`, () =>
+        HttpResponse.json(
+          { status: 409, title: 'Conflict', detail: 'x', code: 'ANSWER_NOT_MANUAL' },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-2" />, U);
+    await screen.findByRole('heading', { name: 'Marco Silva' });
+    await u.click(screen.getByRole('button', { name: /^Correct/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Not graded (local stub). It cannot be scored by hand in this build, so the verdict stays blocked.',
+    );
+    expect(screen.queryByRole('button', { name: /^Correct/ })).not.toBeInTheDocument();
+  });
+
+  it('FR-901: a coding answer with no code says so', async () => {
+    const b = {
+      ...bundleNoPending(),
+      answers: [
+        {
+          sessionQuestionId: 'sq-8',
+          type: 'CODING',
+          title: 'Empty',
+          statement: 's',
+          points: 10,
+          score: 0,
+          scoring: 'AUTO',
+          scoringNote: null,
+          answer: { language: 'python', code: null },
+        },
+      ],
+    };
+    server.use(http.get(`${apiBaseUrl}/v1/review/sessions/rs-2`, () => HttpResponse.json(b)));
+    renderAsStaff(<ReviewSessionPage sessionId="rs-2" />, U);
+    await screen.findByRole('heading', { name: 'Marco Silva' });
+    expect(screen.getByText('No code submitted.')).toBeInTheDocument();
+  });
+
+  it('FR-902: a scoring 404 explains that the answer is gone', async () => {
+    const u = userEvent.setup();
+    server.use(
+      http.patch(`${apiBaseUrl}/v1/review/sessions/:s/answers/:q`, () =>
+        HttpResponse.json({ status: 404, title: 'Not Found', detail: 'x' }, { status: 404 }),
+      ),
+    );
+    renderAsStaff(<ReviewSessionPage sessionId="rs-1" />, U);
+    await screen.findByRole('heading', { name: 'Priya Nair' });
+    await u.click(screen.getByRole('button', { name: /^Incorrect/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no longer exists/);
   });
 
   it('FR-701: Play downloads every part in seq order into one Blob and plays it from an object URL', async () => {

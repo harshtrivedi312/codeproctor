@@ -14,7 +14,8 @@ import { settleSession } from '@/lib/auth-session';
 import { useAuth } from './auth-provider';
 import { safeNextPath } from './schemas';
 
-type Banner = { kind: 'failed' } | { kind: 'network' } | { kind: 'busy' } | null;
+type Banner =
+  { kind: 'failed' } | { kind: 'network' } | { kind: 'busy' } | { kind: 'throttled' } | null;
 
 /**
  * One neutral message for every failed sign-in (wrong password, unknown email, locked account), so
@@ -77,6 +78,9 @@ export function LoginForm(): React.JSX.Element {
     if (response.status === 401) {
       setBanner({ kind: 'failed' });
       setFocus('password');
+    } else if (response.status === 429) {
+      // The sign-in limit of the API (10 a minute from one address, shared by everyone on it).
+      setBanner({ kind: 'throttled' });
     } else if (response.status === 503) {
       // Not retried by itself: every sign-in attempt counts, and a retry would count one more.
       setBanner({ kind: 'busy' });
@@ -157,6 +161,12 @@ export function LoginForm(): React.JSX.Element {
         <Alert tone="info" role="status" title="The service is busy">
           We did not try again for you, so this attempt is not counted twice. Wait a moment, then
           press Sign in again.
+        </Alert>
+      ) : null}
+      {banner?.kind === 'throttled' ? (
+        <Alert tone="info" role="status" title="Too many sign-in attempts">
+          Sign-in is limited to a few attempts a minute from one network address. Wait one minute,
+          then press Sign in again. Your password was not checked.
         </Alert>
       ) : null}
       {banner?.kind === 'network' ? (
