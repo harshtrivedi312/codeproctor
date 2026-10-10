@@ -161,7 +161,7 @@ test.describe('FR-103 FR-704 FR-804 D-17 Settings', () => {
     await page.getByRole('dialog').getByLabel('Role').selectOption('AUTHOR');
     await page.getByRole('button', { name: 'Continue' }).click();
     // FR-102 step-up: the admin confirms with their own password.
-    await page.getByLabel('Your password').fill(ADMIN.password);
+    await page.getByLabel('Your password', { exact: true }).fill(ADMIN.password);
     await expectNoAxeViolations(page);
     await page.getByRole('button', { name: 'Send invitation' }).click();
     await expect(page.getByRole('row', { name: /Jo Newperson/ })).toContainText('Invited');
