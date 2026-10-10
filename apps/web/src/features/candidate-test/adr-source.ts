@@ -29,6 +29,18 @@ export class TestLoadError extends Error {
 }
 
 function questionFor(view: QuestionView, points: number): TestQuestion {
+  if (view.type === 'SHORT_ANSWER') {
+    return {
+      id: view.sessionQuestionId,
+      type: 'mcq', // the generated shape has no short answer: `format` says what it is
+      format: 'short',
+      title: view.title,
+      points,
+      statementMarkdown: view.statementMd,
+      options: [],
+      saved: view.saved,
+    };
+  }
   if (view.type === 'MCQ') {
     return {
       id: view.sessionQuestionId,
@@ -90,10 +102,25 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
     views.forEach(ended);
     const questions: TestQuestion[] = [];
     for (const [i, v] of views.entries()) {
-      if (!v.ok) throw new TestLoadError('unavailable');
-      // Short answers are not built yet: fail closed rather than hide a question (FU-FEB).
-      if (v.data.type === 'SHORT_ANSWER') throw new TestLoadError('unsupported');
-      questions.push(questionFor(v.data, Number(section.questions[i]?.points ?? 0)));
+      const points = Number(section.questions[i]?.points ?? 0);
+      if (!v.ok) {
+        // A question this page cannot read (a view in a shape it does not know) degrades to a
+        // notice for that question only; a network or server failure still fails the load.
+        if (v.kind === 'shape') {
+          questions.push({
+            id: section.questions[i]?.sessionQuestionId ?? `unsupported-${i}`,
+            type: 'mcq',
+            format: 'unsupported',
+            title: `Question ${i + 1}`,
+            points,
+            statementMarkdown: '',
+            options: [],
+          });
+          continue;
+        }
+        throw new TestLoadError('unavailable');
+      }
+      questions.push(questionFor(v.data, points));
     }
     return {
       // The contract carries no test title; the screen shows a neutral one.
@@ -151,10 +178,13 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
     async saveDraft(questionId, body) {
       // The API's DraftDto (whitelisted: an unknown field is a 400): CODING `{ code, language }`;
       // MCQ `{ answer: { optionIds } }`. The screen's own `kind` field is never sent.
+      // SHORT_ANSWER `{ answer: { text } }`.
       const dto =
         body.kind === 'code'
           ? { code: body.code, language: body.language }
-          : { answer: { optionIds: [body.selectedOptionId] } };
+          : body.kind === 'text'
+            ? { answer: { text: body.text } }
+            : { answer: { optionIds: [body.selectedOptionId] } };
       const r = await requestAt(
         draftSavedSchema,
         `/answers/${encodeURIComponent(questionId)}/draft`,

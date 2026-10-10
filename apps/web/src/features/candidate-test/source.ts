@@ -3,7 +3,24 @@ import type { Schemas } from '@/lib/api/client';
 import { savedWorkSchema, type SavedWork } from './adr-wire';
 
 /** A question as the screen holds it: the generated shape plus the candidate's own saved work. */
-export type TestQuestion = Schemas['Question'] & { saved?: SavedWork };
+export type TestQuestion = Schemas['Question'] & {
+  saved?: SavedWork;
+  /**
+   * `short`: a typed-text answer (the generated shape has no such type). `unsupported`: a question
+   * this page cannot show; it gets a notice instead of failing the whole test.
+   */
+  format?: 'short' | 'unsupported';
+};
+
+export type QuestionKind = 'coding' | 'mcq' | 'short' | 'unsupported';
+
+export function kindOf(q: Schemas['Question']): QuestionKind {
+  if ('format' in q && (q.format === 'short' || q.format === 'unsupported')) return q.format;
+  return q.type;
+}
+
+/** The API's limit for a short answer (MAX_SHORT_ANSWER_CHARS). */
+export const MAX_SHORT_ANSWER_CHARS = 2000;
 
 /** The saved work carried on a question (null when none, or when the source has none). */
 export function savedWorkOf(q: Schemas['Question']): SavedWork {
@@ -24,6 +41,7 @@ export type RunResultView = Schemas['RunResult'] & { stub?: true; message?: stri
 
 export type DraftBody =
   | { kind: 'code'; language: CodeLanguage; code: string }
+  | { kind: 'text'; text: string }
   | { kind: 'mcq'; selectedOptionId: string };
 
 export type DraftResult =

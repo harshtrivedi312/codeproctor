@@ -370,6 +370,58 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(calls).toEqual(['q2']); // q1 was saved and is not sent again
   }, 40_000);
 
+  it('FR-501 FR-504: a short-answer question shows a labelled text box with a counter and no Run, resumes from saved text and saves {answer:{text}}', async () => {
+    await startedSession();
+    const bodies: unknown[] = [];
+    server.use(
+      http.get(`${cand}/questions/q2`, () =>
+        HttpResponse.json({
+          sessionQuestionId: 'q2',
+          type: 'SHORT_ANSWER',
+          title: 'Explain binary search',
+          statementMd: 'In your own words, explain binary search.',
+          saved: { text: 'Halve the range' },
+        }),
+      ),
+      http.put(`${cand}/answers/q2/draft`, async ({ request }) => {
+        bodies.push(await request.json());
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: /question 2/i }));
+    const box = screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Your answer' });
+    expect(box.value).toBe('Halve the range');
+    expect(screen.getByTestId('short-count')).toHaveTextContent(/15 of 2000 characters/i);
+    expect(screen.queryByRole('button', { name: /run sample tests/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /question 2/i })).toHaveTextContent(/\(saved\)/i);
+    await user.type(box, ' each time');
+    expect(screen.getByRole('button', { name: /question 2/i })).toHaveTextContent(/not saved yet/i);
+    // Finishing the section saves first.
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toEqual({ answer: { text: 'Halve the range each time' } });
+  }, 30_000);
+
+  it('FR-501: one question the page cannot read shows a notice for that question only, and the others still work', async () => {
+    await startedSession();
+    server.use(
+      http.get(`${cand}/questions/q2`, () =>
+        HttpResponse.json({ sessionQuestionId: 'q2', type: 'ESSAY', title: 'x' }),
+      ),
+    );
+    const user = userEvent.setup();
+    await enterTest(user); // question 1 (coding) is shown and usable
+    expect(screen.getByLabelText(/code editor, python/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /question 2/i }));
+    expect(screen.getByTestId('question-unsupported')).toBeInTheDocument();
+    expect(screen.queryByTestId('load-unsupported')).not.toBeInTheDocument();
+  });
+
   it('FR-504: a multiple-choice answer is saved with the option id', async () => {
     await startedSession();
     const seen = recordRequests();
@@ -488,22 +540,6 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     renderWithQuery(<TestScreen source={createAdrSource({ onSessionEnded })} />);
     await waitFor(() => expect(onSessionEnded).toHaveBeenCalled());
     expect(await screen.findByText(/could not load your test/i)).toBeInTheDocument();
-  });
-
-  it('FR-505: a short-answer question fails closed with a clear message, not a missing question', async () => {
-    await startedSession();
-    server.use(
-      http.get(`${cand}/questions/q2`, () =>
-        HttpResponse.json({
-          sessionQuestionId: 'q2',
-          type: 'SHORT_ANSWER',
-          title: 'x',
-          statementMd: 'y',
-        }),
-      ),
-    );
-    renderWithQuery(<TestScreen source={createAdrSource({ onSessionEnded: vi.fn() })} />);
-    expect(await screen.findByTestId('load-unsupported')).toBeInTheDocument();
   });
 
   it('FR-505 TC-047: the countdown follows the server clock from GET /session, not the device clock', async () => {
