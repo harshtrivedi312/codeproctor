@@ -271,7 +271,19 @@ function invalidFields(
 
 const error = (status: number, code: string, message: string) =>
   HttpResponse.json({ code, message }, { status });
-const forbidden = () => error(403, 'forbidden', 'Your role does not allow this.');
+// A guard 403 has no `code` (docs/api-contract.md section 1): only REAUTH_FAILED carries one.
+const forbidden = () =>
+  HttpResponse.json(
+    {
+      type: 'about:blank',
+      title: 'Forbidden',
+      status: 403,
+      detail: 'Forbidden resource',
+      instance: '/',
+      traceId: 'mock-trace',
+    },
+    { status: 403 },
+  );
 const unauthenticated = () => error(401, 'unauthenticated', 'Sign in again.');
 
 /** Returns an error response, or null when the caller's role is in `allowed`. */

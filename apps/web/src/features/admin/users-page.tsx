@@ -16,6 +16,7 @@ import { useAuth } from '@/features/auth/auth-provider';
 import { ROLE_LABELS } from '@/features/auth/user-badge';
 import { StepUpDialog, StepUpForm, type StepUpOutcome } from '@/features/security/step-up-dialog';
 import type { Schemas } from '@/lib/api/client';
+import { can } from '@/features/staff/permissions';
 import { formatDate } from './format';
 import { useStaffUsers } from './queries';
 import { inviteStaffSchema, type InviteStaffValues } from './schemas';
@@ -89,6 +90,8 @@ function describeAction(action: PendingAction): {
 function UsersContent(): React.JSX.Element {
   const { user: me } = useAuth();
   const qc = useQueryClient();
+  // The page is Super Admin only; this also keeps controls off for any other role (FR-103).
+  const mayManage = can(me?.role, 'user:manage');
   const users = useStaffUsers();
   const [inviteOpen, setInviteOpen] = React.useState(false);
   // The selects and buttons only stage a choice; nothing is sent until the password is confirmed.
@@ -167,7 +170,7 @@ function UsersContent(): React.JSX.Element {
             aria-label={`Role for ${u.name}`}
             className="h-8"
             value={u.role}
-            disabled={fixed || inFlight}
+            disabled={fixed || inFlight || !mayManage}
             title={u.id === me?.id ? 'You cannot change your own role.' : undefined}
             onChange={(e) => {
               const role = e.target.value as Schemas['StaffRole'];

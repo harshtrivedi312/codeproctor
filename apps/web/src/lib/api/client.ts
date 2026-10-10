@@ -45,7 +45,8 @@ export function isAuthRequest(url: string): boolean {
 // the refresh fails, auth-session publishes "signed out" and the staff layout goes to login.
 // The copy is tagged with the session generation it was sent under. A 401 that arrives after the
 // user signed out (and maybe someone else signed in) must not be replayed with the new token.
-const retryCopies = new WeakMap<Request, { copy: Request; stamp: SessionStamp }>();
+/** @internal exported for the test that proves a settled call leaves no copy behind. */
+export const retryCopies = new WeakMap<Request, { copy: Request; stamp: SessionStamp }>();
 const refreshMiddleware: Middleware = {
   onRequest({ request }) {
     if (getAccessToken() && !isAuthRequest(request.url)) {
@@ -53,8 +54,16 @@ const refreshMiddleware: Middleware = {
     }
     return undefined;
   },
+  onError({ request }) {
+    // The request never got an answer: drop the retry copy (it may carry a currentPassword).
+    retryCopies.delete(request);
+    return undefined;
+  },
   async onResponse({ request, response }) {
     const sent = retryCopies.get(request);
+    // The retry copy may carry a currentPassword: it is dropped as soon as the call settles,
+    // whatever the answer was (docs/api-contract.md section 1, Frontend).
+    retryCopies.delete(request);
     if (response.status !== 401 || !sent) return undefined;
     const { copy, stamp } = sent;
     // The refresh cookie is shared by all tabs: only replay for the same person (FR-103).
@@ -97,6 +106,7 @@ const busyMiddleware: Middleware = {
       busyStore.writeFailed();
     }
     const sent = busyCopies.get(request);
+    busyCopies.delete(request);
     if (!sent || !(await isBusyResponse(response))) {
       if (response.status !== 503) busyStore.answered();
       return undefined;

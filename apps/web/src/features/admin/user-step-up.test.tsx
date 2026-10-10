@@ -7,6 +7,7 @@ import { axe } from 'vitest-axe';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '@/features/auth/auth-provider';
 import { MOCK_USERS, seedMockRefresh } from '@/mocks/auth-handlers';
+import { retryCopies } from '@/lib/api/client';
 import { server } from '@/mocks/server';
 import { resetAuthTestState } from '@/test/auth-test-utils';
 import { nav } from '@/test/nav-mock';
@@ -201,6 +202,9 @@ describe('Users: password step-up (FR-103, FR-102, TC-002)', () => {
       ),
     ).not.toContain(PASSWORD);
     expect(window.location.href).not.toContain(PASSWORD);
+    // Never in web storage either.
+    expect(JSON.stringify({ ...localStorage })).not.toContain(PASSWORD);
+    expect(JSON.stringify({ ...sessionStorage })).not.toContain(PASSWORD);
   });
 
   it('FR-103 FR-102: invite is two steps (details, then password) and sends only the DTO fields', async () => {
@@ -359,5 +363,226 @@ describe('Users: password step-up (FR-103, FR-102, TC-002)', () => {
     await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
     await within(dialog).findByLabelText('Your password');
     expect(await axe(dialog)).toHaveNoViolations();
+  });
+});
+
+const AUTHOR_UPDATED = {
+  id: 'user-author',
+  email: 'author@example.test',
+  name: 'Avery Author',
+  role: 'RECRUITER',
+  status: 'active',
+  locked: false,
+  lockedUntil: null,
+  totpEnabled: false,
+  createdAt: '2026-06-03T09:00:00.000Z',
+};
+
+/** Counts the PATCH calls and keeps their bodies, answering with `answer(n)`. */
+function patchSequence(answer: (n: number) => Response): { bodies: unknown[] } {
+  const bodies: unknown[] = [];
+  server.use(
+    http.patch('*/v1/admin/users/:id', async ({ request }) => {
+      bodies.push(await request.json());
+      return answer(bodies.length);
+    }),
+  );
+  return { bodies };
+}
+
+const busyAnswer = () =>
+  HttpResponse.json(
+    { type: 'about:blank', title: 'Service Unavailable', status: 503, code: 'BUSY' },
+    { status: 503, headers: { 'Retry-After': '1' } },
+  );
+
+describe('Users: risky paths of a password-protected write (FR-102, FR-103)', () => {
+  async function submitRoleChange(u: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+    const dialog = await openRoleChange(u);
+    await waitFor(() => expect(seen.user).toBeTruthy());
+    return dialog;
+  }
+  async function send(u: ReturnType<typeof userEvent.setup>, dialog: HTMLElement): Promise<void> {
+    await u.type(within(dialog).getByLabelText('Your password'), PASSWORD);
+    await u.click(within(dialog).getByRole('button', { name: 'Change role' }));
+  }
+
+  it('FR-102: a 401 refreshes once and replays the write exactly once with the same body', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = patchSequence((n) =>
+      n === 1
+        ? HttpResponse.json({ title: 'Unauthorized', status: 401 }, { status: 401 })
+        : HttpResponse.json(AUTHOR_UPDATED),
+    );
+    let refreshes = 0;
+    const dialog = await submitRoleChange(u);
+    const count = ({ request }: { request: Request }) => {
+      if (request.url.endsWith('/auth/refresh')) refreshes += 1;
+    };
+    server.events.on('request:start', count);
+    await send(u, dialog);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    server.events.removeListener('request:start', count);
+    expect(calls.bodies).toHaveLength(2);
+    expect(calls.bodies[1]).toEqual(calls.bodies[0]);
+    expect(calls.bodies[0]).toEqual({ currentPassword: PASSWORD, role: 'RECRUITER' });
+    expect(refreshes).toBe(1);
+  });
+
+  it('FR-102 FR-104: a 401 whose refresh fails sends no second request and signs the user out', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = patchSequence(() =>
+      HttpResponse.json({ title: 'Unauthorized', status: 401 }, { status: 401 }),
+    );
+    const dialog = await submitRoleChange(u);
+    server.use(
+      http.post('*/v1/auth/refresh', () =>
+        HttpResponse.json({ title: 'Unauthorized', status: 401 }, { status: 401 }),
+      ),
+    );
+    await send(u, dialog);
+    await waitFor(() => expect(seen.user).toBeFalsy());
+    expect(calls.bodies).toHaveLength(1);
+  });
+
+  it('FR-103 TC-005: a refresh that answers as another person sends no second request', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = patchSequence(() =>
+      HttpResponse.json({ title: 'Unauthorized', status: 401 }, { status: 401 }),
+    );
+    const dialog = await submitRoleChange(u);
+    seedMockRefresh(MOCK_USERS.reviewer.email);
+    await send(u, dialog);
+    await waitFor(() => expect(calls.bodies).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.bodies).toHaveLength(1);
+  });
+
+  it('FR-102: the copy kept for a 401 replay is dropped when the call settles', async () => {
+    const keys: Request[] = [];
+    const set = vi.spyOn(retryCopies, 'set').mockImplementation(function (this: unknown, k, v) {
+      keys.push(k);
+      return WeakMap.prototype.set.call(this, k, v) as typeof retryCopies;
+    });
+    const u = userEvent.setup();
+    renderUsers();
+    patchSequence(() => HttpResponse.json(AUTHOR_UPDATED));
+    const dialog = await submitRoleChange(u);
+    const before = keys.length;
+    await send(u, dialog);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    const writes = keys.slice(before).filter((k) => k.method === 'PATCH');
+    expect(writes).toHaveLength(1);
+    expect(retryCopies.has(writes[0]!)).toBe(false);
+    // Also when the call never gets an answer.
+    server.use(http.patch('*/v1/admin/users/:id', () => HttpResponse.error()));
+    await u.selectOptions(screen.getByLabelText('Role for Riley Recruiter'), 'AUTHOR');
+    const again = await screen.findByRole('dialog');
+    const mark = keys.length;
+    await u.type(within(again).getByLabelText('Your password'), PASSWORD);
+    await u.click(within(again).getByRole('button', { name: 'Change role' }));
+    await within(again).findByRole('alert');
+    const failed = keys.slice(mark).filter((k) => k.method === 'PATCH');
+    expect(failed).toHaveLength(1);
+    expect(retryCopies.has(failed[0]!)).toBe(false);
+    set.mockRestore();
+  });
+
+  it('FR-103: a 503 BUSY on a role change is sent exactly once and says to wait', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = patchSequence(busyAnswer);
+    const dialog = await submitRoleChange(u);
+    await send(u, dialog);
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('Please wait a moment');
+    expect(alert).toHaveTextContent('busy and nothing was changed');
+    expect(calls.bodies).toHaveLength(1);
+  });
+
+  it('FR-103: a 503 BUSY on invite is sent exactly once and says to wait', async () => {
+    let posts = 0;
+    server.use(
+      http.post('*/v1/admin/users', () => {
+        posts += 1;
+        return busyAnswer();
+      }),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(screen.getByRole('button', { name: 'Invite a user' }));
+    const dialog = await screen.findByRole('dialog');
+    await u.type(within(dialog).getByLabelText('Full name'), 'Jo');
+    await u.type(within(dialog).getByLabelText('Work email'), 'jo@example.test');
+    await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    await u.type(await within(dialog).findByLabelText('Your password'), PASSWORD);
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Please wait a moment');
+    expect(posts).toBe(1);
+  });
+
+  it('FR-103: no answer at all says the result is unconfirmed, not that nothing changed', async () => {
+    patchSequence(() => HttpResponse.error());
+    const u = userEvent.setup();
+    renderUsers();
+    const dialog = await submitRoleChange(u);
+    await send(u, dialog);
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('We could not confirm the result');
+    expect(alert).toHaveTextContent('check the list before trying again');
+    expect(alert).not.toHaveTextContent('Nothing was changed');
+  });
+
+  it('FR-103: a request that hangs is given up on and the dialog can be used again', async () => {
+    const deadline = new AbortController();
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    server.use(http.patch('*/v1/admin/users/:id', () => new Promise<Response>(() => undefined)));
+    const u = userEvent.setup();
+    renderUsers();
+    const dialog = await submitRoleChange(u);
+    await send(u, dialog);
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: 'Checking…' })).toBeDisabled(),
+    );
+    deadline.abort();
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('We could not confirm the result');
+    expect(within(dialog).getByRole('button', { name: 'Change role' })).toBeEnabled();
+    spy.mockRestore();
+  });
+
+  it('FR-103: an invite with no answer reads the list and does not claim nothing was sent', async () => {
+    server.use(http.post('*/v1/admin/users', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(screen.getByRole('button', { name: 'Invite a user' }));
+    const dialog = await screen.findByRole('dialog');
+    await u.type(within(dialog).getByLabelText('Full name'), 'Jo');
+    await u.type(within(dialog).getByLabelText('Work email'), 'jo@example.test');
+    await u.click(within(dialog).getByRole('button', { name: 'Continue' }));
+    await u.type(await within(dialog).findByLabelText('Your password'), PASSWORD);
+    await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('Invitation may have been sent');
+    expect(alert).toHaveTextContent('probably was not created');
+  });
+
+  it('FR-103: a 409 on deactivate explains the last Super Admin rule', async () => {
+    patchSequence(() => HttpResponse.json({ title: 'Conflict', status: 409 }, { status: 409 }));
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(within(rowOf('Robin Reviewer')).getByRole('button', { name: /Deactivate/ }));
+    const dialog = await screen.findByRole('dialog');
+    await u.type(within(dialog).getByLabelText('Your password'), PASSWORD);
+    await u.click(within(dialog).getByRole('button', { name: 'Deactivate' }));
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('This user cannot be deactivated');
+    expect(alert).toHaveTextContent('last Super Admin');
   });
 });

@@ -32,9 +32,15 @@ interface Raw<T> {
   response: Response;
 }
 
-async function send<T>(call: () => Promise<Raw<T>>): Promise<Answer<T>> {
+/** A write that has not answered after this long is given up on (the answer is then unknown). */
+const WRITE_TIMEOUT_MS = 20_000;
+
+async function send<T>(call: (signal: AbortSignal) => Promise<Raw<T>>): Promise<Answer<T>> {
+  // One deadline for the whole call, so a hung request cannot freeze the screen. The abort, like
+  // an offline error, is status 0: the write may or may not have landed.
+  const signal = AbortSignal.timeout(WRITE_TIMEOUT_MS);
   try {
-    const { data, error, response } = await call();
+    const { data, error, response } = await call(signal);
     return {
       status: response.status,
       code: typeof error?.code === 'string' ? error.code : '',
@@ -142,10 +148,11 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
     };
   }
   if (status === 0) {
+    // No answer (offline, or the deadline passed): the write may still have landed.
     return {
       kind: 'failed',
-      title: 'We could not reach the server',
-      hint: `${NOT_DONE} Check your connection and try again.`,
+      title: 'We could not confirm the result',
+      hint: 'We could not tell whether it was saved; check the list before trying again.',
     };
   }
   return {
@@ -157,7 +164,13 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
 
 /** Marks the user list stale after an answer that tells us it may be out of date. */
 function staleAfter(qc: QueryClient, status: number): void {
-  if ((status >= 200 && status < 300) || status === 404 || status === 409 || status === 500) {
+  if (
+    (status >= 200 && status < 300) ||
+    status === 0 ||
+    status === 404 ||
+    status === 409 ||
+    status === 500
+  ) {
     void qc.invalidateQueries({ queryKey: adminKeys.users });
   }
 }
@@ -173,8 +186,9 @@ export async function inviteStaffUser(
   details: InviteDetails,
   currentPassword: string,
 ): Promise<StepUpOutcome & { user?: StaffUser }> {
-  const answer = await send(() =>
+  const answer = await send((signal) =>
     api.POST('/v1/admin/users', {
+      signal,
       body: {
         currentPassword,
         email: details.email,
@@ -185,7 +199,7 @@ export async function inviteStaffUser(
   );
   staleAfter(qc, answer.status);
   if (answer.status === 201 && answer.data) return { kind: 'done', user: answer.data };
-  if (answer.status === 500) {
+  if (answer.status === 500 || answer.status === 0) {
     // Outcome unknown (contract section 8): the row may exist and the mail may or may not have
     // gone out. Read the list, never send again for the user.
     const found = await checkInviteOutcome(qc, details.email);
@@ -207,8 +221,9 @@ export async function updateStaffUser(
 ): Promise<StepUpOutcome & { user?: StaffUser }> {
   const context: UserActionContext =
     'role' in change ? 'role' : change.active ? 'reactivate' : 'deactivate';
-  const answer = await send(() =>
+  const answer = await send((signal) =>
     api.PATCH('/v1/admin/users/{userId}', {
+      signal,
       params: { path: { userId } },
       body: { currentPassword, ...change },
     }),
