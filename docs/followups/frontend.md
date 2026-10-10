@@ -797,7 +797,7 @@ Scope: REVIEWER path, RECRUITER invite flow, staff auth. Read against apps/api/s
 **Found and fixed (web)**
 
 1. Review answer shapes. The API stores MCQ as `{ optionIds }` and short answers as `{ text }` (`grading/answer-shapes.ts`); the web only knew `selectedOptionIds`, a bare string or an array, so a real short answer showed as the JSON text `{"text":"..."}`. Fixed in `review/model.ts` (`answerBody`), mock answers use the real shapes.
-2. Scoring and verdict gating followed hard-coded type checks and `UNDER_REVIEW` only. It now follows the answer's `scoring` field and the session status: controls show for any answer whose `scoring` is not AUTO, and for a coding answer whose runs are `LOCAL_STUB` (dev stub grading); the verdict form shows for GRADED and UNDER_REVIEW without a verdict. The API stays the judge and a 409 reloads the page.
+2. Scoring gating follows the answer's `scoring` field (controls for any answer that is not AUTO, type-agnostic) and the verdict form needs status UNDER_REVIEW with no verdict, as the API does (GRADED shows an explanation). A 409 ANSWER_NOT_MANUAL turns the card read-only with a truthful message (a stub-graded coding answer is MANUAL_PENDING with the note "not graded (local stub)", which the API cannot score today, so the verdict stays blocked until Backend A's dev-only change).
 3. Scoring and verdict errors: 404, 400 and non-BUSY 503 got the generic "check your connection" text; each has its own message now.
 4. openapi.yaml review routes: uuid path params, the recording id pattern, 400 responses on PATCH and POST, "REAL" markers, the real answer shapes; `schema.d.ts` regenerated with gen:api.
 5. Playback in `next dev` without `apps/web/.env.local`: `NEXT_PUBLIC_UPLOAD_ORIGINS` empty meant the browser CSP blocked the MinIO part URLs. A dev server now falls back to `http://127.0.0.1:9000` (never in production builds). The playback error text now points at storage reachability and CORS.
@@ -829,5 +829,5 @@ Scope: REVIEWER path, RECRUITER invite flow, staff auth. Read against apps/api/s
 
 - Playback downloads every part into memory (cap 500 MB) and concatenates; long screen recordings may be refused ("too large").
 - The mocks still use non-UUID ids (`rs-1`); the real API answers 400 for those, so mock-mode tests do not prove UUID handling.
-- A GRADED session shows a verdict form that the API refuses until BE-12 (or the dev transition) runs; the 409 message explains and reloads.
+- A session stays GRADED (explanation shown, no decisions) until BE-12 or the dev-only transition moves it to UNDER_REVIEW.
 - No Playwright contract test against a running API was possible here (no dev server, docker or database allowed); the audit is by reading both sides plus vitest on the web side.

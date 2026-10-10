@@ -802,7 +802,7 @@ describe('sign-out that the server did not confirm', () => {
     expect(getAccessToken()).toBeNull();
   });
 
-  it('FR-104 TC-098: a 429 on refresh (auth rate limit) keeps the session, it is not a sign-out', async () => {
+  it('FR-104: a 429 on refresh (auth rate limit) keeps the session, it is not a sign-out', async () => {
     renderWithAuth(
       <>
         <LoginForm />
@@ -815,6 +815,90 @@ describe('sign-out that the server did not confirm', () => {
     expect(await refreshSession()).toBeNull();
     expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
     expect(getAccessToken()).not.toBeNull();
+  });
+
+  it('FR-104: a 429 on the first-load refresh says nobody was signed out, offers Try again and does not redirect', async () => {
+    server.use(
+      http.post(
+        '*/v1/auth/refresh',
+        () => new HttpResponse(null, { status: 429, headers: { 'retry-after': '60' } }),
+      ),
+    );
+    renderWithAuth(
+      <RequireRole>
+        <p>secret</p>
+      </RequireRole>,
+    );
+    expect(await screen.findByText(/We did not sign you out/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.queryByText('secret')).not.toBeInTheDocument();
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it('FR-104: a signed-in user whose refresh gets a 429 sees the rate-limit banner with the wait', async () => {
+    renderWithAuth(
+      <>
+        <LoginForm />
+        <RequireRole>
+          <Who />
+        </RequireRole>
+      </>,
+    );
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER'));
+    server.use(
+      http.post(
+        '*/v1/auth/refresh',
+        () => new HttpResponse(null, { status: 429, headers: { 'retry-after': '120' } }),
+      ),
+    );
+    await refreshSession();
+    expect(await screen.findByText(/rate limited; we did not sign you out/)).toHaveTextContent(
+      'in about 2 minute(s)',
+    );
+    expect(screen.getByTestId('who')).toHaveTextContent('RECRUITER');
+  });
+
+  it('FR-104: a 429 followed by a 401 on the next try signs the user out', async () => {
+    let calls = 0;
+    server.use(
+      http.post('*/v1/auth/refresh', () => {
+        calls += 1;
+        return new HttpResponse(null, { status: calls === 1 ? 429 : 401 });
+      }),
+    );
+    renderWithAuth(
+      <RequireRole>
+        <p>secret</p>
+      </RequireRole>,
+    );
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(router.replace).toHaveBeenCalled());
+    expect(calls).toBe(2);
+    expect(screen.queryByText('secret')).not.toBeInTheDocument();
+  });
+
+  it('FR-104: a 401 whose replay refresh gets a 429 returns the original 401 and sends no second refresh', async () => {
+    const first = renderWithAuth(<LoginForm />);
+    await signInAs(MOCK_USERS.recruiter);
+    await waitFor(() => expect(getAccessToken()).toBeTruthy());
+    first.unmount();
+    let refreshes = 0;
+    let times = 0;
+    server.use(
+      http.get('*/v1/time', () => {
+        times += 1;
+        return new HttpResponse(null, { status: 401 });
+      }),
+      http.post('*/v1/auth/refresh', () => {
+        refreshes += 1;
+        return new HttpResponse(null, { status: 429 });
+      }),
+    );
+    const { response } = await api.GET('/v1/time');
+    expect(response.status).toBe(401);
+    expect(refreshes).toBe(1);
+    expect(times).toBe(1);
   });
 
   it('FR-104: the pending marker holds no token', async () => {

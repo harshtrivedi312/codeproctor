@@ -27,10 +27,10 @@ function verdictError(e: unknown): string {
   if (e instanceof ApiFailure && e.status === 409) {
     if (e.code === 'VERDICT_ALREADY_SET') return 'A verdict is already set for this session.';
     if (e.code === 'SESSION_NOT_UNDER_REVIEW') {
-      return 'This session is not under review right now. The page has been reloaded with its current status.';
+      return 'This session is not under review right now, so no verdict can be set. Decisions open once it is under review.';
     }
     if (e.code === PENDING_CODE) {
-      return 'Some short answers still need scoring. Score them above, then set the verdict.';
+      return 'Some answers still need a decision. Score them above, then set the verdict.';
     }
     return 'The session changed since you opened it. The page has been reloaded; check it and try again.';
   }
@@ -70,8 +70,9 @@ export function VerdictPanel({ data }: { data: ReviewSession }): React.JSX.Eleme
         <p className="text-sm text-muted-foreground">Your role cannot set a verdict.</p>
       ) : !isDecidable(data) ? (
         <p className="text-sm text-muted-foreground">
-          A verdict can be set only while the session is under review. This session is{' '}
-          {data.session.status.replace(/_/g, ' ').toLowerCase()}.
+          {data.session.status === 'GRADED'
+            ? 'Graded, waiting for automatic analysis before review. Decisions open once the session is under review.'
+            : `A verdict can be set only while the session is under review. This session is ${data.session.status.replace(/_/g, ' ').toLowerCase()}.`}
         </p>
       ) : (
         <form
@@ -83,8 +84,9 @@ export function VerdictPanel({ data }: { data: ReviewSession }): React.JSX.Eleme
         >
           {blocked ? (
             <p id={hintId} className="text-sm text-muted-foreground">
-              {pending} short answer{pending === 1 ? ' is' : 's are'} still waiting for a decision.
-              Score {pending === 1 ? 'it' : 'them'} in the Answers section to enable the verdict.
+              {pending} answer{pending === 1 ? ' is' : 's are'} still waiting for a decision. Score{' '}
+              {pending === 1 ? 'it' : 'them'} in the Answers section to enable the verdict. An
+              answer that says it cannot be scored by hand in this build keeps the verdict blocked.
             </p>
           ) : null}
           <Field id="verdict-select" label="Verdict">

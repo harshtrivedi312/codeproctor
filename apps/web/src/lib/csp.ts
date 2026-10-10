@@ -56,8 +56,9 @@ export function parseOrigins(list: string | undefined): string[] {
 /**
  * The local MinIO of infra/docker-compose.yml (S3_ENDPOINT in .env.example). Recording playback and
  * uploads go straight from the browser to it. Used ONLY by `next dev` when NEXT_PUBLIC_UPLOAD_ORIGINS
- * is empty, so a dev server started without apps/web/.env.local still plays recordings. Production
- * builds never get it: they need the real origin from NEXT_PUBLIC_UPLOAD_ORIGINS.
+ * is empty, so a dev server started without apps/web/.env.local still plays recordings. It covers
+ * ONLY http://127.0.0.1:9000 (the S3_ENDPOINT that infra/scripts/local-env.mjs writes); any other
+ * storage host needs NEXT_PUBLIC_UPLOAD_ORIGINS. Production builds never get it.
  */
 export const DEV_STORAGE_ORIGINS: readonly string[] = ['http://127.0.0.1:9000'];
 

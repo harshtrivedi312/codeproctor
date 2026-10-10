@@ -100,6 +100,14 @@ export function answerBody(answer: ReviewAnswer): AnswerBody {
   if (Array.isArray(a)) return { kind: 'options', ids: a.map((x) => String(x)) };
   if (typeof a === 'object') {
     const o = a as Record<string, unknown>;
+    // A coding answer whose code was never saved: { language, code: null }.
+    if (o['code'] === null) {
+      return {
+        kind: 'code',
+        language: typeof o['language'] === 'string' ? o['language'] : '',
+        code: '',
+      };
+    }
     // The API stores { optionIds } for MCQ and { text } for SHORT_ANSWER (grading/answer-shapes.ts);
     // the other member names are kept for older rows and the e2e fixtures.
     for (const key of ['optionIds', 'selectedOptionIds', 'selected']) {
@@ -125,25 +133,20 @@ export function scoringState(a: ReviewAnswer): ScoringState {
   return a.scoring === 'MANUAL_PENDING' ? 'pending' : a.scoring === 'MANUAL' ? 'manual' : 'auto';
 }
 
-/** A coding run that the local execution stub answered: not real execution, so a person decides. */
-export const isStubGraded = (a: ReviewAnswer): boolean =>
-  (a.runResults ?? []).some((r) => r.tests.some((t) => t.status.toUpperCase() === 'LOCAL_STUB'));
-
 /**
- * Follows the answer's own `scoring` field, not its type: a MANUAL or MANUAL_PENDING answer can be
- * decided, and so can a stub-graded coding answer (development only). The API stays the judge: any
- * other answer is 409 ANSWER_NOT_MANUAL, which the card explains.
+ * Follows the answer's own `scoring` field, not its type: MANUAL and MANUAL_PENDING answers show the
+ * controls. The API stays the judge (today it scores SHORT_ANSWER only): any other answer is 409
+ * ANSWER_NOT_MANUAL, and the card then remembers that scoring was refused.
  */
-export const canScoreManually = (a: ReviewAnswer): boolean =>
-  a.scoring !== 'AUTO' || isStubGraded(a);
+export const canScoreManually = (a: ReviewAnswer): boolean => a.scoring !== 'AUTO';
 
 /**
- * Scoring and the verdict apply while the session is UNDER_REVIEW (or GRADED, which moves to
- * UNDER_REVIEW right after grading) and has no verdict yet. The API checks the status itself and a
- * 409 SESSION_NOT_UNDER_REVIEW reloads the page, so the controls follow the status field only.
+ * Scoring and the verdict apply only to a session UNDER_REVIEW with no verdict yet: the API takes
+ * the session lock with `status = UNDER_REVIEW` and answers 409 SESSION_NOT_UNDER_REVIEW for
+ * GRADED, COMPLETED and APPEALED sessions (docs/api-contract.md section 7).
  */
 export const isDecidable = (s: ReviewSession): boolean =>
-  (s.session.status === 'UNDER_REVIEW' || s.session.status === 'GRADED') && verdictOf(s) === null;
+  s.session.status === 'UNDER_REVIEW' && verdictOf(s) === null;
 
 export const pendingCount = (s: ReviewSession): number =>
   s.answers.filter((a) => a.scoring === 'MANUAL_PENDING').length;
