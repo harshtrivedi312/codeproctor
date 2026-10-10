@@ -4,21 +4,15 @@ import { Check } from 'lucide-react';
 import * as React from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { mockingEnabled } from '@/lib/env';
 import { candidateApi } from './api';
 import { StepFrame } from './step-frame';
 
 /**
  * Start hands over to the test screen in the SAME document (FU-FEB-10, option (c)): the candidate
- * session token stays in memory and nothing is written to storage or a URL. The cost is the CSP:
- * the document keeps the stepper's policy, which has no WebAssembly allowance (D-45 limits that to
- * /t/[token]/test), so the in-browser ML detectors cannot run. They are not started, and today nothing is reported for them (FU-FEB-44 plans a DETECTOR_UNAVAILABLE or capability flag, so a reviewer can tell "off" from "no findings").
- * Owner decision still open: extend the CSP allowance to /t/link, or pick option (a) or (b).
- *
- * Until the real backend serves the test routes, Start is only available with mocks on, where the
- * whole path works end to end.
+ * session token stays in memory and nothing is written to storage or a URL. /t/link is the one
+ * route whose CSP allows WebAssembly (D-45, P-17), so the in-browser detectors may run there once
+ * they ship; until then they report DETECTOR_UNAVAILABLE.
  */
-export const START_ENABLED: boolean = mockingEnabled;
 
 const DONE_ITEMS = [
   'You signed the consent document',
@@ -36,13 +30,18 @@ export function StartStep({
   onStarted: () => void;
   onSessionEnded: () => void;
 }): React.JSX.Element {
+  // Guards a double click before React has re-rendered the disabled button.
+  const sent = React.useRef(false);
   const start = useMutation({
     mutationFn: async () => {
-      // Never start the server clock when the test route cannot continue (see START_ENABLED).
-      if (!START_ENABLED) return { ok: false, kind: 'network' } as const;
       return resuming ? ({ ok: true } as const) : candidateApi.startTest();
     },
+    onError: () => {
+      sent.current = false;
+    },
     onSuccess: (result) => {
+      // Sent again only when the start did not go through: a started test is never started twice.
+      if (!result.ok) sent.current = false;
       if (result.ok) onStarted();
       else if (result.kind === 'problem' && result.status === 401) onSessionEnded();
     },
@@ -91,22 +90,15 @@ export function StartStep({
           {problem}
         </Alert>
       ) : null}
-      {!START_ENABLED ? (
-        <Alert
-          tone="info"
-          title="The test cannot be started from this page yet"
-          data-testid="start-unavailable"
-        >
-          This step is not connected to the live test screen yet, so the timer cannot start. Nothing
-          has been started and your progress is saved. Please contact your recruiter if you see this
-          message.
-        </Alert>
-      ) : null}
       <Button
         size="lg"
         className="min-h-11"
-        disabled={start.isPending || !START_ENABLED}
-        onClick={() => start.mutate()}
+        disabled={start.isPending}
+        onClick={() => {
+          if (sent.current) return;
+          sent.current = true;
+          start.mutate();
+        }}
       >
         {start.isPending ? 'Starting...' : resuming ? 'Continue my test' : 'Start the test'}
       </Button>

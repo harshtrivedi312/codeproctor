@@ -64,8 +64,14 @@ describe('CSP (NFR-04)', () => {
     expect(csp).toMatch(/script-src[^;]*'wasm-unsafe-eval'/);
     expect(buildCsp({ ...base, isDev: true })).not.toContain('wasm-unsafe-eval');
   });
-  it('D-45 (P-05): only /t/[token]/test counts as the candidate test route', () => {
-    for (const path of ['/t/abc123/test', '/t/abc123/test/', '/t/demo/test']) {
+  it('D-45 (P-05): only /t/link and /t/[token]/test count as the candidate test document', () => {
+    for (const path of [
+      '/t/abc123/test',
+      '/t/abc123/test/',
+      '/t/demo/test',
+      '/t/link',
+      '/t/link/',
+    ]) {
       expect(isCandidateTestPath(path)).toBe(true);
     }
     for (const path of [
@@ -81,6 +87,12 @@ describe('CSP (NFR-04)', () => {
       '/t/a/b/test',
       '/x/t/abc123/test',
       '/t/abc123/testing',
+      '/t/start',
+      '/t/phone',
+      '/t/link/extra',
+      '/t/linkx',
+      '/T/link',
+      '/t/link;x',
       '/errors/expired',
       '/dev/proctor',
     ]) {

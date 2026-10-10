@@ -49,6 +49,19 @@ describe('practice question (FR-406)', () => {
     expect(screen.queryByRole('timer')).not.toBeInTheDocument();
   });
 
+  it('FR-406 TC-041: three quick clicks on Run send one practice run', async () => {
+    await signIn();
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    renderWithQuery(<PracticeStep onDone={vi.fn()} onSessionEnded={vi.fn()} />);
+    const editor = await screen.findByLabelText('Practice code editor');
+    await user.type(editor, 'print(1)');
+    const button = screen.getByRole('button', { name: /^run$/i });
+    await user.tripleClick(button);
+    await screen.findByText(/sample tests passed/i);
+    expect(seen.filter((r) => r.url.endsWith('/practice/run'))).toHaveLength(1);
+  });
+
   it('FR-406: Run shows sample test results from the practice route only, and nothing is saved', async () => {
     await signIn();
     const seen = recordRequests();

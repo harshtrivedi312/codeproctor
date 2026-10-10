@@ -12,8 +12,12 @@ const cspFor = (path: string): string => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe('CSP middleware (D-45 (P-05))', () => {
-  it("adds 'wasm-unsafe-eval' on the candidate test route", () => {
+  it("adds 'wasm-unsafe-eval' on the candidate test route and on /t/link only (P-17)", () => {
     expect(cspFor('/t/abc123/test')).toContain("'wasm-unsafe-eval'");
+    expect(cspFor('/t/link')).toContain("'wasm-unsafe-eval'");
+    for (const path of ['/t/start', '/t/phone', '/t/link/extra', '/t/linkx', '/t/abc123']) {
+      expect(cspFor(path), path).not.toContain('wasm-unsafe-eval');
+    }
   });
 
   it("does not add 'wasm-unsafe-eval' on staff pages or any other route", () => {

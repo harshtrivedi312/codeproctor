@@ -61,6 +61,9 @@ export function PracticeStep({
     return () => window.clearInterval(id);
   }, [lastRun]);
 
+  // The button is only disabled after the next render: quick clicks must not send more runs
+  // (TC-041), so the cooldown is also checked here, synchronously.
+  const lastSent = React.useRef<number | null>(null);
   const run = useMutation({
     mutationFn: (v: { language: string; code: string }) => candidateApi.runPractice(v),
   });
@@ -173,6 +176,10 @@ export function PracticeStep({
               className="min-h-11"
               disabled={run.isPending || wait > 0}
               onClick={() => {
+                const clicked = Date.now();
+                if (lastSent.current !== null && clicked - lastSent.current < RUN_COOLDOWN_MS)
+                  return;
+                lastSent.current = clicked;
                 setLastRun(Date.now());
                 setNow(Date.now());
                 run.mutate({ language: active, code });
