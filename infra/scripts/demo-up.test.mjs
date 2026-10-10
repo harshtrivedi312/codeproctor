@@ -428,3 +428,14 @@ describe('demo:up summary: local use only (#398 security review)', () => {
     assert.match(text, /cleartext over plain HTTP/);
   });
 });
+
+describe('demo:up tops up an existing .env (secrets added after it was written)', () => {
+  it('with an .env it runs local-env --top-up before the env check; without one it writes it', () => {
+    const existing = planSteps({ hasEnv: true, hasModules: true, startApps: false });
+    assert.deepEqual(existing[0].cmd, ['node', 'infra/scripts/local-env.mjs', '--top-up']);
+    assert.equal(existing[1].check, 'env');
+    const fresh = planSteps({ hasEnv: false, hasModules: true, startApps: false });
+    assert.deepEqual(fresh[0].cmd, ['node', 'infra/scripts/local-env.mjs']);
+    assert.equal(fresh.filter((s) => s.cmd?.includes('--top-up')).length, 0);
+  });
+});

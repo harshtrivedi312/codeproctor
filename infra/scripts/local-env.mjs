@@ -1,6 +1,6 @@
 // Writes a working local .env (and apps/web/.env.local) for docs/local-run.md.
 //
-//   node infra/scripts/local-env.mjs [--dir <repository root>]
+//   node infra/scripts/local-env.mjs [--dir <repository root>] [--top-up]
 //
 // Copies .env.example and replaces every `change-me` with a fresh random value, so a local run needs
 // no hand editing and no two machines share a secret. The database passwords are random too, and the
@@ -9,15 +9,37 @@
 // MinIO origin the browser may upload to and play recordings from (NEXT_PUBLIC_UPLOAD_ORIGINS feeds the
 // CSP connect-src; it must be the origin of the presigned URLs, i.e. S3_ENDPOINT).
 //
+// `--top-up` is for an .env that already exists: it APPENDS the independent secrets that .env.example
+// has gained since (for example QUESTION_OPTION_ID_SECRET) and that the file lacks, and touches
+// nothing else (database and object-store passwords stay as they are). It prints the names only.
+//
 // Local development only: the values are for a database on this machine. It never overwrites a file
 // that exists (delete it first to start again), and it never prints a value. Staging, pilot and
 // production load their secrets from their own stores (ADR 0009), not from this script.
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const NAME = 'local-env';
+
+/**
+ * Generated values that depend on another value (the two database URLs carry the passwords, the S3
+ * secret is the MinIO login, the Judge0 ones belong to databases that may already exist): never
+ * appended by `--top-up`, since a new value would disagree with what is already running.
+ */
+const COUPLED = new Set([
+  'POSTGRES_PASSWORD',
+  'APP_USER_PASSWORD',
+  'DATABASE_URL',
+  'MIGRATION_DATABASE_URL',
+  'MINIO_ROOT_PASSWORD',
+  'S3_SECRET_ACCESS_KEY',
+  'JUDGE0_AUTH_TOKEN',
+  'JUDGE0_AUTHZ_TOKEN',
+  'JUDGE0_DB_PASSWORD',
+  'JUDGE0_REDIS_PASSWORD',
+]);
 
 const hex = (bytes) => randomBytes(bytes).toString('hex');
 const b64 = (bytes) => randomBytes(bytes).toString('base64');
@@ -70,6 +92,34 @@ export function buildLocalEnv(example, supports = { smtpDev: false, execStub: fa
   return text;
 }
 
+/**
+ * The lines to append to an existing .env (pure apart from randomness): for every key that
+ * .env.example still marks `change-me`, that has a generator here, is independent of other values
+ * and is NOT defined in `existing` (commented out or absent), a fresh random value. Keys that
+ * `existing` already defines, even with an empty or placeholder value, are never touched.
+ * Returns { keys, text }; `text` is '' when nothing is missing.
+ */
+export function topUpLocalEnv(example, existing) {
+  const generated = parseGenerated(buildLocalEnv(example));
+  const wanted = [...example.matchAll(/^([A-Za-z0-9_]+)=.*change-me/gm)].map((m) => m[1]);
+  const defined = new Set([...existing.matchAll(/^([A-Za-z0-9_]+)=/gm)].map((m) => m[1]));
+  const keys = wanted.filter((k) => !COUPLED.has(k) && !defined.has(k) && k in generated);
+  if (keys.length === 0) return { keys, text: '' };
+  const lead = existing === '' || existing.endsWith('\n') ? '' : '\n';
+  const block = [
+    '# --- appended by `node infra/scripts/local-env.mjs --top-up`: secrets added to .env.example later ---',
+    ...keys.map((k) => `${k}=${generated[k]}`),
+    '',
+  ].join('\n');
+  return { keys, text: `${lead}${block}` };
+}
+
+function parseGenerated(text) {
+  const out = {};
+  for (const m of text.matchAll(/^([A-Za-z0-9_]+)=(.*)$/gm)) out[m[1]] = m[2];
+  return out;
+}
+
 /** The face-match worker's local settings (apps/worker/tools/be08/run-local.sh): a fresh signing key per machine. */
 function workerBlock() {
   return [
@@ -105,11 +155,15 @@ export const WEB_ENV_LOCAL = [
 ].join('\n');
 
 function main() {
-  const args = process.argv.slice(2);
+  let args = process.argv.slice(2);
+  const topUp = args.includes('--top-up');
+  args = args.filter((a) => a !== '--top-up');
   let root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
   if (args.length === 2 && args[0] === '--dir') root = resolve(args[1]);
   else if (args.length > 0) {
-    console.error(`${NAME}: usage: node infra/scripts/local-env.mjs [--dir <repository root>]`);
+    console.error(
+      `${NAME}: usage: node infra/scripts/local-env.mjs [--dir <repository root>] [--top-up]`,
+    );
     process.exit(1);
   }
   const examplePath = join(root, '.env.example');
@@ -118,6 +172,25 @@ function main() {
   if (!existsSync(examplePath)) {
     console.error(`${NAME}: ${examplePath} does not exist.`);
     process.exit(1);
+  }
+  if (topUp) {
+    if (!existsSync(envPath)) {
+      console.error(`${NAME}: --top-up needs an existing .env; run without it to write one.`);
+      process.exit(1);
+    }
+    const { keys, text } = topUpLocalEnv(
+      readFileSync(examplePath, 'utf8'),
+      readFileSync(envPath, 'utf8'),
+    );
+    if (keys.length === 0) {
+      console.log('.env has every secret .env.example asks for; nothing appended.');
+      return;
+    }
+    appendFileSync(envPath, text);
+    console.log(
+      `appended ${keys.length} missing secret(s) to .env: ${keys.join(', ')} (existing values untouched).`,
+    );
+    return;
   }
   if (existsSync(envPath)) {
     console.error(

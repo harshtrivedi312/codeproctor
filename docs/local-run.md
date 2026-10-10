@@ -35,7 +35,7 @@ pnpm install
 pnpm demo:up
 ```
 
-`pnpm demo:up` writes `.env` if it is missing, checks that every port it needs is free (see "Port already in
+`pnpm demo:up` writes `.env` if it is missing (and, if it exists, appends any independent secret that `.env.example` has gained since, such as `QUESTION_OPTION_ID_SECRET`, without touching existing values; it names them in the output), checks that every port it needs is free (see "Port already in
 use" below), starts the stack, builds the shared package, migrates,
 seeds, gives the seeded invitation a real link, starts the API and the web app in the background (logs in
 `.demo/`), waits until both answer, and prints the links, the accounts and where the password is. It is safe
