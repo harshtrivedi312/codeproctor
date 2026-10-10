@@ -427,7 +427,7 @@ function InviteDialog({
       <DialogContent>
         {details ? (
           <>
-            <DialogTitle>Confirm with your password</DialogTitle>
+            <DialogTitle>Confirm the invitation</DialogTitle>
             <DialogDescription>
               {`We will email ${details.email} a link to set a password. Enter your own password to send the invitation.`}
             </DialogDescription>
