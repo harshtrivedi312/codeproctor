@@ -1,11 +1,12 @@
-import type { ConfigService } from '@nestjs/config';
+import type { INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
-import express from 'express';
-import type { Request, Response } from 'express';
 import request from 'supertest';
 import type { Env } from '../config/env';
 import { AuthController, refreshCookieOptions } from './auth.controller';
-import type { AuthService, SessionOutcome } from './auth.service';
+import { AuthService } from './auth.service';
+import type { SessionOutcome } from './auth.service';
 
 // FR-101, FR-104, DL-52: the cp_refresh `secure` attribute follows the environment. It is false
 // only for APP_ENV=development; every other value, and NODE_ENV=production always, stays true.
@@ -65,38 +66,46 @@ describe('AuthController cookie attributes (FR-101, FR-104, DL-52)', () => {
     logout: (): Promise<void> => Promise.resolve(),
   } as unknown as AuthService;
 
-  function app(appEnv: AppEnv, nodeEnv: NodeEnv): express.Express {
+  // The real AuthController behind a Nest HTTP app (platform-express and cookie-parser are direct
+  // dependencies), with only its two collaborators faked: the real Set-Cookie headers are asserted.
+  async function app(appEnv: AppEnv, nodeEnv: NodeEnv): Promise<INestApplication> {
     const values: Record<string, string> = { APP_ENV: appEnv, NODE_ENV: nodeEnv };
-    const config = { get: (k: string) => values[k] } as unknown as ConfigService<Env, true>;
-    const controller = new AuthController(fakeAuth, config);
-    const a = express();
-    a.use(express.json());
-    a.use(cookieParser('test-secret'));
-    a.post('/login', (req: Request, res: Response, next) => {
-      controller
-        .login({ email: 'a@b.c', password: 'x' }, req, res)
-        .then(() => res.status(200).end(), next);
-    });
-    a.post('/logout', (req: Request, res: Response, next) => {
-      controller.logout(req, res).then(() => res.status(204).end(), next);
-    });
-    return a;
+    const config = { get: (k: string) => values[k] };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [AuthController],
+      providers: [
+        { provide: AuthService, useValue: fakeAuth },
+        { provide: ConfigService, useValue: config },
+      ],
+    }).compile();
+    const nest = moduleRef.createNestApplication();
+    nest.use(cookieParser('test-secret'));
+    await nest.init();
+    return nest;
   }
 
   async function setAndClear(appEnv: AppEnv, nodeEnv: NodeEnv): Promise<[string, string]> {
-    const a = app(appEnv, nodeEnv);
-    const login = await request(a).post('/login').expect(200);
-    const set = (login.headers['set-cookie'] as unknown as string[]).find((c) =>
-      c.startsWith('cp_refresh='),
-    );
-    const logout = await request(a)
-      .post('/logout')
-      .set('Cookie', 'cp_refresh=anything')
-      .expect(204);
-    const cleared = (logout.headers['set-cookie'] as unknown as string[]).find((c) =>
-      c.startsWith('cp_refresh=;'),
-    );
-    return [set ?? '', cleared ?? ''];
+    const nest = await app(appEnv, nodeEnv);
+    try {
+      const http = nest.getHttpServer() as Parameters<typeof request>[0];
+      const login = await request(http)
+        .post('/auth/login')
+        .send({ email: 'a@b.c', password: 'x' })
+        .expect(200);
+      const set = (login.headers['set-cookie'] as unknown as string[]).find((c) =>
+        c.startsWith('cp_refresh='),
+      );
+      const logout = await request(http)
+        .post('/auth/logout')
+        .set('Cookie', 'cp_refresh=anything')
+        .expect(204);
+      const cleared = (logout.headers['set-cookie'] as unknown as string[]).find((c) =>
+        c.startsWith('cp_refresh=;'),
+      );
+      return [set ?? '', cleared ?? ''];
+    } finally {
+      await nest.close();
+    }
   }
 
   it('development: neither the set nor the clear carries Secure', async () => {
