@@ -1,4 +1,4 @@
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
@@ -628,6 +628,57 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(await screen.findByTestId('test-submitted')).toHaveTextContent(
       /your test is submitted/i,
     );
+  });
+
+  it('FR-505 D-84: after the last section close is accepted and the session still reads as running, no question views are fetched (they answer 409)', async () => {
+    await startedSession();
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await user.click(await screen.findByRole('button', { name: /continue to the next section/i }));
+    await screen.findByText(/section 2 of 2/i);
+    server.use(
+      http.post(`${cand}/session/section/finish`, () =>
+        HttpResponse.json({ accepted: true }, { status: 202 }),
+      ),
+      http.get(`${cand}/session`, () =>
+        HttpResponse.json({
+          serverTime: new Date().toISOString(),
+          status: 'IN_PROGRESS',
+          startedAt: new Date().toISOString(),
+          deadlineAt: new Date(Date.now() + 600_000).toISOString(),
+          sectionDeadlineAt: null,
+          pauseReasons: [],
+        }),
+      ),
+    );
+    const seen = recordRequests();
+    await user.click(screen.getByRole('button', { name: 'Finish section' }));
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Finish section' }),
+    );
+    await waitFor(() => expect(seen.some((r) => r.url.endsWith('/session'))).toBe(true));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(
+      seen.filter((r) => r.method === 'GET' && /\/questions\//.test(r.url)).map((r) => r.url),
+    ).toEqual([]);
+  });
+
+  it('FR-502 TC-041: three clicks on Run in the same tick send one run', async () => {
+    await startedSession();
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print(1)');
+    const run = screen.getByRole('button', { name: /run sample tests/i });
+    fireEvent.click(run);
+    fireEvent.click(run);
+    fireEvent.click(run);
+    await screen.findByText(/sample tests passed/i);
+    expect(seen.filter((r) => r.url.endsWith('/run'))).toHaveLength(1);
   });
 
   it('ADR 0002 FR-505: a 409 SESSION_NOT_ACTIVE on the re-read also means the test is over', async () => {

@@ -82,7 +82,13 @@ export interface TestSource {
    * when the server says the test is over (a status in OVER_STATUSES, or 409 SESSION_NOT_ACTIVE).
    * Null when it fails, and for an unknown status (never treated as over).
    */
-  readSession(): Promise<Schemas['CandidateSession'] | { submitted: true } | null>;
+  readSession(opts?: {
+    /**
+     * The last section's close was accepted and the session is not over yet: read the state only.
+     * The section's questions are closed and would answer 409, so none are fetched (null then).
+     */
+    stateOnly?: boolean;
+  }): Promise<Schemas['CandidateSession'] | { submitted: true } | null>;
   /** The server's current time, ISO. Rejects when it cannot be read (FR-505). */
   serverNow(): Promise<string>;
   saveDraft(questionId: string, body: DraftBody): Promise<DraftResult>;

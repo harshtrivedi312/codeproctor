@@ -140,7 +140,7 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
   return {
     isDemo: false,
     loadSession: load,
-    async readSession() {
+    async readSession(opts) {
       // A lost answer to the last section's finish: the server may have submitted the test. Ask for
       // the state first, so "over" is told apart from "could not read".
       const state = await requestAt(sessionStateSchema, '/session', {
@@ -163,6 +163,8 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
       ) {
         return { submitted: true };
       }
+      // The last section is closed and not yet submitted: its questions answer 409, do not ask.
+      if (opts?.stateOnly) return null;
       try {
         return await load();
       } catch {
