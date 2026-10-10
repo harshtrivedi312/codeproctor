@@ -38,6 +38,7 @@ const WRITE_TIMEOUT_MS = 20_000;
 async function send<T>(call: (signal: AbortSignal) => Promise<Raw<T>>): Promise<Answer<T>> {
   // One deadline for the whole call, so a hung request cannot freeze the screen. The abort, like
   // an offline error, is status 0: the write may or may not have landed.
+  // The deadline covers the requests, not the wait inside refreshForReplay (a refresh has its own).
   const signal = AbortSignal.timeout(WRITE_TIMEOUT_MS);
   try {
     const { data, error, response } = await call(signal);
@@ -151,6 +152,7 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
     // No answer (offline, or the deadline passed): the write may still have landed.
     return {
       kind: 'failed',
+      tone: 'warning',
       title: 'We could not confirm the result',
       hint: 'We could not tell whether it was saved; check the list before trying again.',
     };

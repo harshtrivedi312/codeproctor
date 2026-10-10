@@ -99,6 +99,11 @@ const busyMiddleware: Middleware = {
     }
     return request;
   },
+  onError({ request }) {
+    // No answer at all: drop the copy of the body (it may carry a currentPassword).
+    busyCopies.delete(request);
+    return undefined;
+  },
   async onResponse({ request, response }) {
     const failedWrite = response.status === 500 && !['GET', 'HEAD'].includes(request.method);
     if (failedWrite && !isAuthRequest(request.url) && getAccessToken()) {

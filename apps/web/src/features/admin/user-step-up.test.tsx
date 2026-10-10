@@ -18,7 +18,11 @@ vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('next/navigation', async () => (await import('@/test/nav-mock')).navigationMock());
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  // Spies on AbortSignal.timeout and retryCopies.set must not leak out of a failed test.
+  vi.restoreAllMocks();
+});
 afterAll(() => server.close());
 beforeEach(() => resetAuthTestState());
 
@@ -548,8 +552,16 @@ describe('Users: risky paths of a password-protected write (FR-102, FR-103)', ()
     await waitFor(() =>
       expect(within(dialog).getByRole('button', { name: 'Checking…' })).toBeDisabled(),
     );
+    let listReads = 0;
+    const count = ({ request }: { request: Request }) => {
+      if (request.method === 'GET' && request.url.includes('/admin/users')) listReads += 1;
+    };
+    server.events.on('request:start', count);
     deadline.abort();
     const alert = await within(dialog).findByRole('alert');
+    // No answer: the list may be stale, so it is read again.
+    await waitFor(() => expect(listReads).toBeGreaterThan(0));
+    server.events.removeListener('request:start', count);
     expect(alert).toHaveTextContent('We could not confirm the result');
     expect(within(dialog).getByRole('button', { name: 'Change role' })).toBeEnabled();
     spy.mockRestore();
