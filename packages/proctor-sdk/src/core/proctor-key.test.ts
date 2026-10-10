@@ -679,6 +679,39 @@ describe('the key is never written after a purge, never extractable (ADR 0013 se
     await vi.waitFor(() => expect(again.sent.length).toBeGreaterThan(0), { timeout: 6000 });
     expect(again.sent[0]?.signature).toBe(hmacHex(KEY3_B64, again.sent[0]?.body ?? ''));
     await s.stop();
+  }, 15_000);
+
+  it('S4: a put that FAILS after stop() and a new start() raises no idb flag for the new run', async () => {
+    const real = newStore();
+    const inner = new IdbKeyStore(real);
+    const gate = deferred<void>();
+    let first = true;
+    const keyStore: KeyStore = {
+      get: (sid) => inner.get(sid),
+      put: async (sid, v) => {
+        if (first) {
+          first = false;
+          await gate.promise;
+          throw new Error('quota');
+        }
+        return inner.put(sid, v);
+      },
+      delete: (sid) => inner.delete(sid),
+    };
+    const key = await importSessionKey(KEY2_B64);
+    const s = new ProctorSession();
+    const flags: string[] = [];
+    await s.start(sessionRig({ store: real, keyStore, signingKey: { key } }).cfg);
+    const pending = s.setKey(key, 3); // hangs in the put of run 1
+    await vi.waitFor(() => expect(first).toBe(false));
+    await s.stop();
+    await s.start(sessionRig({ store: real, keyStore, signingKey: { key } }).cfg);
+    s.on('capability', (f) => flags.push(`${f.id}:${f.status}`));
+    gate.resolve(); // the old put now fails
+    await pending.catch(() => undefined);
+    await new Promise((x) => setTimeout(x, 30));
+    expect(flags.filter((f) => f.startsWith('idb'))).toEqual([]);
+    await s.stop();
   });
 
   it('B2: an extractable or non-HMAC key is refused by start, setKey and the store, and a provider that returns one gets no adoption', async () => {
