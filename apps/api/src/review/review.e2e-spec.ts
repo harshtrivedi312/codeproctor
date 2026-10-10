@@ -663,6 +663,173 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
 
   // ---- playback ----------------------------------------------------------------------------------
 
+  describe('FR-105, FR-202, FR-205: the bundle statement is the one the candidate saw', () => {
+    interface VariantSeed {
+      type: QuestionType;
+      statementMd: string;
+      params?: Json;
+      renderedStatement?: string;
+      hiddenInput?: string;
+    }
+
+    async function seedVariantAnswer(
+      s: { sessionId: string; sectionId: string; orgId: string },
+      position: number,
+      o: VariantSeed,
+    ): Promise<void> {
+      const n = ++seq;
+      const q = await owner.question.create({
+        data: { orgId: s.orgId, slug: `qv-${n}`, type: o.type },
+      });
+      const v = await owner.questionVersion.create({
+        data: {
+          questionId: q.id,
+          version: 1,
+          title: `Variant question ${n}`,
+          statementMd: o.statementMd,
+          difficulty: 'EASY',
+          allowedLanguages: ['python'],
+          isPublished: true,
+          referenceSolution: { python: 'REFERENCE_SECRET' },
+        },
+      });
+      if (o.hiddenInput !== undefined) {
+        await owner.testCase.create({
+          data: {
+            questionVersionId: v.id,
+            input: o.hiddenInput,
+            expectedOutput: 'HIDDEN_OUTPUT_SECRET',
+            isHidden: true,
+            position: 1,
+          },
+        });
+      }
+      const variant =
+        o.params === undefined
+          ? null
+          : await owner.questionVariant.create({
+              data: {
+                questionVersionId: v.id,
+                params: o.params as never,
+                renderedStatement: o.renderedStatement ?? '',
+              },
+            });
+      const tq = await owner.testQuestion.create({
+        data: { sectionId: s.sectionId, questionVersionId: v.id, points: 10, position },
+      });
+      await owner.sessionQuestion.create({
+        data: {
+          sessionId: s.sessionId,
+          testQuestionId: tq.id,
+          questionVersionId: v.id,
+          variantId: variant?.id,
+          position,
+          points: 10,
+          scoring: 'AUTO',
+        },
+      });
+    }
+
+    const statements = (body: unknown): string[] =>
+      (body as { answers: { statement: string }[] }).answers.map((a) => a.statement);
+
+    it('FR-105, FR-202: a coding question shows its variant params applied, and no params or hidden data', async () => {
+      const s = await seedSession();
+      await seedVariantAnswer(s, 1, {
+        type: 'CODING',
+        statementMd: 'Print {{item}} at most {{limit}} times at {{rate}}.',
+        params: { item: 'widget', limit: 3, rate: 'PARAM_SECRET_RATE' },
+        hiddenInput: 'HIDDEN_INPUT_SECRET',
+      });
+      const who = await make(UserRole.REVIEWER);
+      const res = await http().get(bundleUrl(s.sessionId)).set(who.auth).expect(200);
+      expect(statements(res.body)).toEqual(['Print widget at most 3 times at PARAM_SECRET_RATE.']);
+      const answer = (res.body as { answers: Json[] }).answers[0] as Json;
+      expect(Object.keys(answer)).not.toContain('params');
+      expect(Object.keys(answer)).not.toContain('variant');
+      const text = JSON.stringify(res.body);
+      for (const secret of ['HIDDEN_INPUT_SECRET', 'HIDDEN_OUTPUT_SECRET', 'REFERENCE_SECRET']) {
+        expect(text).not.toContain(secret);
+      }
+      expect(text).not.toContain('"params"');
+      expect(text).not.toContain('{{');
+    });
+
+    it('FR-202: two sessions with different variants of the same question see their own values', async () => {
+      const first = await seedSession();
+      const second = await seedSession();
+      for (const [s, item] of [
+        [first, 'alpha'],
+        [second, 'beta'],
+      ] as const) {
+        await seedVariantAnswer(s, 1, {
+          type: 'CODING',
+          statementMd: 'Handle {{item}}.',
+          params: { item },
+        });
+      }
+      const who = await make(UserRole.REVIEWER);
+      const a = await http().get(bundleUrl(first.sessionId)).set(who.auth).expect(200);
+      const b = await http().get(bundleUrl(second.sessionId)).set(who.auth).expect(200);
+      expect(statements(a.body)).toEqual(['Handle alpha.']);
+      expect(statements(b.body)).toEqual(['Handle beta.']);
+    });
+
+    it('FR-105: a session question without a variant returns the plain statement', async () => {
+      const s = await seedSession();
+      await seedVariantAnswer(s, 1, { type: 'CODING', statementMd: 'Plain statement.' });
+      const who = await make(UserRole.REVIEWER);
+      const res = await http().get(bundleUrl(s.sessionId)).set(who.auth).expect(200);
+      expect(statements(res.body)).toEqual(['Plain statement.']);
+    });
+
+    it('FR-105: an unknown placeholder falls back to the stored or raw statement, never a 500', async () => {
+      const s = await seedSession();
+      await seedVariantAnswer(s, 1, {
+        type: 'CODING',
+        statementMd: 'Use {{item}} and {{missing}}.',
+        params: { item: 'x' },
+        renderedStatement: 'Stored rendering.',
+      });
+      await seedVariantAnswer(s, 2, {
+        type: 'CODING',
+        statementMd: 'Use {{missing}} here.',
+        params: { item: 'x' },
+      });
+      const who = await make(UserRole.REVIEWER);
+      const res = await http().get(bundleUrl(s.sessionId)).set(who.auth).expect(200);
+      expect(statements(res.body)).toEqual(['Stored rendering.', 'Use {{missing}} here.']);
+    });
+
+    it('FR-205, FR-202: MCQ and short-answer statements render too', async () => {
+      const s = await seedSession();
+      await seedVariantAnswer(s, 1, {
+        type: 'MCQ',
+        statementMd: 'Which is a {{noun}}?',
+        params: { noun: 'fruit' },
+      });
+      await seedVariantAnswer(s, 2, {
+        type: 'SHORT_ANSWER',
+        statementMd: 'Name a {{noun}} with {{minRun}} letters.',
+        params: { noun: 'tree', minRun: 4 },
+      });
+      const who = await make(UserRole.REVIEWER);
+      const res = await http().get(bundleUrl(s.sessionId)).set(who.auth).expect(200);
+      expect(statements(res.body)).toEqual(['Which is a fruit?', 'Name a tree with 4 letters.']);
+    });
+
+    it('TC-008: another organization stays a 404 for a session with variants', async () => {
+      const foreign = await seedSession({ orgId: orgB });
+      await seedVariantAnswer(foreign, 1, {
+        type: 'CODING',
+        statementMd: 'Hi {{item}}',
+        params: { item: 'z' },
+      });
+      const who = await make(UserRole.REVIEWER);
+      await http().get(bundleUrl(foreign.sessionId)).set(who.auth).expect(404);
+    });
+  });
+
   describe('FR-703: GET /review/sessions/:id/recordings/:recordingId/playback', () => {
     it('FR-703: the URLs are presigned for exactly 900 s and expiresAt is 15 minutes ahead', async () => {
       const s = await seedSession();
