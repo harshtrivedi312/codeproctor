@@ -65,7 +65,10 @@ function watchWrites(): { writes: Seen[]; authCalls: string[]; stop: () => void 
   const authCalls: string[] = [];
   const listener = ({ request }: { request: Request }) => {
     const { pathname } = new URL(request.url);
-    if (request.method !== 'GET' && pathname.includes('/admin/users')) {
+    if (
+      request.method !== 'GET' &&
+      (pathname.includes('/admin/users') || pathname.includes('/auth/2fa/reset/'))
+    ) {
       void request
         .clone()
         .json()
@@ -581,7 +584,7 @@ describe('Users: risky paths of a password-protected write (FR-102, FR-103)', ()
     await u.click(within(dialog).getByRole('button', { name: 'Send invitation' }));
     const alert = await within(dialog).findByRole('alert');
     expect(alert).toHaveTextContent('Invitation may have been sent');
-    expect(alert).toHaveTextContent('probably was not created');
+    expect(alert).toHaveTextContent('may not have been created yet');
   });
 
   it('FR-103: a 409 on deactivate explains the last Super Admin rule', async () => {
@@ -596,5 +599,345 @@ describe('Users: risky paths of a password-protected write (FR-102, FR-103)', ()
     const alert = await within(dialog).findByRole('alert');
     expect(alert).toHaveTextContent('This user cannot be deactivated');
     expect(alert).toHaveTextContent('last Super Admin');
+  });
+});
+
+describe('Users: unlock, resend invite, two-factor reset, lockouts (FR-101, FR-102, FR-103, TC-002)', () => {
+  it('FR-101 TC-002: a locked account shows "Locked until" and Unlock only there; unlocking asks for the password', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const watch = watchWrites();
+    await findLoadedRow('Lee Locked');
+    expect(within(rowOf('Lee Locked')).getByText(/^Locked until /)).toBeInTheDocument();
+    expect(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ })).toBeInTheDocument();
+    expect(within(rowOf('Avery Author')).queryByRole('button', { name: /Unlock/ })).toBeNull();
+    await u.click(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Unlock');
+    await waitFor(() =>
+      expect(within(rowOf('Lee Locked')).queryByText(/^Locked until/)).not.toBeInTheDocument(),
+    );
+    expect(watch.writes[0]).toMatchObject({
+      method: 'POST',
+      path: expect.stringMatching(/\/admin\/users\/user-locked\/unlock$/) as string,
+      body: { currentPassword: PASSWORD },
+    });
+    watch.stop();
+  });
+
+  it('FR-103: Resend invite appears only for a pending invite and sends currentPassword', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const watch = watchWrites();
+    await findLoadedRow('Casey Newhire');
+    expect(within(rowOf('Casey Newhire')).getByText('Pending invite')).toBeInTheDocument();
+    expect(within(rowOf('Avery Author')).queryByRole('button', { name: /Resend/ })).toBeNull();
+    expect(within(rowOf('Dana Departed')).queryByRole('button', { name: /Resend/ })).toBeNull();
+    await u.click(within(rowOf('Casey Newhire')).getByRole('button', { name: /Resend invite/ }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('earlier link stops working');
+    await confirm(u, dialog, PASSWORD, 'Resend invite');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(watch.writes[0]).toMatchObject({
+      path: expect.stringMatching(/\/admin\/users\/user-invited\/invite$/) as string,
+      body: { currentPassword: PASSWORD },
+    });
+    watch.stop();
+  });
+
+  it('FR-103: resending to someone who already set a password is a 409 with a fix-it hint', async () => {
+    server.use(
+      http.post('*/v1/admin/users/:id/invite', () =>
+        HttpResponse.json({ title: 'Conflict', status: 409 }, { status: 409 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(within(rowOf('Casey Newhire')).getByRole('button', { name: /Resend invite/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Resend invite');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('already set a password');
+  });
+
+  it('FR-102: Reset two-factor shows only for accounts with 2FA on, warns about password-only sign-in, and sends currentPassword', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const watch = watchWrites();
+    await findLoadedRow('Sam Secure');
+    expect(
+      within(rowOf('Avery Author')).queryByRole('button', { name: /Reset two-factor/ }),
+    ).toBeNull();
+    // Your own account has no actions: use the Security page.
+    expect(within(rowOf('Alex Admin')).queryByRole('button')).toBeNull();
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('password-only sign-in');
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(watch.writes).toHaveLength(1));
+    expect(watch.writes[0]).toMatchObject({
+      path: expect.stringMatching(/\/auth\/2fa\/reset\/user-secure$/) as string,
+      body: { currentPassword: PASSWORD },
+    });
+    await waitFor(() =>
+      expect(
+        within(rowOf('Sam Secure')).queryByRole('button', { name: /Reset two-factor/ }),
+      ).toBeNull(),
+    );
+    watch.stop();
+  });
+
+  it('FR-102: a wrong password on the 2FA reset says "Password incorrect", stays open and keeps you signed in', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Sam Secure');
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, 'wrong-password', 'Reset two-factor');
+    expect(await within(dialog).findByText('Password incorrect')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Your password')).toHaveValue('');
+    expect(seen.user).toBeTruthy();
+  });
+
+  it('FR-102: the fixed 500 on a 2FA reset is not retried and the list says what happened', async () => {
+    let posts = 0;
+    server.use(
+      http.post('*/v1/auth/2fa/reset/:id', () => {
+        posts += 1;
+        return HttpResponse.json({ title: 'Internal Server Error', status: 500 }, { status: 500 });
+      }),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Sam Secure');
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('We could not confirm the reset');
+    expect(alert).toHaveTextContent('still shows as on');
+    expect(posts).toBe(1);
+  });
+
+  it('FR-101: Recent lockouts lists who was locked, newest first, with no password step', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(screen.getByRole('button', { name: 'Recent lockouts' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Lee Locked')).toBeInTheDocument();
+    const rows = within(dialog).getAllByRole('row');
+    expect(rows[1]).toHaveTextContent('Lee Locked');
+    expect(rows[2]).toHaveTextContent('Robin Reviewer');
+    expect(rows[3]).toHaveTextContent('Unknown user');
+    expect(within(dialog).queryByLabelText('Your password')).toBeNull();
+    expect(await axe(dialog)).toHaveNoViolations();
+  });
+
+  it('FR-101: a lockouts load failure says what to do', async () => {
+    server.use(http.get('*/v1/admin/users/lock-events', () => HttpResponse.error()));
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(screen.getByRole('button', { name: 'Recent lockouts' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('try again');
+  });
+
+  it('FR-103: unlocking a user who is gone is a 404 with a reload hint', async () => {
+    server.use(
+      http.post('*/v1/admin/users/:id/unlock', () =>
+        HttpResponse.json({ title: 'Not Found', status: 404 }, { status: 404 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Lee Locked');
+    await u.click(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Unlock');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('no longer in your organisation');
+    expect(alert).toHaveTextContent('Reload the page');
+  });
+
+  it('FR-102: unlock with a wrong password says "Password incorrect" and keeps you signed in', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Lee Locked');
+    await u.click(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, 'wrong-password', 'Unlock');
+    expect(await within(dialog).findByText('Password incorrect')).toBeInTheDocument();
+    expect(seen.user).toBeTruthy();
+  });
+
+  it('FR-103 TC-004: a guard 403 on unlock is a permission message, not a password one', async () => {
+    server.use(
+      http.post('*/v1/admin/users/:id/unlock', () =>
+        HttpResponse.json({ title: 'Forbidden', status: 403 }, { status: 403 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Lee Locked');
+    await u.click(within(rowOf('Lee Locked')).getByRole('button', { name: /Unlock/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Unlock');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Your role cannot do this');
+  });
+
+  it('FR-103: a 429 on resend names the hourly invitation limit', async () => {
+    server.use(
+      http.post('*/v1/admin/users/:id/invite', () =>
+        HttpResponse.json({ title: 'Too Many Requests', status: 429 }, { status: 429 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(within(rowOf('Casey Newhire')).getByRole('button', { name: /Resend invite/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Resend invite');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('Invitation limit reached');
+    expect(alert).toHaveTextContent('hourly limit');
+  });
+
+  it('FR-103: an unconfirmed resend (500) says no email was sent and to use Resend invite again', async () => {
+    server.use(
+      http.post('*/v1/admin/users/:id/invite', () =>
+        HttpResponse.json({ title: 'Internal Server Error', status: 500 }, { status: 500 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Casey Newhire');
+    await u.click(within(rowOf('Casey Newhire')).getByRole('button', { name: /Resend invite/ }));
+    const dialog = await screen.findByRole('dialog');
+    await confirm(u, dialog, PASSWORD, 'Resend invite');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('No email was sent');
+    expect(alert).toHaveTextContent('Use Resend invite to make a new link');
+  });
+
+  it('FR-102: a 500 on the 2FA reset whose list shows two-factor off says it went through', async () => {
+    server.use(
+      http.post('*/v1/auth/2fa/reset/:id', () =>
+        HttpResponse.json({ title: 'Internal Server Error', status: 500 }, { status: 500 }),
+      ),
+    );
+    const u = userEvent.setup();
+    renderUsers();
+    await findLoadedRow('Sam Secure');
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    const dialog = await screen.findByRole('dialog');
+    server.use(
+      http.get('*/v1/admin/users', () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 'user-secure',
+              email: 'sam.secure@example.test',
+              name: 'Sam Secure',
+              role: 'AUTHOR',
+              status: 'active',
+              locked: false,
+              lockedUntil: null,
+              totpEnabled: false,
+              createdAt: '2026-06-06T09:00:00.000Z',
+            },
+          ],
+          page: 1,
+          pageSize: 100,
+          total: 1,
+        }),
+      ),
+    );
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert).toHaveTextContent('so the reset went through');
+  });
+
+  it('WCAG 2.1 AA: the users table with lock, resend and reset actions has no axe violations', async () => {
+    const { container } = renderUsers();
+    await findLoadedRow('Lee Locked');
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+async function confirm(
+  u: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+  password: string,
+  submit: string,
+): Promise<void> {
+  await u.type(await within(dialog).findByLabelText('Your password'), password);
+  await u.click(within(dialog).getByRole('button', { name: submit }));
+}
+
+describe('Users: 2FA reset 401 replay and unknown-outcome guard (FR-102)', () => {
+  async function openReset(u: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+    await findLoadedRow('Sam Secure');
+    await waitFor(() => expect(seen.user).toBeTruthy());
+    await u.click(within(rowOf('Sam Secure')).getByRole('button', { name: /Reset two-factor/ }));
+    return screen.findByRole('dialog');
+  }
+  function resetSequence(answer: (n: number) => Response): { bodies: unknown[] } {
+    const bodies: unknown[] = [];
+    server.use(
+      http.post('*/v1/auth/2fa/reset/:id', async ({ request }) => {
+        bodies.push(await request.json());
+        return answer(bodies.length);
+      }),
+    );
+    return { bodies };
+  }
+  const unauthorized = () =>
+    HttpResponse.json({ title: 'Unauthorized', status: 401 }, { status: 401 });
+
+  it('FR-102: a 401 on the reset refreshes once and replays the same body once', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = resetSequence((n) =>
+      n === 1 ? unauthorized() : new HttpResponse(null, { status: 204 }),
+    );
+    const dialog = await openReset(u);
+    let refreshes = 0;
+    const count = ({ request }: { request: Request }) => {
+      if (request.url.endsWith('/auth/refresh')) refreshes += 1;
+    };
+    server.events.on('request:start', count);
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    server.events.removeListener('request:start', count);
+    expect(calls.bodies).toHaveLength(2);
+    expect(calls.bodies[1]).toEqual(calls.bodies[0]);
+    expect(calls.bodies[0]).toEqual({ currentPassword: PASSWORD });
+    expect(refreshes).toBe(1);
+  });
+
+  it('FR-102 FR-104: a failed refresh sends nothing more and signs the user out', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = resetSequence(unauthorized);
+    const dialog = await openReset(u);
+    server.use(http.post('*/v1/auth/refresh', unauthorized));
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(seen.user).toBeFalsy());
+    expect(calls.bodies).toHaveLength(1);
+  });
+
+  it('FR-103 TC-005: a refresh that comes back as another person sends nothing more', async () => {
+    const u = userEvent.setup();
+    renderUsers();
+    const calls = resetSequence(unauthorized);
+    const dialog = await openReset(u);
+    seedMockRefresh(MOCK_USERS.reviewer.email);
+    await confirm(u, dialog, PASSWORD, 'Reset two-factor');
+    await waitFor(() => expect(calls.bodies).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(calls.bodies).toHaveLength(1);
   });
 });

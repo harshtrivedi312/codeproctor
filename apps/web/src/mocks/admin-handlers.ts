@@ -33,8 +33,15 @@ interface MockStaffUser extends StaffUser {
   hasPassword: boolean;
 }
 
+interface MockLockEvent {
+  id: string;
+  userId: string;
+  lockedAt: string;
+}
+
 interface AdminState {
   users: MockStaffUser[];
+  lockEvents: MockLockEvent[];
   /** Invitations sent in this mock hour, for the per-organisation limit (429). */
   invitesSent: number;
   settings: OrgSettings;
@@ -165,12 +172,27 @@ function seed(): AdminState {
         status: 'invited',
         createdAt: '2026-10-01T09:00:00.000Z',
       }),
+      mockUser('user-locked', 'Lee Locked', 'lee.locked@example.test', 'RECRUITER', {
+        createdAt: '2026-06-05T09:00:00.000Z',
+        locked: true,
+        // Always in the future when the mock is (re)seeded.
+        lockedUntil: new Date(Date.now() + 10 * 60_000).toISOString(),
+      }),
+      mockUser('user-secure', 'Sam Secure', 'sam.secure@example.test', 'AUTHOR', {
+        createdAt: '2026-06-06T09:00:00.000Z',
+        totpEnabled: true,
+      }),
       mockUser('user-gone', 'Dana Departed', 'dana.departed@example.test', 'REVIEWER', {
         status: 'deactivated',
         createdAt: '2026-05-01T09:00:00.000Z',
       }),
     ],
     invitesSent: 0,
+    lockEvents: [
+      { id: '3', userId: 'user-locked', lockedAt: new Date(Date.now() - 5 * 60_000).toISOString() },
+      { id: '2', userId: 'user-reviewer', lockedAt: '2026-10-02T08:00:00.000Z' },
+      { id: '1', userId: 'user-removed', lockedAt: '2026-09-20T08:00:00.000Z' },
+    ],
     settings: defaultSettings(),
     consentTexts: [
       {
@@ -416,6 +438,86 @@ export function createAdminHandlers(options: { latencyMs: number }) {
         user.status = user.hasPassword ? 'active' : 'invited';
       }
       return HttpResponse.json(publicUser(user));
+    }),
+
+    // Static segment first: `lock-events` must not be read as a user id.
+    http.get(`${base}/users/lock-events`, async ({ request }) => {
+      await wait();
+      const denied = guard(request, SA);
+      if (denied) return denied;
+      const url = new URL(request.url);
+      const page = Number(url.searchParams.get('page') ?? 1);
+      const pageSize = Number(url.searchParams.get('pageSize') ?? 50);
+      if (!Number.isInteger(page) || page < 1 || pageSize < 1 || pageSize > 100) {
+        return problemJson(request, 400, 'Request validation failed', undefined, [
+          'page must be at least 1, pageSize 1 to 100',
+        ]);
+      }
+      const items = state.lockEvents.slice((page - 1) * pageSize, page * pageSize).map((e) => {
+        const user = state.users.find((u) => u.id === e.userId);
+        return {
+          id: e.id,
+          userId: e.userId,
+          email: user?.email ?? null,
+          name: user?.name ?? null,
+          lockedAt: e.lockedAt,
+        };
+      });
+      return HttpResponse.json({ items, page, pageSize, total: state.lockEvents.length });
+    }),
+
+    http.post(`${base}/users/:userId/invite`, async ({ request, params }) => {
+      await wait();
+      const denied = guard(request, SA);
+      if (denied) return denied;
+      const checked = await mockReauth(request, (b) =>
+        invalidFields(b, ['currentPassword'], () => undefined),
+      );
+      if (checked instanceof Response) return checked;
+      if (state.invitesSent >= INVITE_LIMIT_PER_HOUR) {
+        return problemJson(request, 429, 'Too many invitations. Try again later.');
+      }
+      state.invitesSent += 1;
+      const user = state.users.find((u) => u.id === params.userId);
+      if (!user) return problemJson(request, 404, 'No such user.');
+      if (user.hasPassword || user.status === 'deactivated') {
+        return problemJson(request, 409, 'Only a pending invitation can be re-issued.');
+      }
+      return HttpResponse.json(publicUser(user));
+    }),
+
+    http.post(`${base}/users/:userId/unlock`, async ({ request, params }) => {
+      await wait();
+      const denied = guard(request, SA);
+      if (denied) return denied;
+      const checked = await mockReauth(request, (b) =>
+        invalidFields(b, ['currentPassword'], () => undefined),
+      );
+      if (checked instanceof Response) return checked;
+      const user = state.users.find((u) => u.id === params.userId);
+      if (!user) return problemJson(request, 404, 'No such user.');
+      user.locked = false;
+      user.lockedUntil = null;
+      return new HttpResponse(null, { status: 204 });
+    }),
+
+    // The admin's 2FA reset lives under /auth in the real API; its state is the user list's.
+    http.post(`${apiBaseUrl}/v1/auth/2fa/reset/:userId`, async ({ request, params }) => {
+      await wait();
+      const denied = guard(request, SA);
+      if (denied) return denied;
+      const actingId = `user-${mockRoleFromToken(request.headers.get('authorization'))?.toLowerCase()}`;
+      if (params.userId === actingId) {
+        return problemJson(request, 400, 'Use your own security settings to change your 2FA.');
+      }
+      const checked = await mockReauth(request, (b) =>
+        invalidFields(b, ['currentPassword'], () => undefined),
+      );
+      if (checked instanceof Response) return checked;
+      const user = state.users.find((u) => u.id === params.userId);
+      if (!user) return problemJson(request, 404, 'No such user.');
+      user.totpEnabled = false;
+      return new HttpResponse(null, { status: 204 });
     }),
 
     http.get(`${base}/settings`, async ({ request }) => {

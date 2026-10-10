@@ -157,6 +157,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/auth/2fa/reset/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Super Admin clears another user's two-factor sign-in and revokes their sessions. Needs the admin's own currentPassword (FR-102). The user is told by email. */
+        post: operations["resetTwoFactorOf"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/2fa/disable": {
         parameters: {
             query?: never;
@@ -288,6 +305,57 @@ export interface paths {
         put?: never;
         /** Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4). Needs the caller's own currentPassword (step-up, FR-102). */
         post: operations["inviteStaffUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/lock-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent account lockouts of the organisation, newest first (FR-101, P-03) */
+        get: operations["listLockEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}/invite": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-issue the invitation of a user who has not set a password yet. A new 72 hour single-use link; the old link stops working (DL-23). */
+        post: operations["reissueStaffInvite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/users/{userId}/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clear the login lockout of a user (FR-101). Does not change the password or the sessions. Needs the caller's own currentPassword. */
+        post: operations["unlockStaffUser"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1609,6 +1677,20 @@ export interface components {
             pageSize: number;
             total: number;
         };
+        LockEvent: {
+            id: string;
+            userId: string;
+            email: string | null;
+            name: string | null;
+            /** Format: date-time */
+            lockedAt: string;
+        };
+        LockEventList: {
+            items: components["schemas"]["LockEvent"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
         CurrentPasswordBody: {
             currentPassword: string;
         };
@@ -2195,6 +2277,60 @@ export interface operations {
             };
         };
     };
+    resetTwoFactorOf: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CurrentPasswordBody"];
+            };
+        };
+        responses: {
+            /** @description Two-factor is off for that user (it also was, if it was off before) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a UUID, a missing currentPassword, or the caller targeted themselves (checked before the password) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            403: components["responses"]["ReauthOrForbidden"];
+            /** @description No such user in your organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
     disableTwoFactor: {
         parameters: {
             query?: never;
@@ -2543,6 +2679,126 @@ export interface operations {
             };
             /** @description The per-organisation invite limit (20 per hour by default) is reached */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    listLockEvents: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Lock events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LockEventList"];
+                };
+            };
+            400: components["responses"]["ValidationFailed"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    reissueStaffInvite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CurrentPasswordBody"];
+            };
+        };
+        responses: {
+            /** @description Re-issued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaffUser"];
+                };
+            };
+            400: components["responses"]["ValidationFailed"];
+            403: components["responses"]["ReauthOrForbidden"];
+            /** @description No such user in this organisation */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description The user already has a password, or is deactivated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description The per-organisation invite limit is reached */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            500: components["responses"]["ServerError"];
+            503: components["responses"]["Busy"];
+        };
+    };
+    unlockStaffUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CurrentPasswordBody"];
+            };
+        };
+        responses: {
+            /** @description Unlocked (also when the account was not locked) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["ValidationFailed"];
+            403: components["responses"]["ReauthOrForbidden"];
+            /** @description No such user in this organisation */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

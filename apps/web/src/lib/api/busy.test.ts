@@ -51,7 +51,8 @@ describe('DL-37 503 BUSY: the pure rules', () => {
       ['/v1/admin/users', 'POST'],
       ['/v1/admin/users/abc', 'PATCH'],
       ['/v1/admin/users/abc/unlock', 'POST'],
-      ['/v1/admin/users/abc/2fa/reset/start', 'POST'],
+      ['/v1/admin/users/abc/invite', 'POST'],
+      ['/v1/auth/2fa/reset/abc', 'POST'],
       ['/api/v1/auth/login', 'POST'],
       ['/v1/candidate/questions/q1/run', 'POST'],
       ['/v1/candidate/session', 'GET'], // candidate routes: never, whatever the method (FR-502)

@@ -55,6 +55,7 @@ export const adminKeys = {
   settings: ['admin', 'settings'] as const,
   consent: ['admin', 'consent-texts'] as const,
   candidates: ['admin', 'candidates'] as const,
+  lockEvents: ['admin', 'users', 'lock-events'] as const,
 };
 
 /** The API's largest page (docs/api-contract.md section 6: pageSize 1 to 100). */
@@ -67,7 +68,7 @@ const USERS_MAX_PAGES = 10;
  * the page limit was hit before the end, so a caller never mistakes "not on the pages I read" for
  * "not in the organisation".
  */
-async function readStaffUsers(
+export async function readStaffUsers(
   signal?: AbortSignal,
 ): Promise<{ items: StaffUser[]; complete: boolean }> {
   const items: StaffUser[] = [];
@@ -121,12 +122,28 @@ export async function checkInviteOutcome(
 /** What to tell the user after the unknown-outcome 500 on an invite, given what the list says. */
 export const INVITE_UNKNOWN_TEXT = {
   found:
-    'The invitation may have been sent. The person is now in the list, so the account exists, but we could not confirm the email went out. Ask them to check their inbox before you send anything again.',
+    'The person is now in the list, so the account exists, but we could not confirm that the email went out. Ask them to check their inbox, or use Resend invite on their row to make a new link: the earlier link stops working.',
   missing:
-    'We could not confirm the invitation. The person is not in the list yet, so it probably was not created. Check the list, then send it again if they are still missing.',
+    'We could not confirm the invitation. The person is not in the list yet, so it may not have been created yet. Check the list, then send it again if they are still missing.',
   unknown:
     'We could not confirm the invitation, and could not read the list to check. Reload the page and look for the person before you send it again.',
 } as const;
+
+/** Recent account lockouts, newest first (FR-101, P-03). The first page only: a short, recent list. */
+export function useLockEvents(enabled: boolean) {
+  return useQuery({
+    queryKey: adminKeys.lockEvents,
+    enabled,
+    queryFn: async ({ signal }) => {
+      const { data, error, response } = await api.GET('/v1/admin/users/lock-events', {
+        params: { query: { page: 1, pageSize: 20 } },
+        signal,
+      });
+      if (!data) fail(response, error);
+      return data;
+    },
+  });
+}
 
 export function useOrgSettings() {
   return useQuery({

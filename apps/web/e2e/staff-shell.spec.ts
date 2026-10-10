@@ -153,7 +153,7 @@ test.describe('FR-103 FR-704 FR-804 D-17 Settings', () => {
     page,
   }) => {
     await signInAt(page, ADMIN, '/admin/settings/users');
-    await expect(page.getByRole('row', { name: /Casey Newhire/ })).toContainText('Invited');
+    await expect(page.getByRole('row', { name: /Casey Newhire/ })).toContainText('Pending invite');
     await expectNoAxeViolations(page);
     await page.getByRole('button', { name: 'Invite a user' }).click();
     await page.getByLabel('Full name').fill('Jo Newperson');
@@ -164,7 +164,7 @@ test.describe('FR-103 FR-704 FR-804 D-17 Settings', () => {
     await page.getByLabel('Your password', { exact: true }).fill(ADMIN.password);
     await expectNoAxeViolations(page);
     await page.getByRole('button', { name: 'Send invitation' }).click();
-    await expect(page.getByRole('row', { name: /Jo Newperson/ })).toContainText('Invited');
+    await expect(page.getByRole('row', { name: /Jo Newperson/ })).toContainText('Pending invite');
   });
 
   test('FR-704 D-19: data and privacy shows the default hold and passes axe', async ({ page }) => {
