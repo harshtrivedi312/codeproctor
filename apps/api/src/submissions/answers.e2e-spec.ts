@@ -2219,6 +2219,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
           'languages',
           'limits',
           'samples',
+          'saved',
           'sessionQuestionId',
           'starterCode',
           'statementMd',
@@ -2284,6 +2285,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
           'languages',
           'mcq',
           'samples',
+          'saved',
           'sessionQuestionId',
           'starterCode',
           'statementMd',
@@ -2298,6 +2300,7 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
           'languages',
           'limits',
           'samples',
+          'saved',
           'sessionQuestionId',
           'starterCode',
           'statementMd',
@@ -2330,6 +2333,98 @@ describe('Run, draft, submit, finish and grading (FR-502, FR-504..FR-506, FR-205
       const shown = Date.parse((res.body as { deadlineAt: string }).deadlineAt);
       expect(shown - (stored.deadlineAt as Date).getTime()).toBeGreaterThan(pausedFor - 5_000);
       expect(shown - (stored.deadlineAt as Date).getTime()).toBeLessThan(pausedFor + 5_000);
+    });
+
+    it('FR-504, D-61: a saved draft, Run and answer come back in the question view after a reload (the screen resumes from them, never from the starter code); another session sees none of it', async () => {
+      const l = await live();
+      const empty = await get(`/questions/${l.q.code}`, l.token).expect(200);
+      expect(empty.body).toMatchObject({ saved: null });
+      await call('put', `/answers/${l.q.code}/draft`, l.token, {
+        code: 'print("my work")',
+        language: 'python',
+      }).expect(200);
+      const reloaded = await get(`/questions/${l.q.code}`, l.token).expect(200);
+      expect(reloaded.body).toMatchObject({
+        saved: { code: 'print("my work")', language: 'python' },
+      });
+      // A Run autosaves too, and the view shows the latest.
+      await call('post', `/answers/${l.q.code}/run`, l.token, {
+        code: 'print("after run")',
+        language: 'python',
+      }).expect(200);
+      expect((await get(`/questions/${l.q.code}`, l.token).expect(200)).body).toMatchObject({
+        saved: { code: 'print("after run")', language: 'python' },
+      });
+      // MCQ: the selected ids as shown to this session; short answer: the typed text.
+      await call('put', `/answers/${l.q.mcq}/draft`, l.token, {
+        answer: { optionIds: [opt(l.inv.sessionId, 'b')] },
+      }).expect(200);
+      expect((await get(`/questions/${l.q.mcq}`, l.token).expect(200)).body).toMatchObject({
+        saved: { optionIds: [opt(l.inv.sessionId, 'b')] },
+      });
+      await call('put', `/answers/${l.q.short}/draft`, l.token, {
+        answer: { text: 'Photosynthesis' },
+      }).expect(200);
+      expect((await get(`/questions/${l.q.short}`, l.token).expect(200)).body).toMatchObject({
+        saved: { text: 'Photosynthesis' },
+      });
+      // Another candidate's view of the same question is empty and the saved work stays private.
+      const other = await live();
+      const theirs = await get(`/questions/${other.q.code}`, other.token).expect(200);
+      expect(theirs.body).toMatchObject({ saved: null });
+      expect(JSON.stringify(theirs.body)).not.toContain('my work');
+      // The saved work is the candidate's own: it never carries reference or key content (TC-011).
+      expect(JSON.stringify(reloaded.body)).not.toMatch(
+        /REFSECRET|VALREPORT|hvariant-secret|correctOptionIds/,
+      );
+    });
+
+    it('FR-504, D-61: saved is null for a language the question no longer allows, a legacy or malformed answer, and a stale MCQ id is dropped; Submit updates it; a reload during a PROCTOR pause still returns it', async () => {
+      const l = await live();
+      await call('put', `/answers/${l.q.code}/draft`, l.token, {
+        code: 'print(1)',
+        language: 'python',
+      }).expect(200);
+      // A stored language that is not (or no longer) allowed: nothing is offered.
+      await owner.sessionQuestion.update({
+        where: { id: l.q.code },
+        data: { finalLanguage: 'cobol' },
+      });
+      expect((await get(`/questions/${l.q.code}`, l.token).expect(200)).body).toMatchObject({
+        saved: null,
+      });
+      // A malformed stored answer is null, never a 500.
+      await owner.sessionQuestion.update({
+        where: { id: l.q.mcq },
+        data: { answer: { garbage: true } },
+      });
+      expect((await get(`/questions/${l.q.mcq}`, l.token).expect(200)).body).toMatchObject({
+        saved: null,
+      });
+      // A stale id (not one of this session's options) is filtered out, the valid one stays.
+      await owner.sessionQuestion.update({
+        where: { id: l.q.mcq },
+        data: { answer: { optionIds: ['opt_stale00000', opt(l.inv.sessionId, 'a')] } },
+      });
+      expect((await get(`/questions/${l.q.mcq}`, l.token).expect(200)).body).toMatchObject({
+        saved: { optionIds: [opt(l.inv.sessionId, 'a')] },
+      });
+      // Submit saves the code too.
+      await call('post', `/answers/${l.q.code}/submit`, l.token, {
+        code: 'print("submitted")',
+        language: 'python',
+      }).expect(200);
+      expect((await get(`/questions/${l.q.code}`, l.token).expect(200)).body).toMatchObject({
+        saved: { code: 'print("submitted")', language: 'python' },
+      });
+      // The reload-during-pause case: reads stay allowed and return the saved work.
+      await owner.session.update({
+        where: { id: l.inv.sessionId },
+        data: { status: 'PAUSED', pauseReasons: ['PROCTOR'], proctorPausedAt: new Date() },
+      });
+      expect((await get(`/questions/${l.q.code}`, l.token).expect(200)).body).toMatchObject({
+        saved: { code: 'print("submitted")' },
+      });
     });
 
     it('CS-4.6: reads stay allowed in every pause; past the section deadline on server time the read is 409', async () => {
