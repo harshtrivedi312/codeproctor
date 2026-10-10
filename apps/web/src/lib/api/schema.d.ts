@@ -286,7 +286,7 @@ export interface paths {
         /** Staff users of the caller's organisation (SUPER_ADMIN, FR-103) */
         get: operations["listStaffUsers"];
         put?: never;
-        /** Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4) */
+        /** Invite a staff user by email; they set a password from the emailed link (ADR 0003 section 4). Needs the caller's own currentPassword (step-up, FR-102). */
         post: operations["inviteStaffUser"];
         delete?: never;
         options?: never;
@@ -307,7 +307,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Change a role or deactivate or reactivate a user (revokes their refresh tokens) */
+        /** Change a role or deactivate or reactivate a user (revokes their refresh tokens). Needs the caller's own currentPassword (step-up, FR-102). */
         patch: operations["updateStaffUser"];
         trace?: never;
     };
@@ -1596,8 +1596,33 @@ export interface components {
             role: components["schemas"]["StaffRole"];
             /** @enum {string} */
             status: "invited" | "active" | "deactivated";
+            locked: boolean;
             /** Format: date-time */
-            lastLoginAt?: string | null;
+            lockedUntil: string | null;
+            totpEnabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        StaffUserList: {
+            items: components["schemas"]["StaffUser"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
+        CurrentPasswordBody: {
+            currentPassword: string;
+        };
+        InviteStaffUserBody: {
+            currentPassword: string;
+            /** Format: email */
+            email: string;
+            name: string;
+            role: components["schemas"]["StaffRole"];
+        };
+        UpdateStaffUserBody: {
+            currentPassword: string;
+            role?: components["schemas"]["StaffRole"];
+            active?: boolean;
         };
         /** @enum {string} */
         EventSeverity: "LOW" | "MEDIUM" | "HIGH";
@@ -1789,6 +1814,24 @@ export interface components {
     responses: {
         /** @description The role is not allowed to call this route (FR-103). A guard 403 has no code. */
         Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProblemDetails"];
+            };
+        };
+        /** @description Validation failed (RFC 7807, errors[] lists the fields) */
+        ValidationFailed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ProblemDetails"];
+            };
+        };
+        /** @description The role is not allowed (a guard 403 has no code), or the caller's own currentPassword is wrong or the account is locked (code REAUTH_FAILED, one body for both). Never a session expiry (that is 401). */
+        ReauthOrForbidden: {
             headers: {
                 [name: string]: unknown;
             };
@@ -2441,7 +2484,10 @@ export interface operations {
     };
     listStaffUsers: {
         parameters: {
-            query?: never;
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2454,11 +2500,10 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        items: components["schemas"]["StaffUser"][];
-                    };
+                    "application/json": components["schemas"]["StaffUserList"];
                 };
             };
+            400: components["responses"]["ValidationFailed"];
             403: components["responses"]["Forbidden"];
             503: components["responses"]["Busy"];
         };
@@ -2472,11 +2517,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    email: string;
-                    name: string;
-                    role: components["schemas"]["StaffRole"];
-                };
+                "application/json": components["schemas"]["InviteStaffUserBody"];
             };
         };
         responses: {
@@ -2489,23 +2530,24 @@ export interface operations {
                     "application/json": components["schemas"]["StaffUser"];
                 };
             };
-            /** @description Invalid input */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiError"];
-                };
-            };
-            403: components["responses"]["Forbidden"];
+            400: components["responses"]["ValidationFailed"];
+            403: components["responses"]["ReauthOrForbidden"];
             /** @description A user with this email already exists */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApiError"];
+                    "application/json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description The per-organisation invite limit (20 per hour by default) is reached */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProblemDetails"];
                 };
             };
             500: components["responses"]["ServerError"];
@@ -2523,10 +2565,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    role?: components["schemas"]["StaffRole"];
-                    active?: boolean;
-                };
+                "application/json": components["schemas"]["UpdateStaffUserBody"];
             };
         };
         responses: {
@@ -2539,23 +2578,24 @@ export interface operations {
                     "application/json": components["schemas"]["StaffUser"];
                 };
             };
-            403: components["responses"]["Forbidden"];
+            400: components["responses"]["ValidationFailed"];
+            403: components["responses"]["ReauthOrForbidden"];
             /** @description No such user in this organisation */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApiError"];
+                    "application/json": components["schemas"]["ProblemDetails"];
                 };
             };
-            /** @description Refused, for example deactivating yourself or the last Super Admin */
+            /** @description Refused, for example your own role or status, or the last Super Admin */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApiError"];
+                    "application/json": components["schemas"]["ProblemDetails"];
                 };
             };
             500: components["responses"]["ServerError"];

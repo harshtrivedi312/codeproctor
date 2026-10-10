@@ -21,19 +21,48 @@ const user = (n: number) => ({
   name: `P ${n}`,
   role: 'RECRUITER',
   status: 'active',
-  lastLoginAt: null,
+  locked: false,
+  lockedUntil: null,
+  totpEnabled: false,
+  createdAt: '2026-10-01T09:00:00.000Z',
 });
 
 describe('checkInviteOutcome (FR-103, FU-BE-208)', () => {
-  it('FR-103: a full first page without the person is "unknown", not "missing"', async () => {
-    const items = Array.from({ length: 50 }, (_, i) => user(i));
-    server.use(http.get('*/v1/admin/users', () => HttpResponse.json({ items })));
+  it('FR-103: pages the list, and a long list without the person is "unknown", not "missing"', async () => {
+    // 1100 people: more than the 10 pages of 100 the web reads, so a miss proves nothing.
+    const all = Array.from({ length: 1100 }, (_, i) => user(i));
+    server.use(
+      http.get('*/v1/admin/users', ({ request }) => {
+        const url = new URL(request.url);
+        const page = Number(url.searchParams.get('page'));
+        const pageSize = Number(url.searchParams.get('pageSize'));
+        return HttpResponse.json({
+          items: all.slice((page - 1) * pageSize, page * pageSize),
+          page,
+          pageSize,
+          total: all.length,
+        });
+      }),
+    );
     expect(await checkInviteOutcome(new QueryClient(), 'nobody@example.test')).toBe('unknown');
-    expect(await checkInviteOutcome(new QueryClient(), 'person3@example.test')).toBe('found');
+    expect(await checkInviteOutcome(new QueryClient(), 'person750@example.test')).toBe('found');
   });
 
-  it('FR-103: a short list without the person is "missing"', async () => {
-    server.use(http.get('*/v1/admin/users', () => HttpResponse.json({ items: [user(1)] })));
+  it('FR-103: a list read in full without the person is "missing"', async () => {
+    const all = Array.from({ length: 150 }, (_, i) => user(i));
+    server.use(
+      http.get('*/v1/admin/users', ({ request }) => {
+        const url = new URL(request.url);
+        const page = Number(url.searchParams.get('page'));
+        const pageSize = Number(url.searchParams.get('pageSize'));
+        return HttpResponse.json({
+          items: all.slice((page - 1) * pageSize, page * pageSize),
+          page,
+          pageSize,
+          total: all.length,
+        });
+      }),
+    );
     expect(await checkInviteOutcome(new QueryClient(), 'nobody@example.test')).toBe('missing');
   });
 

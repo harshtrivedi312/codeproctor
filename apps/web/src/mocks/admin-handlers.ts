@@ -7,7 +7,7 @@ import {
 import { delay, http, HttpResponse } from 'msw';
 import type { Schemas } from '@/lib/api/client';
 import { apiBaseUrl } from '@/lib/env';
-import { mockRoleFromToken } from './auth-handlers';
+import { mockReauth, mockRoleFromToken, problem as problemJson } from './auth-handlers';
 
 /*
  * Mock staff administration API (FE-03: users, org settings, consent texts, candidate erasure).
@@ -27,8 +27,16 @@ interface MockCandidate extends CandidateSummary {
   openFlow: 'review' | 'appeal' | null;
 }
 
+/** A staff user as the mock keeps it: the public fields plus what the API does not return. */
+interface MockStaffUser extends StaffUser {
+  /** Internal: false until the person set a password from the invite link (status `invited`). */
+  hasPassword: boolean;
+}
+
 interface AdminState {
-  users: StaffUser[];
+  users: MockStaffUser[];
+  /** Invitations sent in this mock hour, for the per-organisation limit (429). */
+  invitesSent: number;
   settings: OrgSettings;
   consentTexts: ConsentText[];
   legalApprovalRequired: boolean;
@@ -99,58 +107,70 @@ function seedCandidates(): MockCandidate[] {
   });
 }
 
+function mockUser(
+  id: string,
+  name: string,
+  email: string,
+  role: Role,
+  extra: Partial<Pick<StaffUser, 'status' | 'totpEnabled' | 'locked' | 'lockedUntil'>> & {
+    createdAt: string;
+  },
+): MockStaffUser {
+  const status = extra.status ?? 'active';
+  return {
+    id,
+    email,
+    name,
+    role,
+    status,
+    locked: extra.locked ?? false,
+    lockedUntil: extra.lockedUntil ?? null,
+    totpEnabled: extra.totpEnabled ?? false,
+    createdAt: extra.createdAt,
+    hasPassword: status !== 'invited',
+  };
+}
+
+function publicUser(u: MockStaffUser): StaffUser {
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    status: u.status,
+    locked: u.locked,
+    lockedUntil: u.lockedUntil,
+    totpEnabled: u.totpEnabled,
+    createdAt: u.createdAt,
+  };
+}
+
 function seed(): AdminState {
   return {
     users: [
-      {
-        id: 'user-super_admin',
-        email: 'admin@example.test',
-        name: 'Alex Admin',
-        role: 'SUPER_ADMIN',
-        status: 'active',
-        lastLoginAt: '2026-10-04T08:12:00.000Z',
-      },
-      {
-        id: 'user-recruiter',
-        email: 'recruiter@example.test',
-        name: 'Riley Recruiter',
-        role: 'RECRUITER',
-        status: 'active',
-        lastLoginAt: '2026-10-03T14:30:00.000Z',
-      },
-      {
-        id: 'user-author',
-        email: 'author@example.test',
-        name: 'Avery Author',
-        role: 'AUTHOR',
-        status: 'active',
-        lastLoginAt: '2026-10-02T09:05:00.000Z',
-      },
-      {
-        id: 'user-reviewer',
-        email: 'reviewer@example.test',
-        name: 'Robin Reviewer',
-        role: 'REVIEWER',
-        status: 'active',
-        lastLoginAt: null,
-      },
-      {
-        id: 'user-invited',
-        email: 'casey.newhire@example.test',
-        name: 'Casey Newhire',
-        role: 'RECRUITER',
+      mockUser('user-super_admin', 'Alex Admin', 'admin@example.test', 'SUPER_ADMIN', {
+        createdAt: '2026-06-01T09:00:00.000Z',
+        totpEnabled: true,
+      }),
+      mockUser('user-recruiter', 'Riley Recruiter', 'recruiter@example.test', 'RECRUITER', {
+        createdAt: '2026-06-02T09:00:00.000Z',
+      }),
+      mockUser('user-author', 'Avery Author', 'author@example.test', 'AUTHOR', {
+        createdAt: '2026-06-03T09:00:00.000Z',
+      }),
+      mockUser('user-reviewer', 'Robin Reviewer', 'reviewer@example.test', 'REVIEWER', {
+        createdAt: '2026-06-04T09:00:00.000Z',
+      }),
+      mockUser('user-invited', 'Casey Newhire', 'casey.newhire@example.test', 'RECRUITER', {
         status: 'invited',
-        lastLoginAt: null,
-      },
-      {
-        id: 'user-gone',
-        email: 'dana.departed@example.test',
-        name: 'Dana Departed',
-        role: 'REVIEWER',
+        createdAt: '2026-10-01T09:00:00.000Z',
+      }),
+      mockUser('user-gone', 'Dana Departed', 'dana.departed@example.test', 'REVIEWER', {
         status: 'deactivated',
-        lastLoginAt: '2026-08-11T16:45:00.000Z',
-      },
+        createdAt: '2026-05-01T09:00:00.000Z',
+      }),
     ],
+    invitesSent: 0,
     settings: defaultSettings(),
     consentTexts: [
       {
@@ -211,14 +231,15 @@ export const mockCandidateIds = (): string[] => state.candidates.map((c) => c.id
 
 /** Tests: what a landed staff invite leaves behind (the user row), for the unknown-outcome 500 fault. */
 export function addMockInvitedUser(email: string, name: string, role: Role): void {
-  state.users.push({
-    id: `user-${state.users.length + 1}-${Date.now()}`,
-    email: email.trim().toLowerCase(),
-    name,
-    role,
-    status: 'invited',
-    lastLoginAt: null,
-  });
+  state.users.push(
+    mockUser(
+      `user-${state.users.length + 1}-${Date.now()}`,
+      name,
+      email.trim().toLowerCase(),
+      role,
+      { status: 'invited', createdAt: new Date().toISOString() },
+    ),
+  );
 }
 
 /** Resets the in-memory mock (tests call this before each test). */
@@ -227,6 +248,25 @@ export function resetMockAdminState(options: { legalApprovalRequired?: boolean }
   if (options.legalApprovalRequired !== undefined) {
     state.legalApprovalRequired = options.legalApprovalRequired;
   }
+}
+
+/** The API's default limit of invitations per organisation and hour (INVITE_RATE_LIMIT_PER_ORG_HOUR). */
+const INVITE_LIMIT_PER_HOUR = 20;
+const ROLES: readonly string[] = ['SUPER_ADMIN', 'RECRUITER', 'AUTHOR', 'REVIEWER'];
+const isRole = (value: unknown): value is Role =>
+  typeof value === 'string' && ROLES.includes(value);
+
+/** Unknown fields are a 400 (forbidNonWhitelisted); `check` adds the field rules of the DTO. */
+function invalidFields(
+  body: Record<string, unknown>,
+  known: readonly string[],
+  check: (errors: string[]) => void,
+): string[] {
+  const errors = Object.keys(body)
+    .filter((key) => !known.includes(key))
+    .map((key) => `property ${key} should not exist`);
+  check(errors);
+  return errors;
 }
 
 const error = (status: number, code: string, message: string) =>
@@ -270,50 +310,100 @@ export function createAdminHandlers(options: { latencyMs: number }) {
   return [
     http.get(`${base}/users`, async ({ request }) => {
       await wait();
-      return guard(request, SA) ?? HttpResponse.json({ items: state.users });
+      const denied = guard(request, SA);
+      if (denied) return denied;
+      const url = new URL(request.url);
+      const page = Number(url.searchParams.get('page') ?? 1);
+      const pageSize = Number(url.searchParams.get('pageSize') ?? 50);
+      if (
+        !Number.isInteger(page) ||
+        page < 1 ||
+        !Number.isInteger(pageSize) ||
+        pageSize < 1 ||
+        pageSize > 100
+      ) {
+        return problemJson(request, 400, 'Request validation failed', undefined, [
+          'page must be an integer of at least 1, pageSize an integer from 1 to 100',
+        ]);
+      }
+      const items = state.users.slice((page - 1) * pageSize, page * pageSize).map(publicUser);
+      return HttpResponse.json({ items, page, pageSize, total: state.users.length });
     }),
 
+    // Step-up (docs/api-contract.md section 6): role guard, then body validation (400, unknown
+    // fields included: the real API runs forbidNonWhitelisted), then the admin's own password
+    // (403 REAUTH_FAILED, same lockout counters as the 2FA routes), then limit, lookup, state.
     http.post(`${base}/users`, async ({ request }) => {
       await wait();
       const denied = guard(request, SA);
       if (denied) return denied;
-      const body = (await request.json()) as { email: string; name: string; role: Role };
+      const checked = await mockReauth(request, (b) =>
+        invalidFields(b, ['currentPassword', 'email', 'name', 'role'], (errors) => {
+          const email = typeof b.email === 'string' ? b.email.trim() : '';
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+            errors.push('email must be an email');
+          }
+          const name = typeof b.name === 'string' ? b.name.trim() : '';
+          if (name.length < 1 || name.length > 200) {
+            errors.push('name must be longer than or equal to 1 and shorter than 200 characters');
+          }
+          if (!isRole(b.role)) errors.push('role must be a valid enum value');
+        }),
+      );
+      if (checked instanceof Response) return checked;
+      if (state.invitesSent >= INVITE_LIMIT_PER_HOUR) {
+        return problemJson(request, 429, 'Too many invitations. Try again later.');
+      }
+      state.invitesSent += 1;
+      const body = checked.body as { email: string; name: string; role: Role };
       const email = body.email.trim().toLowerCase();
       if (state.users.some((u) => u.email === email)) {
-        return error(409, 'user_exists', 'A user with this email already exists.');
+        return problemJson(request, 409, 'A user with this email already exists.');
       }
-      const user: StaffUser = {
-        id: `user-${state.users.length + 1}-${Date.now()}`,
+      const user = mockUser(
+        `user-${state.users.length + 1}-${Date.now()}`,
+        body.name.trim(),
         email,
-        name: body.name.trim(),
-        role: body.role,
-        status: 'invited',
-        lastLoginAt: null,
-      };
+        body.role,
+        { status: 'invited', createdAt: new Date().toISOString() },
+      );
       state.users.push(user);
-      return HttpResponse.json(user, { status: 201 });
+      return HttpResponse.json(publicUser(user), { status: 201 });
     }),
 
     http.patch(`${base}/users/:userId`, async ({ request, params }) => {
       await wait();
       const denied = guard(request, SA);
       if (denied) return denied;
+      const checked = await mockReauth(request, (b) =>
+        invalidFields(b, ['currentPassword', 'role', 'active'], (errors) => {
+          if (b.role !== undefined && !isRole(b.role))
+            errors.push('role must be a valid enum value');
+          if (b.active !== undefined && typeof b.active !== 'boolean') {
+            errors.push('active must be a boolean value');
+          }
+          if (b.role === undefined && b.active === undefined) {
+            errors.push('send at least one of role and active');
+          }
+        }),
+      );
+      if (checked instanceof Response) return checked;
       const user = state.users.find((u) => u.id === params.userId);
-      if (!user) return error(404, 'not_found', 'No such user.');
-      const body = (await request.json()) as { role?: Role; active?: boolean };
+      if (!user) return problemJson(request, 404, 'No such user.');
+      const body = checked.body as { role?: Role; active?: boolean };
       const actingId = `user-${mockRoleFromToken(request.headers.get('authorization'))?.toLowerCase()}`;
       if (
         user.id === actingId &&
         (body.active === false || (body.role && body.role !== user.role))
       ) {
-        return error(409, 'self_change', 'You cannot change your own role or deactivate yourself.');
+        return problemJson(request, 409, 'You cannot change your own role or deactivate yourself.');
       }
       if (body.role) user.role = body.role;
       if (body.active === false) user.status = 'deactivated';
       if (body.active === true && user.status === 'deactivated') {
-        user.status = user.lastLoginAt ? 'active' : 'invited';
+        user.status = user.hasPassword ? 'active' : 'invited';
       }
-      return HttpResponse.json(user);
+      return HttpResponse.json(publicUser(user));
     }),
 
     http.get(`${base}/settings`, async ({ request }) => {

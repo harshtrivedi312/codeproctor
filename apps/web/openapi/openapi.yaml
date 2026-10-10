@@ -457,58 +457,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  # ---- Staff administration (FE-03). Placeholder paths; the real ones come from BE-03 / ARC-02. ----
+  # ---- Staff administration (FR-103). The routes of apps/api/src/users (docs/api-contract.md section 6). ----
   /v1/admin/users:
     get:
       operationId: listStaffUsers
       summary: Staff users of the caller's organisation (SUPER_ADMIN, FR-103)
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
       responses:
         '200':
           description: Users
           content:
             application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: '#/components/schemas/StaffUser' }
+              schema: { $ref: '#/components/schemas/StaffUserList' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '503':
           $ref: '#/components/responses/Busy'
     post:
       operationId: inviteStaffUser
       summary: Invite a staff user by email; they set a password from the emailed link
-        (ADR 0003 section 4)
+        (ADR 0003 section 4). Needs the caller's own currentPassword (step-up, FR-102).
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [email, name, role]
-              properties:
-                email: { type: string, maxLength: 254 }
-                name: { type: string, maxLength: 100 }
-                role: { $ref: '#/components/schemas/StaffRole' }
+            schema: { $ref: '#/components/schemas/InviteStaffUserBody' }
       responses:
         '201':
           description: Invited
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StaffUser' }
-        '400':
-          description: Invalid input
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/ReauthOrForbidden' }
         '409':
           description: A user with this email already exists
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
+        '429':
+          description: The per-organisation invite limit (20 per hour by default) is reached
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '503':
           $ref: '#/components/responses/Busy'
         '500':
@@ -517,38 +516,35 @@ paths:
     patch:
       operationId: updateStaffUser
       summary: Change a role or deactivate or reactivate a user (revokes their refresh
-        tokens)
+        tokens). Needs the caller's own currentPassword (step-up, FR-102).
       parameters:
         - name: userId
           in: path
           required: true
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                role: { $ref: '#/components/schemas/StaffRole' }
-                active: { type: boolean }
+            schema: { $ref: '#/components/schemas/UpdateStaffUserBody' }
       responses:
         '200':
           description: Updated
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StaffUser' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '400': { $ref: '#/components/responses/ValidationFailed' }
+        '403': { $ref: '#/components/responses/ReauthOrForbidden' }
         '404':
           description: No such user in this organisation
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '409':
-          description: Refused, for example deactivating yourself or the last Super Admin
+          description: Refused, for example your own role or status, or the last Super Admin
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
+              schema: { $ref: '#/components/schemas/ProblemDetails' }
         '503':
           $ref: '#/components/responses/Busy'
         '500':
@@ -2075,6 +2071,20 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
+    ValidationFailed:
+      description: Validation failed (RFC 7807, errors[] lists the fields)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    ReauthOrForbidden:
+      description: The role is not allowed (a guard 403 has no code), or the caller's own
+        currentPassword is wrong or the account is locked (code REAUTH_FAILED, one body
+        for both). Never a session expiry (that is 401).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
     Busy:
       description: 'Lock contention (docs/api-contract.md section 8): 503 with a
         Retry-After header of 1 to 2 seconds and the problem code BUSY. The
@@ -3263,15 +3273,52 @@ components:
           description: Questions of the open section only
           items: { $ref: '#/components/schemas/Question' }
     StaffUser:
+      # StaffUserDto in apps/api/src/users/dto/users.dto.ts. `locked` and `lockedUntil`
+      # appear on the /admin/users routes only (FU-BE-22).
       type: object
-      required: [id, email, name, role, status]
+      required: [id, email, name, role, status, locked, lockedUntil, totpEnabled, createdAt]
       properties:
         id: { type: string }
         email: { type: string }
         name: { type: string }
         role: { $ref: '#/components/schemas/StaffRole' }
         status: { type: string, enum: [invited, active, deactivated] }
-        lastLoginAt: { type: string, format: date-time, nullable: true }
+        locked: { type: boolean }
+        lockedUntil: { type: string, format: date-time, nullable: true }
+        totpEnabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    StaffUserList:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/StaffUser' }
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+    CurrentPasswordBody:
+      type: object
+      required: [currentPassword]
+      properties:
+        currentPassword: { type: string, minLength: 1, maxLength: 1024, writeOnly: true }
+    InviteStaffUserBody:
+      # InviteStaffUserDto: email (valid, at most 254), name 1..200, role, and the caller's password.
+      type: object
+      required: [currentPassword, email, name, role]
+      properties:
+        currentPassword: { type: string, minLength: 1, maxLength: 1024, writeOnly: true }
+        email: { type: string, format: email, maxLength: 254 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        role: { $ref: '#/components/schemas/StaffRole' }
+    UpdateStaffUserBody:
+      # UpdateStaffUserDto: at least one of role and active.
+      type: object
+      required: [currentPassword]
+      properties:
+        currentPassword: { type: string, minLength: 1, maxLength: 1024, writeOnly: true }
+        role: { $ref: '#/components/schemas/StaffRole' }
+        active: { type: boolean }
     EventSeverity:
       # Must match SEVERITIES in packages/shared/src/events.ts.
       type: string
