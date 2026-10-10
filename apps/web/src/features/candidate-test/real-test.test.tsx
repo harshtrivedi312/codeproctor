@@ -248,7 +248,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(JSON.stringify(saved[0])).toContain('print(7)');
   }, 20_000);
 
-  it('FR-504 D-84: the server keeps one answer per question, so only the language shown is saved and a switch is saved too', async () => {
+  it('FR-504 D-84: the server keeps one answer per question, so only the language shown is saved, and a switch counts once the candidate typed in it', async () => {
     await startedSession();
     const saved: Record<string, unknown>[] = [];
     server.use(
@@ -265,13 +265,18 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ language: 'python' });
     expect(JSON.stringify(saved[0])).toContain('print(1)');
-    // Switching to another language changes what is graded: the next autosave sends that
-    // language's code (its starter here), never the stale Python draft under a new name.
+    // Only looking at another language saves nothing: its starter must never replace the saved
+    // answer (the server keeps one answer per question).
     await user.selectOptions(screen.getByLabelText(/language/i), 'javascript');
+    await new Promise((r) => setTimeout(r, 10_500));
+    expect(saved).toHaveLength(1);
+    // Typing in it makes it the answer: that language's code is saved.
+    await user.type(screen.getByLabelText(/code editor, javascript/i), 'console.log(2)');
     await waitFor(() => expect(saved).toHaveLength(2), { timeout: 12_000 });
     expect(saved[1]).toMatchObject({ language: 'javascript' });
+    expect(JSON.stringify(saved[1])).toContain('console.log(2)');
     expect(JSON.stringify(saved[1])).not.toContain('print(1)');
-    // Back to Python: the Python draft is still held on screen and is what is saved again.
+    // Back to Python: the Python draft is still on screen and is the answer again.
     await user.selectOptions(screen.getByLabelText(/language/i), 'python');
     await waitFor(() => expect(saved).toHaveLength(3), { timeout: 12_000 });
     expect(saved[2]).toMatchObject({ language: 'python' });

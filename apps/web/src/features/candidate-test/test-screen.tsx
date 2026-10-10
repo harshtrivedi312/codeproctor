@@ -73,13 +73,13 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
 
 const codeKey = (questionId: string, language: CodeLanguage) => `${questionId}:${language}`;
 
+const EMPTY_SAVED: SavedOnServer = { code: {}, mcq: {} };
+
 /** What the server holds per question: one answer, with the language it is graded as. */
 type SavedOnServer = {
   code: Record<string, { language: CodeLanguage; code: string }>;
   mcq: Record<string, string>;
 };
-const hasCodeDraft = (drafts: Drafts, questionId: string): boolean =>
-  Object.keys(drafts.code).some((k) => k.startsWith(`${questionId}:`));
 const activeLanguage = (
   q: Schemas['Question'],
   languages: Record<string, CodeLanguage>,
@@ -319,9 +319,8 @@ function TestScreenInner({
   // value. The server keeps ONE answer per question (final code + its language, which is what is
   // graded), so only the language shown is sent, and a language switch is itself a change.
   const autosaveValue = React.useMemo(() => ({ drafts, languages }), [drafts, languages]);
-  const emptySaved: SavedOnServer = { code: {}, mcq: {} };
-  const savedRef = React.useRef<SavedOnServer>(emptySaved);
-  const [saved, setSaved] = React.useState<SavedOnServer>(emptySaved);
+  const savedRef = React.useRef<SavedOnServer>(EMPTY_SAVED);
+  const [saved, setSaved] = React.useState<SavedOnServer>(EMPTY_SAVED);
   const autosave = useAutosave(autosaveValue, async (snapshot) => {
     const previous = savedRef.current;
     const next: SavedOnServer = { code: { ...previous.code }, mcq: { ...previous.mcq } };
@@ -341,9 +340,11 @@ function TestScreenInner({
         );
         continue;
       }
-      if (!hasCodeDraft(snapshot.drafts, q.id)) continue; // never touched: nothing to keep
+      // A language only counts once the candidate typed in it (or reset it): looking at another
+      // language's starter must never replace the saved answer with that starter.
       const lang = activeLanguage(q, snapshot.languages);
-      const code = snapshot.drafts.code[codeKey(q.id, lang)] ?? q.starterCode?.[lang] ?? '';
+      const code = snapshot.drafts.code[codeKey(q.id, lang)];
+      if (code === undefined) continue;
       const held = previous.code[q.id];
       if (held && held.language === lang && held.code === code) continue;
       jobs.push(
@@ -468,9 +469,9 @@ function TestScreenInner({
 
   const isSaved = (q: Schemas['Question']): boolean => {
     if (q.type === 'mcq') return saved.mcq[q.id] === drafts.mcq[q.id];
-    if (!hasCodeDraft(drafts, q.id)) return true;
     const lang = activeLanguage(q, languages);
-    const code = drafts.code[codeKey(q.id, lang)] ?? q.starterCode?.[lang] ?? '';
+    const code = drafts.code[codeKey(q.id, lang)];
+    if (code === undefined) return true; // nothing typed in the language shown
     const held = saved.code[q.id];
     return held !== undefined && held.language === lang && held.code === code;
   };
@@ -555,8 +556,8 @@ function TestScreenInner({
       }
     };
     try {
-      const saved = await autosave.flush();
-      if (!saved) {
+      const allSaved = await autosave.flush();
+      if (!allSaved) {
         setFinishError(
           'We could not save your latest answers, so the section is not finished. Check your connection and try again.',
         );
