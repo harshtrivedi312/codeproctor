@@ -12,7 +12,7 @@ import {
   type QuestionView,
   type TestLayout,
 } from './adr-wire';
-import type { TestSource } from './source';
+import type { TestQuestion, TestSource } from './source';
 
 /**
  * The real test screen's data source on the ADR 0013 routes (PROVISIONAL, see adr-wire.ts). Every
@@ -28,7 +28,7 @@ export class TestLoadError extends Error {
   }
 }
 
-function questionFor(view: QuestionView, points: number): Schemas['Question'] {
+function questionFor(view: QuestionView, points: number): TestQuestion {
   if (view.type === 'MCQ') {
     return {
       id: view.sessionQuestionId,
@@ -37,6 +37,7 @@ function questionFor(view: QuestionView, points: number): Schemas['Question'] {
       points,
       statementMarkdown: view.statementMd,
       options: (view.mcq?.options ?? []).map((o) => ({ id: o.id, label: o.text })),
+      saved: view.saved,
     };
   }
   return {
@@ -53,6 +54,7 @@ function questionFor(view: QuestionView, points: number): Schemas['Question'] {
       input: s.input,
       expectedOutput: s.expectedOutput,
     })),
+    saved: view.saved,
   };
 }
 
@@ -86,7 +88,7 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
       ),
     );
     views.forEach(ended);
-    const questions: Schemas['Question'][] = [];
+    const questions: TestQuestion[] = [];
     for (const [i, v] of views.entries()) {
       if (!v.ok) throw new TestLoadError('unavailable');
       // Short answers are not built yet: fail closed rather than hide a question (FU-FEB).
@@ -147,10 +149,16 @@ export function createAdrSource(hooks: { onSessionEnded: () => void }): TestSour
       return r.data.serverTime;
     },
     async saveDraft(questionId, body) {
+      // The API's DraftDto (whitelisted: an unknown field is a 400): CODING `{ code, language }`;
+      // MCQ `{ answer: { optionIds } }`. The screen's own `kind` field is never sent.
+      const dto =
+        body.kind === 'code'
+          ? { code: body.code, language: body.language }
+          : { answer: { optionIds: [body.selectedOptionId] } };
       const r = await requestAt(
         draftSavedSchema,
         `/answers/${encodeURIComponent(questionId)}/draft`,
-        { method: 'PUT', body, authed: true },
+        { method: 'PUT', body: dto, authed: true },
       );
       ended(r);
       if (r.ok) return { ok: true, savedAt: r.data.savedAt };

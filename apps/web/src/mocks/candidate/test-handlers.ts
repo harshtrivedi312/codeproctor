@@ -288,9 +288,19 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       if (!isQuestionId(id)) return problem(404, 'NOT_FOUND');
       // The open-section rule: only the open section's questions are served (CS-4.6).
       if (QUESTIONS[id].section !== openPosition(r.s)) return problem(409, 'SECTION_NOT_OPEN');
+      // The candidate's own saved work (#402): what the draft route stored, null when nothing was.
+      const stored = r.s.drafts.get(id) as
+        { code?: string; language?: string; answer?: { optionIds?: string[] } } | undefined;
+      const saved =
+        stored === undefined
+          ? null
+          : stored.answer?.optionIds
+            ? { optionIds: stored.answer.optionIds }
+            : { code: stored.code ?? '', language: stored.language ?? 'python' };
       if (id === 'q2') {
         return HttpResponse.json({
           sessionQuestionId: id,
+          saved,
           type: 'MCQ',
           title: 'Complexity',
           statementMd: 'What is the time complexity of binary search on a sorted array?',
@@ -306,6 +316,7 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       }
       return HttpResponse.json({
         sessionQuestionId: id,
+        saved,
         type: 'CODING',
         title: id === 'q1' ? 'Sum of two numbers' : 'Reverse a string',
         statementMd:
@@ -327,7 +338,25 @@ export function createTestRunHandlers({ bearer, problem }: Deps) {
       if (!isQuestionId(id) || QUESTIONS[id].section !== openPosition(r.s))
         return problem(409, 'SECTION_NOT_OPEN');
       if (r.s.pauseReasons.length > 0) return problem(409, 'SESSION_PAUSED');
-      r.s.drafts.set(id, await request.json());
+      // The API's DraftDto is whitelisted: only code, language and answer are accepted, and a
+      // code draft needs its language. Anything else is a 400, like the real route.
+      const draft = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      // Per question type, like the API: a CODING answer is { code, language } and an MCQ answer is
+      // { answer: { optionIds } }; the other type's fields are a 400.
+      const isMcq = id === 'q2';
+      const keys = draft && typeof draft === 'object' ? Object.keys(draft) : [];
+      const optionIds = (draft?.answer as { optionIds?: unknown } | undefined)?.optionIds;
+      const valid = isMcq
+        ? keys.length === 1 &&
+          keys[0] === 'answer' &&
+          Array.isArray(optionIds) &&
+          optionIds.every((o) => typeof o === 'string')
+        : keys.length === 2 &&
+          typeof draft?.code === 'string' &&
+          typeof draft?.language === 'string' &&
+          ['python', 'javascript'].includes(draft.language);
+      if (!valid) return problem(400, 'VALIDATION_FAILED');
+      r.s.drafts.set(id, draft);
       r.s.draftCalls += 1;
       return HttpResponse.json({ savedAt: iso(Date.now()) });
     }),

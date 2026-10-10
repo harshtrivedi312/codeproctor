@@ -1,10 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { axe } from 'vitest-axe';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { candidateApi } from '@/features/candidate-flow/api';
-import { setSessionToken } from '@/features/candidate-flow/session-store';
+import { getSessionToken, setSessionToken } from '@/features/candidate-flow/session-store';
 import {
   recordRequests,
   renderWithQuery,
@@ -112,10 +112,31 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(order.indexOf('PUT /v1/candidate/answers/:id/draft')).toBeLessThan(
       order.indexOf('POST /v1/candidate/answers/:id/run'),
     );
-    expect(seen.find((r) => r.method === 'PUT')?.body).toMatchObject({
-      kind: 'code',
-      language: 'python',
+    // The API's DraftDto: { code, language } and nothing else (a `kind` field is a 400).
+    const draftBody = seen.find((r) => r.method === 'PUT')?.body as Record<string, unknown>;
+    expect(Object.keys(draftBody).sort()).toEqual(['code', 'language']);
+    expect(draftBody).toMatchObject({ language: 'python' });
+  });
+
+  it('FR-504: the mock refuses the old draft body shape, like the whitelisted API route (a `kind` field is a 400)', async () => {
+    await startedSession();
+    const token = getSessionToken();
+    const put = (body: object) =>
+      fetch(`${cand}/answers/q1/draft`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+    expect((await put({ kind: 'code', language: 'python', code: 'x' })).status).toBe(400);
+    expect((await put({ code: 'x' })).status).toBe(400); // a code draft needs its language
+    expect((await put({ code: 'x', language: 'python' })).status).toBe(200);
+    expect((await put({ answer: { optionIds: ['a'] } })).status).toBe(400); // q1 is a coding question
+    const mcq = await fetch(`${cand}/answers/q2/draft`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ answer: { optionIds: ['opt_b'] } }),
     });
+    expect(mcq.status).toBe(200);
   });
 
   it('FR-502 DL-58: the real run response with LOCAL_STUB verdicts shows the stub notice, not a pass or a fail', async () => {
@@ -227,6 +248,128 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     expect(JSON.stringify(saved[0])).toContain('print(7)');
   }, 20_000);
 
+  it('FR-504 TC-045 D-84: the server keeps one answer per question, so only the language last typed in is saved, and a switch alone sends nothing', async () => {
+    await startedSession();
+    const saved: Record<string, unknown>[] = [];
+    server.use(
+      http.put(`${cand}/answers/:id/draft`, async ({ request }) => {
+        saved.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    await enterTest(user);
+    // Run flushes the autosave first, so each checkpoint is exact (the 5 s Run cooldown applies).
+    let runs = 0;
+    const runAndFlush = async () => {
+      if (runs > 0) await new Promise((r) => setTimeout(r, 5_100));
+      await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+      runs += 1;
+      await waitFor(() => expect(seen.filter((r) => r.url.endsWith('/run'))).toHaveLength(runs));
+    };
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print(1)');
+    await runAndFlush();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[0])).toContain('print(1)');
+    // Only looking at another language saves nothing: its starter must never replace the saved
+    // answer (the server keeps one answer per question).
+    await user.selectOptions(screen.getByLabelText(/language/i), 'javascript');
+    await runAndFlush();
+    expect(saved).toHaveLength(1);
+    // Typing in it makes it the answer: that language's code is saved.
+    await user.type(screen.getByLabelText(/code editor, javascript/i), 'console.log(2)');
+    await runAndFlush();
+    expect(saved).toHaveLength(2);
+    expect(saved[1]).toMatchObject({ language: 'javascript' });
+    expect(JSON.stringify(saved[1])).toContain('console.log(2)');
+    expect(JSON.stringify(saved[1])).not.toContain('print(1)');
+    // Back to Python without typing: JavaScript stays the answer, nothing is sent.
+    await user.selectOptions(screen.getByLabelText(/language/i), 'python');
+    await runAndFlush();
+    expect(saved).toHaveLength(2);
+    // Typing in Python again makes Python (with its kept draft) the answer.
+    await user.type(screen.getByLabelText(/code editor, python/i), '!');
+    await runAndFlush();
+    expect(saved).toHaveLength(3);
+    expect(saved[2]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[2])).toContain('print(1)');
+  }, 60_000);
+
+  it('FR-504 TC-045 D-84: code typed just before a language switch is still saved, and the label says which language is saved', async () => {
+    await startedSession();
+    const saved: Record<string, unknown>[] = [];
+    server.use(
+      http.put(`${cand}/answers/:id/draft`, async ({ request }) => {
+        saved.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print(5)');
+    // Switch before any autosave tick, without typing in JavaScript.
+    await user.selectOptions(screen.getByLabelText(/language/i), 'javascript');
+    await user.click(screen.getByRole('button', { name: /run sample tests/i })); // flushes
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0]).toMatchObject({ language: 'python' });
+    expect(JSON.stringify(saved[0])).toContain('print(5)');
+    expect(screen.getByRole('button', { name: /question 1/i })).toHaveTextContent(
+      /saved in python/i,
+    );
+    expect(screen.getByTestId('answer-language-hint')).toHaveTextContent(
+      /saved answer is in python/i,
+    );
+  }, 20_000);
+
+  it('FR-504 TC-045 D-61: a reload resumes from the saved work and never saves the starter code over it', async () => {
+    await startedSession();
+    const seen = recordRequests();
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'print("mine")');
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    await screen.findByText(/sample tests passed/i);
+    expect(seen.filter((r) => r.method === 'PUT')).toHaveLength(1);
+    cleanup(); // the page is gone: a new load of the same session
+    const again = recordRequests();
+    const user2 = userEvent.setup();
+    await enterTest(user2);
+    expect(screen.getByLabelText<HTMLTextAreaElement>(/code editor, python/i).value).toContain(
+      'print("mine")',
+    );
+    // Nothing was typed: the question reads as saved, not as "not started", and nothing is sent.
+    expect(again.filter((r) => r.method === 'PUT')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: /question 1/i })).toHaveTextContent(/\(saved\)/i);
+  }, 30_000);
+
+  it('FR-504 TC-045 D-84: a failing draft is not sent again together with the ones that saved', async () => {
+    await startedSession();
+    const calls: string[] = [];
+    let failQ2 = true;
+    server.use(
+      http.put(`${cand}/answers/:id/draft`, ({ params }) => {
+        calls.push(String(params.id));
+        if (params.id === 'q2' && failQ2)
+          return HttpResponse.json({ code: 'VALIDATION_FAILED' }, { status: 400 });
+        return HttpResponse.json({ savedAt: new Date().toISOString() });
+      }),
+    );
+    const user = userEvent.setup();
+    await enterTest(user);
+    await user.type(screen.getByLabelText(/code editor, python/i), 'x');
+    await user.click(screen.getByRole('button', { name: /question 2/i }));
+    await user.click(screen.getByRole('radio', { name: 'O(log n)' }));
+    await user.click(screen.getByRole('button', { name: /question 1/i }));
+    await user.click(screen.getByRole('button', { name: /run sample tests/i }));
+    await waitFor(() => expect(calls).toContain('q2'));
+    failQ2 = false;
+    calls.length = 0;
+    await waitFor(() => expect(calls).toContain('q2'), { timeout: 12_000 });
+    expect(calls).toEqual(['q2']); // q1 was saved and is not sent again
+  }, 40_000);
+
   it('FR-504: a multiple-choice answer is saved with the option id', async () => {
     await startedSession();
     const seen = recordRequests();
@@ -240,7 +383,7 @@ describe('real test screen on the ADR 0013 routes (FR-501..FR-505, PROVISIONAL)'
     );
     await screen.findByText(/finished and cannot be reopened/i);
     const draft = seen.find((r) => r.method === 'PUT' && r.url.endsWith('/answers/q2/draft'));
-    expect(draft?.body).toEqual({ kind: 'mcq', selectedOptionId: 'opt_b' });
+    expect(draft?.body).toEqual({ answer: { optionIds: ['opt_b'] } });
   });
 
   it('ADR 0002 FR-301: finishing section 1 is final and opens section 2; finishing the last submits the test', async () => {

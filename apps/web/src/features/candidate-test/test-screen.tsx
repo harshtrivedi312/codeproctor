@@ -11,7 +11,14 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import type { Schemas } from '@/lib/api/client';
 import { TestLoadError } from './adr-source';
 import { demoSource } from './demo-source';
-import type { DraftBody, DraftResult, RunResultView, TestSource } from './source';
+import {
+  savedWorkOf,
+  type DraftBody,
+  type DraftResult,
+  type RunResultView,
+  type TestQuestion,
+  type TestSource,
+} from './source';
 import type { ProctorBridge } from './proctor/bridge';
 import { cooldownRemainingMs, cooldownSeconds } from './cooldown';
 import { LANGUAGE_LABELS } from './keywords';
@@ -72,6 +79,48 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
 }
 
 const codeKey = (questionId: string, language: CodeLanguage) => `${questionId}:${language}`;
+
+/**
+ * The screen's starting state from the work the server already holds for these questions. Only a
+ * saved language the question still offers is used; anything else is as if nothing was saved.
+ */
+function seedFrom(questions: readonly TestQuestion[]): {
+  drafts: Drafts;
+  langs: Record<string, CodeLanguage>;
+  saved: SavedOnServer;
+} {
+  const out: {
+    drafts: Drafts;
+    langs: Record<string, CodeLanguage>;
+    saved: SavedOnServer;
+  } = { drafts: { code: {}, mcq: {} }, langs: {}, saved: { code: {}, mcq: {} } };
+  for (const q of questions) {
+    const work = savedWorkOf(q);
+    if (work === null) continue;
+    if (q.type === 'coding' && 'code' in work) {
+      if (q.languages && !q.languages.includes(work.language)) continue;
+      out.drafts.code[codeKey(q.id, work.language)] = work.code;
+      out.langs[q.id] = work.language;
+      out.saved.code[q.id] = { language: work.language, code: work.code };
+    } else if (q.type === 'mcq' && 'optionIds' in work) {
+      const first = work.optionIds[0];
+      if (first === undefined || !q.options?.some((o) => o.id === first)) continue;
+      out.drafts.mcq[q.id] = first;
+      out.saved.mcq[q.id] = first;
+    }
+  }
+  return out;
+}
+
+/** What the server holds per question: one answer, with the language it is graded as. */
+type SavedOnServer = {
+  code: Record<string, { language: CodeLanguage; code: string }>;
+  mcq: Record<string, string>;
+};
+const activeLanguage = (
+  q: Schemas['Question'],
+  languages: Record<string, CodeLanguage>,
+): CodeLanguage => languages[q.id] ?? q.languages?.[0] ?? 'python';
 
 /** A section the server has finished. Kept outside the per-section screen (ADR 0002). */
 interface FinishedSection {
@@ -251,9 +300,15 @@ function TestScreenInner({
   onFinished: (info: FinishedSection) => void;
 }): React.JSX.Element {
   const { questions, section } = session;
+  // The candidate's own saved work seeds the screen (a reload or a crash resumes from it, #402): the
+  // editor shows it and the autosave never replaces it with the starter code.
+  const [seed] = React.useState(() => seedFrom(questions));
   const [activeId, setActiveId] = React.useState(questions[0]?.id ?? '');
-  const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>({});
-  const [drafts, setDrafts] = React.useState<Drafts>({ code: {}, mcq: {} });
+  const [languages, setLanguages] = React.useState<Record<string, CodeLanguage>>(seed.langs);
+  const [drafts, setDrafts] = React.useState<Drafts>(seed.drafts);
+  // The language the candidate last typed in (or reset) per question: the one that is saved and
+  // graded. Looking at another language's starter does not change it.
+  const [answerLangs, setAnswerLangs] = React.useState<Record<string, CodeLanguage>>(seed.langs);
   const [fsFailed, setFsFailed] = React.useState(false);
   const [finishOpen, setFinishOpen] = React.useState(false);
   const [finishing, setFinishing] = React.useState(false);
@@ -293,8 +348,7 @@ function TestScreenInner({
     (testLeft !== null && testLeft <= 0) || (sectionLeft !== null && sectionLeft <= 0);
 
   const question = questions.find((q) => q.id === activeId) ?? questions[0];
-  const language: CodeLanguage =
-    (question && languages[question.id]) ?? question?.languages?.[0] ?? 'python';
+  const language: CodeLanguage = question ? activeLanguage(question, languages) : 'python';
   // The editor is also off while the screen share is lost or a proctor paused the test (ADR 0002 P-2).
   const proctorLocked =
     proctor !== undefined &&
@@ -303,36 +357,70 @@ function TestScreenInner({
   const readOnly =
     isEditorReadOnly(lock, expired) || finished || clock.unavailable || proctorLocked;
 
-  // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new Drafts object.
-  const lastSaved = React.useRef<Drafts>({ code: {}, mcq: {} });
-  const [savedSnapshot, setSavedSnapshot] = React.useState<Drafts>({ code: {}, mcq: {} });
-  const autosave = useAutosave(drafts, async (snapshot) => {
-    const previous = lastSaved.current;
+  // Autosave every 10 s (FR-504). Compared by identity: any edit creates a new value. The server
+  // keeps ONE answer per question (final code + its language, which is what is graded), so only
+  // the language the candidate last typed in (or reset) is sent; a language switch alone is not.
+  const autosaveValue = React.useMemo(() => ({ drafts, answerLangs }), [drafts, answerLangs]);
+  const savedRef = React.useRef<SavedOnServer>(seed.saved);
+  const [saved, setSaved] = React.useState<SavedOnServer>(seed.saved);
+  const autosave = useAutosave(autosaveValue, async (snapshot) => {
+    const previous = savedRef.current;
+    const next: SavedOnServer = { code: { ...previous.code }, mcq: { ...previous.mcq } };
     const jobs: Promise<DraftResult>[] = [];
     const requestStart = performance.now();
-    for (const [key, code] of Object.entries(snapshot.code)) {
-      if (previous.code[key] === code) continue;
-      const [questionId, lang] = key.split(':') as [string, CodeLanguage];
-      jobs.push(source.saveDraft(questionId, { kind: 'code', language: lang, code }));
-    }
-    for (const [questionId, selectedOptionId] of Object.entries(snapshot.mcq)) {
-      if (previous.mcq[questionId] === selectedOptionId) continue;
+    for (const q of questions) {
+      if (q.type === 'mcq') {
+        const selectedOptionId = snapshot.drafts.mcq[q.id];
+        if (selectedOptionId === undefined || previous.mcq[q.id] === selectedOptionId) continue;
+        jobs.push(
+          source
+            .saveDraft(q.id, { kind: 'mcq', selectedOptionId } satisfies DraftBody)
+            .then((r) => {
+              if (r.ok) next.mcq[q.id] = selectedOptionId;
+              return r;
+            }),
+        );
+        continue;
+      }
+      // The answer is the language the candidate last typed in (or reset): looking at another
+      // language's starter never replaces it, and a draft typed just before a switch still saves.
+      const lang = snapshot.answerLangs[q.id];
+      if (lang === undefined) continue;
+      const code = snapshot.drafts.code[codeKey(q.id, lang)];
+      if (code === undefined) continue;
+      const held = previous.code[q.id];
+      if (held && held.language === lang && held.code === code) continue;
       jobs.push(
-        source.saveDraft(questionId, { kind: 'mcq', selectedOptionId } satisfies DraftBody),
+        source.saveDraft(q.id, { kind: 'code', language: lang, code }).then((r) => {
+          if (r.ok) next.code[q.id] = { language: lang, code };
+          return r;
+        }),
       );
     }
     const responses = await Promise.all(jobs);
     const responseEnd = performance.now();
-    // A failed or paused save keeps the draft: nothing is marked saved, and the next tick retries
-    // (DL-17: a 409 SESSION_PAUSED never drops code).
+    // What did save is remembered per question, so one failing draft is not sent again together
+    // with every other one (DRAFT_LIMIT 20/60 s). A failed or paused save keeps the draft and the
+    // next tick retries (DL-17: a 409 SESSION_PAUSED never drops code).
+    savedRef.current = next;
+    setSaved(next);
     if (responses.some((r) => !r.ok)) throw new Error('save');
     // The save response carries the server time: re-sync the countdown offset (FR-505, TC-047).
     const serverTimes = responses.flatMap((r) => (r.ok ? [r.savedAt] : []));
     const latestServerTime = serverTimes[serverTimes.length - 1];
     if (latestServerTime) clock.syncFromServer(latestServerTime, requestStart, responseEnd);
-    lastSaved.current = snapshot;
-    setSavedSnapshot(snapshot);
   });
+
+  // Leaving the page loses what is not saved yet, and a reload shows the starter code again.
+  React.useEffect(() => {
+    if (finished) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [finished]);
 
   // Cooldown tick: only while a cooldown is active.
   const cooldownMs = cooldownRemainingMs(lastRunAt, now);
@@ -423,10 +511,13 @@ function TestScreenInner({
   };
 
   const isSaved = (q: Schemas['Question']): boolean => {
-    if (q.type === 'mcq') return savedSnapshot.mcq[q.id] === drafts.mcq[q.id];
-    return Object.entries(drafts.code)
-      .filter(([k]) => k.startsWith(`${q.id}:`))
-      .every(([k, code]) => savedSnapshot.code[k] === code);
+    if (q.type === 'mcq') return saved.mcq[q.id] === drafts.mcq[q.id];
+    const lang = answerLangs[q.id];
+    if (lang === undefined) return true; // nothing typed yet
+    const code = drafts.code[codeKey(q.id, lang)];
+    if (code === undefined) return true;
+    const held = saved.code[q.id];
+    return held !== undefined && held.language === lang && held.code === code;
   };
 
   const run = async () => {
@@ -509,8 +600,8 @@ function TestScreenInner({
       }
     };
     try {
-      const saved = await autosave.flush();
-      if (!saved) {
+      const allSaved = await autosave.flush();
+      if (!allSaved) {
         setFinishError(
           'We could not save your latest answers, so the section is not finished. Check your connection and try again.',
         );
@@ -661,7 +752,15 @@ function TestScreenInner({
               >
                 Question {i + 1}
                 <span className="ml-1 text-xs text-muted-foreground">
-                  {!isAnswered(q) ? '(not started)' : isSaved(q) ? '(saved)' : '(not saved yet)'}
+                  {!isAnswered(q)
+                    ? '(not started)'
+                    : !isSaved(q)
+                      ? '(not saved yet)'
+                      : q.type !== 'mcq' &&
+                          answerLangs[q.id] &&
+                          answerLangs[q.id] !== activeLanguage(q, languages)
+                        ? `(saved in ${LANGUAGE_LABELS[answerLangs[q.id] as CodeLanguage]})`
+                        : '(saved)'}
                 </span>
               </button>
             ))}
@@ -744,6 +843,13 @@ function TestScreenInner({
                 >
                   <RotateCcw className="h-4 w-4" aria-hidden /> Reset to starter code
                 </Button>
+                {answerLangs[question.id] && answerLangs[question.id] !== language ? (
+                  <p className="text-xs text-muted-foreground" data-testid="answer-language-hint">
+                    Your saved answer is in{' '}
+                    {LANGUAGE_LABELS[answerLangs[question.id] as CodeLanguage]}. Type here to make{' '}
+                    {LANGUAGE_LABELS[language]} your answer instead. Run uses the code shown.
+                  </p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   Tab inserts an indent. To move focus out of the editor, press Ctrl+M, then Tab.
                 </p>
@@ -782,12 +888,14 @@ function TestScreenInner({
                   value={value}
                   readOnly={readOnly}
                   ariaLabel={`Code editor, ${LANGUAGE_LABELS[language]}`}
-                  onChange={(next) =>
+                  onChange={(next) => {
+                    const id = question.id;
+                    setAnswerLangs((a) => (a[id] === language ? a : { ...a, [id]: language }));
                     setDrafts((d) => ({
                       ...d,
-                      code: { ...d.code, [codeKey(question.id, language)]: next },
-                    }))
-                  }
+                      code: { ...d.code, [codeKey(id, language)]: next },
+                    }));
+                  }}
                   onBlocked={(kind) =>
                     toast.message(
                       kind === 'paste'
@@ -901,6 +1009,9 @@ function TestScreenInner({
           <DialogDescription>
             Your {LANGUAGE_LABELS[language]} code for this question is replaced with the starter
             code. This cannot be undone.
+            {question && answerLangs[question.id] && answerLangs[question.id] !== language
+              ? ` This also makes ${LANGUAGE_LABELS[language]} your answer instead of your ${LANGUAGE_LABELS[answerLangs[question.id] as CodeLanguage]} code.`
+              : ''}
           </DialogDescription>
           <div className="mt-6 flex justify-end gap-3">
             <Button variant="outline" onClick={() => setResetOpen(false)}>
@@ -909,9 +1020,11 @@ function TestScreenInner({
             <Button
               variant="destructive"
               onClick={() => {
+                const id = question.id;
+                setAnswerLangs((a) => (a[id] === language ? a : { ...a, [id]: language }));
                 setDrafts((d) => ({
                   ...d,
-                  code: { ...d.code, [codeKey(question.id, language)]: starter },
+                  code: { ...d.code, [codeKey(id, language)]: starter },
                 }));
                 setResetOpen(false);
               }}
