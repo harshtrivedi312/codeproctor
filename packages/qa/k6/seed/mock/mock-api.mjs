@@ -119,15 +119,31 @@ export async function startMock(opts = {}) {
           .join(',');
         const t0 = Date.parse(body.windowStart ?? '');
         const t1 = Date.parse(body.windowEnd ?? '');
-        const iso = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})$/;
+        // The DTO's own patterns (invitations.dto.ts): ISO_INSTANT, display-safe text, plain local part.
+        const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+        // eslint-disable-next-line no-control-regex -- control characters are what this rejects
+        const unsafe = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+        const email = body.candidate?.email;
+        const name = body.candidate?.name;
         if (
           keys !== 'candidate,windowEnd,windowStart' ||
           cKeys !== 'email,name' ||
-          !body.candidate.email?.endsWith('@example.test') ||
+          typeof email !== 'string' ||
+          email.length > 254 ||
+          !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]+$/i.test(email) ||
+          unsafe.test(email) ||
+          (!email.endsWith('.test') && !email.endsWith('.example.com')) ||
+          typeof name !== 'string' ||
+          name.trim().length < 1 ||
+          name.trim().length > 200 ||
+          unsafe.test(name) ||
+          typeof body.windowStart !== 'string' ||
+          typeof body.windowEnd !== 'string' ||
           !iso.test(body.windowStart) ||
           !iso.test(body.windowEnd) ||
           !(t0 >= Date.now() - 5 * 60_000) ||
           !(t1 > t0) ||
+          !(t1 > Date.now()) ||
           t1 - t0 > 7 * 24 * 3600_000
         ) {
           return problem(res, 400, 'VALIDATION_FAILED');
@@ -148,7 +164,7 @@ export async function startMock(opts = {}) {
           id: uuid(),
           to: s.email,
           created: new Date().toISOString(),
-          text: `Open https://app.example.test/invite/${s.linkToken} to start.`,
+          text: `Open https://app.example.test/t#${s.linkToken} to start.`,
         });
         return send(res, 201, {
           id: s.invitationId,
@@ -158,7 +174,7 @@ export async function startMock(opts = {}) {
           windowStart: body.windowStart,
           windowEnd: body.windowEnd,
           createdAt: new Date().toISOString(),
-          mail: { outcome: opts.mailOutcome ?? 'queued' },
+          mail: opts.mailOutcome ?? 'queued',
         });
       }
       const er = /^POST \/candidates\/([^/]+)\/erasure$/.exec(key);

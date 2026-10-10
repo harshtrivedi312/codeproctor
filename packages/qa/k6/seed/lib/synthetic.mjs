@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 // Reserved or documentation-only domains: RFC 2606 / RFC 6761. Mail to them can never reach a
 // real person. Anything else is refused.
 const SAFE_DOMAIN =
-  /^(?:[a-z0-9-]+\.)*(?:test|invalid|example)$|^(?:[a-z0-9-]+\.)?example\.(?:com|org|net)$/;
+  /^(?:[a-z0-9-]+\.)+(?:test|invalid|example)$|^(?:[a-z0-9-]+\.)?example\.(?:com|org|net)$/;
 
 export function assertSyntheticDomain(domain) {
   if (!SAFE_DOMAIN.test(domain)) {

@@ -2,13 +2,13 @@
 //
 // Marker: REAL = checked against apps/api on main (candidate-auth.controller.ts,
 // candidate-session.controller.ts, dto/candidate.dto.ts). DOC = pinned by FSD section 4 or an ADR
-// but not implemented on main yet. ASSUMED = not pinned anywhere (staff invite body, erasure).
+// but not implemented on main yet. ASSUMED = not pinned anywhere (erasure).
 // AVAILABLE says which candidate steps exist on main; a step that is not available fails the seed
 // with a named "not available on main yet" error instead of guessing a route.
 export const ROUTES = {
   login: '/auth/login', // REAL (apps/api/src/auth); body { email, password } -> { status, session?, challengeToken? }
   verify2fa: '/auth/2fa/verify', // REAL; body { challengeToken, code } -> { accessToken, user }
-  invite: (testId) => `/tests/${testId}/invitations`, // DOC path; ASSUMED single-invite body below
+  invite: (testId) => `/tests/${testId}/invitations`, // REAL path and body (inviteBody below)
   erase: (candidateId) => `/candidates/${encodeURIComponent(candidateId)}/erasure`, // ASSUMED (TC-094, ADR 0004 R-6: no route in fsd 4)
   // REAL, public, no token. Body { invitationToken } -> 200 { state, ... }; sends nothing (TC-021).
   link: '/candidate/session/link',
@@ -32,7 +32,7 @@ export const ROUTES = {
 // Mutable on purpose: the tests switch a step on to exercise the code behind it against the mock.
 export const AVAILABLE = {
   systemCheck: false,
-  roomScan: false, // presign, upload, confirm; identity is waived by the invitation (C-25, ADR 0015)
+  roomScan: false, // presign, upload, confirm; identity is a separate step (not waivable through the invitation API)
   identity: false, // --identity: the identity step with generated synthetic assets (ADR 0013 5.5)
 };
 

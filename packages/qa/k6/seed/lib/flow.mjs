@@ -3,7 +3,7 @@
 // KEY_ALREADY_ISSUED on reuse, ADR 0013 section 4, so the k6 script must make the one and only call).
 //
 //   invite (INVITED) -> link token + OTP from the mail sink -> start (OPENED) -> consent/sign
-//   (CONSENTED) -> system-check -> identity waived by the invitation (C-25, ADR 0015) -> room scan
+//   (CONSENTED) -> system-check -> identity (not waivable through the invitation API; gated, --identity) -> room scan
 //   (presign, PUT, confirm) -> start-test, polled until the verify-session job has moved the
 //   session to VERIFIED -> IN_PROGRESS.
 import {
@@ -61,7 +61,7 @@ export async function seedOne({
   record(item);
   log(`${tag} invited`);
   // The link and the OTP only exist as email: a mail that was not queued cannot be read from the sink.
-  const outcome = body?.mail?.outcome;
+  const outcome = body?.mail; // 'queued' | 'failed' | 'disabled' (a plain string in the real response)
   if (outcome !== 'queued') {
     const shown = outcome === 'failed' || outcome === 'disabled' ? outcome : 'unknown';
     throw new SeedError(`invite: mail was not queued (${shown}).`, { step: 'invite' });

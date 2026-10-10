@@ -97,7 +97,7 @@ test('TC-090 seed: happy path writes k6 sessions (0600) and leaves proctor-key u
   }
 });
 
-test('TC-090 seed: the invitation body is exactly the real DTO (one per request), mail is queued, and the steps run in state order', async () => {
+test('TC-090 seed: the steps run in state order, from the invitation to the test start', async () => {
   const m = await startMock();
   const dir = tmp();
   try {
@@ -802,6 +802,40 @@ test('TC-090 seed: an invitation whose mail was not queued stops that candidate 
     assert.equal(r.code, 1);
     assert.match(r.err, /invite: mail was not queued \(failed\)/);
     assert.ok(!fs.existsSync(path.join(dir, 'sessions.json')));
+  } finally {
+    await m.close();
+  }
+});
+
+test('TC-090 seed: the mock refuses what the real invitation DTO refuses (extra field, newline in the name, past window)', async () => {
+  const m = await startMock();
+  try {
+    const login = await fetch(`${m.url}/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: MOCK.email, password: MOCK.password }),
+    });
+    const cookieless = await login.json();
+    const token = cookieless.session?.accessToken ?? cookieless.accessToken;
+    const post = (b) =>
+      fetch(`${m.url}/tests/${MOCK.testId}/invitations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(b),
+      });
+    const now = Date.now();
+    const ok = {
+      candidate: { email: 'a-b.1@example.test', name: 'K6SEED x 001' },
+      windowStart: new Date(now - 60_000).toISOString(),
+      windowEnd: new Date(now + 3600_000).toISOString(),
+    };
+    assert.equal((await post(ok)).status, 201);
+    assert.equal((await post({ ...ok, accommodations: {} })).status, 400);
+    assert.equal((await post({ ...ok, candidate: { ...ok.candidate, name: 'a\nb' } })).status, 400);
+    assert.equal(
+      (await post({ ...ok, windowStart: new Date(now - 10 * 60_000).toISOString() })).status,
+      400,
+    );
   } finally {
     await m.close();
   }
