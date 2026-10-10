@@ -136,9 +136,13 @@ export function summary({ invite, appsStarted, workerStatus = 'skipped' }) {
     '',
     '  Staff accounts: admin, recruiter, author, reviewer @demo-corp.example',
     '  Password: the development password in prisma/seed/guard.ts (DEMO_PASSWORD).',
-    '  The admin must enrol an authenticator on first sign-in; get codes with',
+    '  A second factor is optional for every role (recommended). To enrol an authenticator, use the',
+    '  prompt after sign-in; get codes with',
     '    node infra/scripts/demo-totp.mjs <the manual key shown on the page>',
     '  Use Chrome or Firefox, and open the web app as http://localhost:3000.',
+    '  Local use only: APP_ENV=development is for this machine (localhost). Never expose it on a LAN or the',
+    '  internet: it serves plain HTTP with development secrets and seeded accounts, so passwords and tokens',
+    '  travel in cleartext over plain HTTP.',
   ];
   if (invite.trim() !== '') {
     lines.push(

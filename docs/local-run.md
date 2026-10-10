@@ -11,15 +11,15 @@ email address, or a real candidate. Last checked against `main` on 2026-10-07 (c
 | See every screen with no backend at all          | `pnpm dev:web:mock` (section 5)                                | Works. Fake data, fake API.                                         |
 | Start everything with one command                | `pnpm demo:up` (section 2)                                     | Works on a free machine; `pnpm demo:down` stops it.                 |
 | Sign in as staff, browse questions, tests, users | the real stack (sections 1 to 4)                               | Works (checked).                                                    |
-| Open a candidate invitation link                 | `node infra/scripts/demo-invite.mjs` (section 4)               | The link opens; the one-time code cannot be sent yet (see below).   |
-| Take a test as a candidate, end to end           | the real stack                                                 | **Not on `main` yet**: needs a dev mail sink and a code runner.     |
-| Run candidate code                               | Judge0                                                         | **Not on `main` yet** on a Mac: Judge0 needs Linux x86 (section 7). |
+| Open a candidate invitation link                 | `node infra/scripts/demo-invite.mjs` (section 4)               | The link opens, and the one-time code arrives in Mailpit (#305).    |
+| Take a test as a candidate, end to end           | the real stack                                                 | The gate, email code and consent work; code runs via the stub.      |
+| Run candidate code                               | Judge0                                                         | Runs via the local stub (canned results); real Judge0 is Linux x86 (section 7). |
 
 ## 1. Prerequisites
 
 - **Node 24** (`package.json` says `>=24 <25`). Check with `node --version`.
 - **pnpm 12** (the repository pins the exact version; `corepack enable` installs it).
-- **Docker Desktop** (or Docker Engine) running, for PostgreSQL 16, Redis 8.8 and Adminer.
+- **Docker Desktop** (or Docker Engine) running, for PostgreSQL 16, Redis 8.8, Adminer, Mailpit and MinIO.
 - Git. Nothing else: no AWS account, no cloud login.
 
 Free local ports: 5432 (PostgreSQL), 6379 (Redis), 8080 (Adminer), 1025 and 8025 (Mailpit), 9000 and 9001 (MinIO), 4000 (API), 3000 (web), 8000 (worker). If
@@ -40,7 +40,7 @@ use" below), starts the stack, builds the shared package, migrates,
 seeds, gives the seeded invitation a real link, starts the API and the web app in the background (logs in
 `.demo/`), waits until both answer, and prints the links, the accounts and where the password is. It is safe
 to run again (an app that already answers is left alone, and `demo:down` only stops processes it can see are
-its own pnpm dev commands). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
+its own pnpm dev commands and its own worker). `pnpm demo:down` stops the apps and the worker (`pnpm demo:down --infra` stops the containers too; the
 data stays in Docker volumes). `pnpm demo:up --dry-run` lists the steps without running them, and
 `--no-apps` starts everything except the API, the web app and the worker, and `--no-worker` skips only the worker. On a re-run where the seeded invitation was already used, `demo:up` prints "No unused seeded invitation" and carries on (create one from the recruiter UI, Tests → Invite candidates; the link arrives in Mailpit); `--no-invite` skips that step.
 
@@ -65,7 +65,7 @@ What `local-env.mjs` does: copies `.env.example`, replaces every `change-me` wit
 lets the browser upload to, and play recordings from, origins listed there; it must match `S3_ENDPOINT`). The API serves under
 `/api`, and the web app's built-in default (`http://localhost:4000`) lacks that prefix, so without the
 second file every sign-in fails with "The server did not answer as expected". `.env` sets `APP_ENV=development` explicitly: it is required and has no default, and the local-only paths
-(the seed, the demo scripts, and later the mail sink, object store and execution stub) switch on only for
+(the seed, the demo scripts, and the mail sink, object store and execution stub) switch on only for
 exactly that value. The script refuses to overwrite
 an existing `.env`; delete the file to start again. Never put these values anywhere shared.
 
@@ -135,8 +135,12 @@ pnpm dev:web                          # http://localhost:3000
 ```
 
 Check the API: <http://localhost:4000/api/v1/health> answers `{"status":"ok", ...}` with PostgreSQL and
-Redis `up`. The API log will repeat `Job consent-pdf failed`: the seeded consents have no PDF and there
-is no object store locally yet. That is expected until the local object store exists (section 7).
+Redis `up`. The API log may repeat `Job consent-pdf failed` for seeded consents that have no PDF; the
+"File uploads" row in section 6 says what was checked.
+
+**Local use only**: `APP_ENV=development` is for single-machine localhost use only. Never expose it on a LAN
+or the internet: it serves plain HTTP with development secrets and seeded accounts, so passwords and tokens
+travel in cleartext (and once FU-BE-222 / #398 is merged, the refresh cookie is not `Secure` there either).
 
 **Browser**: use **Chrome or Firefox**, and always open the web app as `http://localhost:3000` (not
 `127.0.0.1`: the API's allowed web origin is exactly that). Safari does not keep the staff sign-in
@@ -147,8 +151,9 @@ local-only fix (FU-BE-222, Backend A) is merged; this note will then be dropped.
 and the development password. You land on the staff dashboard. Questions (8) and Tests (2) show the
 seed.
 
-**Sign in as the admin** (needs a second factor, forced on first sign-in): after the password the page
-shows a QR code and a "manual key". You do not need a phone:
+**Sign in as the admin** (a second factor is optional and recommended for every staff role, D-70; the
+admin signs in with the password alone until it is set up, and the app nudges you to enrol). To enrol, open the
+security prompt; the page shows a QR code and a "manual key". You do not need a phone:
 
 ```bash
 node infra/scripts/demo-totp.mjs <the manual key shown on the page>
@@ -173,8 +178,11 @@ Mailpit at <http://localhost:8025>.
 
 The local demo uses your real camera and microphone. Recordings, the ID photo and the selfie are stored
 only in the local MinIO and PostgreSQL containers, on this Mac. To remove them, run `pnpm demo:down
---infra`, then delete the Docker volumes (`docker volume rm codeproctor_minio_data
-codeproctor_postgres_data`; a person runs this, it deletes all local data). Use a synthetic candidate
+--infra`, then delete the Docker volumes (`docker volume rm codeproctor-demo_minio_data
+codeproctor-demo_postgres_data codeproctor-demo_redis_data`; a stack started by hand with `pnpm dev:infra` and no
+`COMPOSE_PROJECT_NAME` uses `codeproctor_minio_data` and `codeproctor_postgres_data` instead; a person
+runs this, it deletes all local data; `docker volume ls` shows the names if you set your own
+`COMPOSE_PROJECT_NAME`). Use a synthetic candidate
 name and the seeded test mailbox (Mailpit), and never upload a real ID document.
 
 ## 5. No backend: mock mode
@@ -186,7 +194,7 @@ pnpm dev:web:mock
 Serves every API call from fake data in the browser. Nothing else needs to run, not even Docker. Open
 <http://localhost:3000/admin/login> (mock users and passwords are listed in `apps/web/README.md`; the
 admin's code is `123456`) and <http://localhost:3000/t/demo/test> for the candidate test screen preview.
-Screens that the real API does not serve yet (candidates, live, review, reports) can be seen here.
+Screens that the real API does not serve yet (candidates, live, reports) can be seen here.
 
 ## 6. What works today and what does not
 
@@ -197,20 +205,22 @@ Checked on 2026-10-07 on a throwaway database with the commands above.
 | `pnpm db:migrate`, `pnpm db:seed`                     | Works. 358 seeded rows.                                                                                 |
 | API starts, `/api/v1/health`                          | Works (PostgreSQL, Redis).                                                                              |
 | Staff sign-in (recruiter), dashboard                  | Works through the web app.                                                                              |
-| Admin sign-in with the second factor                  | Works with `demo-totp.mjs` (checked against the API).                                                   |
+| Staff second factor (optional, D-70)                  | Works: sign in with the password alone, or enrol and use `demo-totp.mjs` (checked against the API).     |
 | Questions list (8) and Tests list (2)                 | Works against the real API.                                                                             |
 | Candidates list (`/admin/candidates`)                 | **Not on `main` yet**: the API has no `admin/candidates` route (the page stays on "Loading"). Mock mode shows it. |
-| Invite candidates, live view, review, reports         | **Not on `main` yet** in the API (no routes). Mock mode shows the screens.                              |
+| Invite candidates (`POST tests/:id/invitations`, #217) | Works against the real API (the invitation email goes to Mailpit).                                      |
+| Review: queue, session detail, recording playback, manual scoring and verdict (`/review/*`, #297, #358) | On `main` in the API. A HIGH-flag verdict gate (FR-902, FU-BE-268) is **not built yet**.                |
+| Live view, reports                                    | **Not on `main` yet** in the API (no routes). Mock mode shows the screens.                              |
 | Candidate link opens the gate                         | Works after `demo-invite.mjs`.                                                                          |
 | Mailpit (the inbox) in the stack                      | Works: the stack starts it and a test email sent to port 1025 shows in <http://localhost:8025> (checked). |
 | Candidate one-time email code                         | **Works (#305 is on `main`)**: with `EMAIL_PROVIDER=smtp-dev` (which `local-env.mjs` writes), asking for the code sends the mail to Mailpit (<http://localhost:8025>), and the code from that mail opens the session (checked 2026-10-07: link, code sent, code accepted, session `OPENED`). |
 | MinIO (the object store) in the stack                 | Works: the two buckets exist at start, an upload and a listing through the S3 API work, and a browser preflight from `http://localhost:3000` is allowed while any other origin is not (checked). |
-| File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log still shows a few `Job consent-pdf failed` lines; the job also emails the consent copy, which needs the candidate mail binding (above). Browser uploads from the candidate screens are not exercised here. |
+| File uploads, ID images, consent PDF                  | **Partly works (#119 is on `main`)**: the API binds to the local MinIO from the `S3_*` values, and on a clean database a seeded consent's PDF was written to `codeproctor-media` (checked: one PDF under `orgs/<org>/consents/<session>/`). The API log may still show `Job consent-pdf failed` lines for seeded consents that have no PDF (the cause was not re-checked after the mail binding landed). Browser uploads from the candidate screens are not exercised here. |
 | Running candidate code                                | The API accepts `JUDGE0_MODE=stub` and `local-env.mjs` switches it on (`JUDGE0_MODE=stub`: canned results labelled "local stub, not real execution", allowed only with `APP_ENV=development`). Real Judge0 is Linux x86 only (section 7); it is not used on a Mac. |
-| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. **The API has no worker client on `main` yet** (nothing in `apps/api` reads the `WORKER_*` settings), so the worker runs but the identity check does not call it; the match is MANUAL_REVIEW whatever the models. **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
+| Face-match worker (`apps/worker`)                    | **Started by `demo:up` on the host (optional, needs Python 3.12).** `demo:up` runs `apps/worker/tools/be08/run-local.sh` (first run installs packages and takes several minutes; log `.demo/worker.log`) with the signing key and bucket from `.env`, and `GET http://127.0.0.1:8000/health` answers when it is up. It runs on the host, not in Docker, so its presigned-URL origin `http://127.0.0.1:9000` is reachable. The API calls the worker (signed requests; `WORKER_BASE_URL`, `WORKER_HMAC_KEY_ID` and `WORKER_HMAC_KEY` from `.env`). **The face model files are not downloaded yet** (the owner's P-13), so the worker reports not ready and the identity check answers MANUAL_REVIEW; the candidate carries on. If Python 3.12 is missing, `demo:up` prints the command instead and goes on. Skip it with `--no-worker`. |
 | Proctoring in a real browser against the real API     | Not wired end to end; the browser parts run in mock mode (`/t/demo/test`, `/dev/proctor`).              |
 
-## 7. Not on `main` yet: what is planned
+## 7. What is done, and what is still planned
 
 These are tracked in the delivery plan; this guide changes as each lands.
 
@@ -229,7 +239,7 @@ Changes to `infra/docker-compose.yml` get the architecture hub's gate review.
 ## 8. Stop, restart, start again
 
 ```bash
-pnpm demo:down                        # stops the API and the web app
+pnpm demo:down                        # stops the API, the web app and the worker
 pnpm demo:down --infra                # ... and the containers; the data stays in Docker volumes
 pnpm demo:up                          # starts everything again (safe to repeat)
 ```
