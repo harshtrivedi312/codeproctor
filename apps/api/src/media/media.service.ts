@@ -16,7 +16,10 @@ import { BadRequestException, HttpStatus, Inject, Injectable, Logger } from '@ne
 import { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
 import { CodedHttpException } from '../common/coded.exception';
+import { SessionLockRetryError } from '../database/errors';
+import { busyLockToProblem } from '../session/busy-lock';
 import { sessionNotActive } from '../session/session-write-gate';
+import { VerifyEnqueueScopeError, VerifySessionJobs } from '../session/verify-session.jobs';
 import { CandidateScope } from '../candidate/candidate-scope';
 import type { CandidateContext } from '../candidate/candidate.types';
 import type { Env } from '../config/env';
@@ -75,6 +78,7 @@ export class MediaService {
     private readonly storage: StorageService,
     private readonly config: ConfigService<Env, true>,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly verify: VerifySessionJobs,
   ) {}
 
   /** POST /candidate/session/media/presign. */
@@ -102,6 +106,9 @@ export class MediaService {
       if (existing.segment !== req.segment) throw seqConflict();
       if (existing.uploadedAt !== null) {
         this.log('presign', ctx, req, 'already-uploaded');
+        // The SDK treats this as done and never confirms again: a first confirm whose queue failed
+        // is recovered here (idempotent and cheap), so the session is not stranded in CONSENTED.
+        await this.queueVerifyAfterRoomScan(ctx, req, session.status);
         return { alreadyUploaded: true };
       }
     }
@@ -134,7 +141,10 @@ export class MediaService {
         const winner = await this.findRow(ctx, req.stream, req.seq);
         this.log('presign', ctx, req, 'race');
         if (winner === null || winner.segment !== req.segment) throw seqConflict();
-        if (winner.uploadedAt !== null) return { alreadyUploaded: true };
+        if (winner.uploadedAt !== null) {
+          await this.queueVerifyAfterRoomScan(ctx, req, session.status);
+          return { alreadyUploaded: true };
+        }
         await this.updatePending(ctx, req, startedAt, key);
       }
     } else {
@@ -179,6 +189,9 @@ export class MediaService {
       );
     }
     if (row.uploadedAt !== null) {
+      // A retried confirm re-queues the check too: the first confirm may have stored the chunk and
+      // then failed to queue it (503), and the upload must not be stranded unverified.
+      await this.queueVerifyAfterRoomScan(ctx, ref, session.status);
       return { uploaded: true, sizeBytes: Number(row.sizeBytes ?? 0n) };
     }
 
@@ -227,7 +240,31 @@ export class MediaService {
     );
     if (head.etag !== null) await this.rememberEtag(ctx.sessionId, ref, head.etag);
     this.log('confirm', ctx, ref, 'uploaded');
+    await this.queueVerifyAfterRoomScan(ctx, ref, session.status);
     return { uploaded: true, sizeBytes: head.sizeBytes };
+  }
+
+  /**
+   * The room scan is the last condition of CONSENTED to VERIFIED in the web's order (system check,
+   * identity, room scan), so a confirmed ROOM_SCAN chunk queues verify-session (debounced; the job
+   * re-checks every condition itself, CS-4.7). A failure to queue is a 503 with Retry-After: the
+   * chunk is stored, the client retries the confirm, and the retry queues it (idempotent).
+   */
+  private async queueVerifyAfterRoomScan(
+    ctx: CandidateContext,
+    ref: { readonly stream: MediaStream },
+    status: SessionStatus,
+  ): Promise<void> {
+    if (ref.stream !== 'ROOM_SCAN' || status !== 'CONSENTED') return;
+    try {
+      await this.scope.asCandidate(ctx, () =>
+        this.verify.enqueueVerifySession(ctx.orgId, ctx.sessionId),
+      );
+    } catch (e) {
+      if (e instanceof VerifyEnqueueScopeError) throw e;
+      this.logger.warn(`verify-session was not queued (${e instanceof Error ? e.name : 'error'})`);
+      throw busyLockToProblem(new SessionLockRetryError()) ?? new SessionLockRetryError();
+    }
   }
 
   // ---- internals ----
