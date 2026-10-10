@@ -218,23 +218,25 @@ export class ReviewService {
       }),
     ]);
 
-    const versions = sqs.length
-      ? await db.questionVersion.findMany({
-          where: { id: { in: sqs.map((s) => s.questionVersionId) } },
-          select: { id: true, title: true, statementMd: true, questionId: true },
-        })
-      : [];
-    // The variant each session question was dealt, org-scoped. Only what is needed to render the
-    // statement the candidate saw (FR-105); params never leave this method.
+    // The variant each session question was dealt, org-scoped, loaded with the versions. Only what
+    // is needed to show the statement the candidate saw (FR-105); params never leave this method.
     const variantIds = [
       ...new Set(sqs.flatMap((s) => (s.variantId === null ? [] : [s.variantId]))),
     ];
-    const variants = variantIds.length
-      ? await db.questionVariant.findMany({
-          where: { id: { in: variantIds } },
-          select: { id: true, params: true, renderedStatement: true },
-        })
-      : [];
+    const [versions, variants] = await Promise.all([
+      sqs.length
+        ? db.questionVersion.findMany({
+            where: { id: { in: sqs.map((s) => s.questionVersionId) } },
+            select: { id: true, title: true, statementMd: true, questionId: true },
+          })
+        : [],
+      variantIds.length
+        ? db.questionVariant.findMany({
+            where: { id: { in: variantIds } },
+            select: { id: true, params: true, renderedStatement: true },
+          })
+        : [],
+    ]);
     const variantById = new Map(variants.map((x) => [x.id, x]));
     const questions = versions.length
       ? await db.question.findMany({

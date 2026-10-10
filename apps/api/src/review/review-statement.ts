@@ -1,8 +1,8 @@
-// The statement a reviewer sees is the statement the candidate saw (FR-105, FR-202, FR-205): the
-// session question's own variant applied to the version's statement template. Pure: no database,
-// no Nest. The candidate view (submissions/question-view.service.ts) shows the variant's stored
-// `renderedStatement`, which is the output of `renderContent` over the variant params; this helper
-// renders the same template with the same functions, falls back to the stored text, and finally to
+// The statement a reviewer sees is the statement the candidate saw (FR-105, FR-202, FR-205). Pure:
+// no database, no Nest. The candidate view (submissions/question-view.service.ts) shows the
+// variant's stored `renderedStatement` and never re-renders; this helper returns that same stored
+// text. Only when it is empty does it render the version template with the variant params (the
+// same `paramsFromStored` + `renderContent` the variant writes use), and on any error it returns
 // the version statement. It never throws and never logs the template or the params. Only the
 // resulting string leaves the module: params are never returned.
 import { paramsFromStored, renderContent } from '../questions/variant-template';
@@ -21,6 +21,8 @@ export function reviewStatement(
   variant: VariantStatementSource | null | undefined,
 ): string {
   if (variant === null || variant === undefined) return statementMd;
+  // Exactly what the candidate saw: the variant's stored rendering, never re-rendered.
+  if (variant.renderedStatement !== '') return variant.renderedStatement;
   try {
     const params = paramsFromStored(variant.params);
     if (params !== null) {
@@ -30,5 +32,5 @@ export function reviewStatement(
   } catch {
     // Fall through: the bundle must not fail on a bad template.
   }
-  return variant.renderedStatement !== '' ? variant.renderedStatement : statementMd;
+  return statementMd;
 }

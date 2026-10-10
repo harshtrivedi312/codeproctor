@@ -4,12 +4,18 @@ import { reviewStatement } from './review-statement';
 const TEMPLATE = 'Print {{item}} at most {{limit}} times.';
 
 describe('reviewStatement (FR-105, FR-202, FR-205)', () => {
-  it('FR-105: applies the variant params to the template', () => {
+  it('FR-105: the stored rendering wins over a fresh render of the params', () => {
     expect(
       reviewStatement(TEMPLATE, {
         params: { item: 'widget', limit: 3 },
-        renderedStatement: 'stored text',
+        renderedStatement: 'Print gadget at most 9 times.',
       }),
+    ).toBe('Print gadget at most 9 times.');
+  });
+
+  it('FR-105: an empty stored rendering is rendered from the params', () => {
+    expect(
+      reviewStatement(TEMPLATE, { params: { item: 'widget', limit: 3 }, renderedStatement: '' }),
     ).toBe('Print widget at most 3 times.');
   });
 
@@ -25,10 +31,10 @@ describe('reviewStatement (FR-105, FR-202, FR-205)', () => {
     expect(reviewStatement('Plain text', undefined)).toBe('Plain text');
   });
 
-  it('FR-105: an unknown placeholder falls back to the stored rendering, then the raw statement', () => {
-    const params = { item: 'x' };
-    expect(reviewStatement(TEMPLATE, { params, renderedStatement: 'stored' })).toBe('stored');
-    expect(reviewStatement(TEMPLATE, { params, renderedStatement: '' })).toBe(TEMPLATE);
+  it('FR-105: an unknown placeholder with no stored text falls back to the raw statement', () => {
+    expect(reviewStatement(TEMPLATE, { params: { item: 'x' }, renderedStatement: '' })).toBe(
+      TEMPLATE,
+    );
   });
 
   it('FR-105: invalid stored params and a bad template never throw', () => {

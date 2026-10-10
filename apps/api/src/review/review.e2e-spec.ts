@@ -711,7 +711,13 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
               data: {
                 questionVersionId: v.id,
                 params: o.params as never,
-                renderedStatement: o.renderedStatement ?? '',
+                renderedStatement:
+                  o.renderedStatement ??
+                  // What the variant write stores: the template with the params applied.
+                  Object.entries(o.params).reduce(
+                    (text, [k, val]) => text.split(`{{${k}}}`).join(String(val)),
+                    o.statementMd,
+                  ),
               },
             });
       const tq = await owner.testQuestion.create({
@@ -775,6 +781,19 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
       expect(statements(b.body)).toEqual(['Handle beta.']);
     });
 
+    it('FR-105: the stored rendering wins when it differs from a fresh render of the params', async () => {
+      const s = await seedSession();
+      await seedVariantAnswer(s, 1, {
+        type: 'CODING',
+        statementMd: 'Handle {{item}}.',
+        params: { item: 'fresh' },
+        renderedStatement: 'Handle stored.',
+      });
+      const who = await make(UserRole.REVIEWER);
+      const res = await http().get(bundleUrl(s.sessionId)).set(who.auth).expect(200);
+      expect(statements(res.body)).toEqual(['Handle stored.']);
+    });
+
     it('FR-105: a session question without a variant returns the plain statement', async () => {
       const s = await seedSession();
       await seedVariantAnswer(s, 1, { type: 'CODING', statementMd: 'Plain statement.' });
@@ -783,7 +802,7 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
       expect(statements(res.body)).toEqual(['Plain statement.']);
     });
 
-    it('FR-105: an unknown placeholder falls back to the stored or raw statement, never a 500', async () => {
+    it('FR-105: with no stored text an unknown placeholder falls back to the raw statement, never a 500', async () => {
       const s = await seedSession();
       await seedVariantAnswer(s, 1, {
         type: 'CODING',
@@ -795,6 +814,7 @@ describe('Reviewer read API (FR-901, FR-703, FR-105, TC-008)', () => {
         type: 'CODING',
         statementMd: 'Use {{missing}} here.',
         params: { item: 'x' },
+        renderedStatement: '',
       });
       const who = await make(UserRole.REVIEWER);
       const res = await http().get(bundleUrl(s.sessionId)).set(who.auth).expect(200);
