@@ -3,7 +3,7 @@ import { BUSY_CODE } from '@/lib/api/busy';
 import { api, type Schemas } from '@/lib/api/client';
 import { REAUTH_FAILED_CODE } from '@/features/security/schemas';
 import type { StepUpOutcome } from '@/features/security/step-up-dialog';
-import { captureSessionStamp, refreshForReplay } from '@/lib/auth-session';
+import { captureSessionStamp, getGeneration, refreshForReplay } from '@/lib/auth-session';
 import { adminKeys, checkInviteOutcome, INVITE_UNKNOWN_TEXT, readStaffUsers } from './queries';
 
 /*
@@ -35,18 +35,27 @@ interface Raw<T> {
   response: Response;
 }
 
+/** A write that has not answered after this long is given up on (the answer is then unknown). */
+const WRITE_TIMEOUT_MS = 20_000;
+
 /**
  * `replayOn401`: for the /auth/* routes, which the client's own refresh-and-retry skips. A 401
  * (access token expired while the dialog sat open) is retried once after a silent refresh, for
  * the same signed-in person only (docs/api-contract.md section 1, Frontend).
  */
-async function send<T>(call: () => Promise<Raw<T>>, replayOn401 = false): Promise<Answer<T>> {
+async function send<T>(
+  call: (signal: AbortSignal) => Promise<Raw<T>>,
+  replayOn401 = false,
+): Promise<Answer<T>> {
+  // One deadline for the whole call, so a hung request cannot freeze the screen. The abort, like
+  // an offline error, is status 0: the write may or may not have landed.
+  const signal = AbortSignal.timeout(WRITE_TIMEOUT_MS);
   try {
     const stamp = captureSessionStamp();
-    let result = await call();
+    let result = await call(signal);
     if (replayOn401 && result.response.status === 401) {
       if (!(await refreshForReplay(stamp))) return { status: 401, code: '', data: undefined };
-      result = await call();
+      result = await call(signal);
     }
     const { data, error, response } = result;
     return {
@@ -129,9 +138,7 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
       hint:
         context === 'invite'
           ? 'The server did not accept these details. Check the name, email and role, go back and fix them.'
-          : context === 'resetTwoFactor'
-            ? 'You cannot reset your own two-factor sign-in here. Use the Security page for your own account.'
-            : 'The server did not accept this request. Reload the page and try again.',
+          : 'The server did not accept this request. Reload the page and try again.',
     };
   }
   if (status === 404) {
@@ -176,10 +183,11 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
     };
   }
   if (status === 0) {
+    // No answer (offline, or the deadline passed): the write may still have landed.
     return {
       kind: 'failed',
-      title: 'We could not reach the server',
-      hint: `${NOT_DONE} Check your connection and try again.`,
+      title: 'We could not confirm the result',
+      hint: 'We could not tell whether it was saved; check the list before trying again.',
     };
   }
   return {
@@ -191,7 +199,13 @@ function describe(answer: Answer<unknown>, context: UserActionContext): StepUpOu
 
 /** Marks the user list stale after an answer that tells us it may be out of date. */
 function staleAfter(qc: QueryClient, status: number): void {
-  if ((status >= 200 && status < 300) || status === 404 || status === 409 || status === 500) {
+  if (
+    (status >= 200 && status < 300) ||
+    status === 0 ||
+    status === 404 ||
+    status === 409 ||
+    status === 500
+  ) {
     void qc.invalidateQueries({ queryKey: adminKeys.users });
   }
 }
@@ -207,8 +221,9 @@ export async function inviteStaffUser(
   details: InviteDetails,
   currentPassword: string,
 ): Promise<StepUpOutcome & { user?: StaffUser }> {
-  const answer = await send(() =>
+  const answer = await send((signal) =>
     api.POST('/v1/admin/users', {
+      signal,
       body: {
         currentPassword,
         email: details.email,
@@ -219,7 +234,7 @@ export async function inviteStaffUser(
   );
   staleAfter(qc, answer.status);
   if (answer.status === 201 && answer.data) return { kind: 'done', user: answer.data };
-  if (answer.status === 500) {
+  if (answer.status === 500 || answer.status === 0) {
     // Outcome unknown (contract section 8): the row may exist and the mail may or may not have
     // gone out. Read the list, never send again for the user.
     const found = await checkInviteOutcome(qc, details.email);
@@ -241,8 +256,9 @@ export async function updateStaffUser(
 ): Promise<StepUpOutcome & { user?: StaffUser }> {
   const context: UserActionContext =
     'role' in change ? 'role' : change.active ? 'reactivate' : 'deactivate';
-  const answer = await send(() =>
+  const answer = await send((signal) =>
     api.PATCH('/v1/admin/users/{userId}', {
+      signal,
       params: { path: { userId } },
       body: { currentPassword, ...change },
     }),
@@ -258,8 +274,9 @@ export async function reissueStaffInvite(
   userId: string,
   currentPassword: string,
 ): Promise<StepUpOutcome> {
-  const answer = await send(() =>
+  const answer = await send((signal) =>
     api.POST('/v1/admin/users/{userId}/invite', {
+      signal,
       params: { path: { userId } },
       body: { currentPassword },
     }),
@@ -267,12 +284,20 @@ export async function reissueStaffInvite(
   staleAfter(qc, answer.status);
   if (answer.status === 200) return { kind: 'done' };
   if (answer.status === 500) {
-    // Outcome unknown (contract section 8, c): never sent again for the user.
+    // The service sends no mail when the outcome is unknown (contract section 8, c).
     return {
       kind: 'failed',
       tone: 'warning',
-      title: 'The invitation may have been sent',
-      hint: 'We could not confirm it. Ask them to check their inbox before you send it again. Sending again replaces any earlier link.',
+      title: 'We could not confirm the result',
+      hint: 'No email was sent, and the earlier link may already have stopped working. Use Resend invite to make a new link. Nothing was retried for you.',
+    };
+  }
+  if (answer.status === 0) {
+    return {
+      kind: 'failed',
+      tone: 'warning',
+      title: 'We could not confirm the result',
+      hint: 'We could not tell whether the email was sent. Ask them to check their inbox, or use Resend invite to make a new link: the earlier link stops working.',
     };
   }
   return describe(answer, 'reissue');
@@ -284,8 +309,9 @@ export async function unlockStaffUser(
   userId: string,
   currentPassword: string,
 ): Promise<StepUpOutcome> {
-  const answer = await send(() =>
+  const answer = await send((signal) =>
     api.POST('/v1/admin/users/{userId}/unlock', {
+      signal,
       params: { path: { userId } },
       body: { currentPassword },
     }),
@@ -297,8 +323,11 @@ export async function unlockStaffUser(
 
 /** True when the list now shows two-factor off for the person, false when on, null when unknown. */
 async function readTwoFactorOff(userId: string): Promise<boolean | null> {
+  const startedIn = getGeneration();
   try {
     const { items } = await readStaffUsers();
+    // The session changed meanwhile: this list is about someone else's organisation.
+    if (startedIn !== getGeneration()) return null;
     const target = items.find((u) => u.id === userId);
     return target ? !target.totpEnabled : null;
   } catch {
@@ -316,8 +345,9 @@ export async function resetStaffTwoFactor(
   currentPassword: string,
 ): Promise<StepUpOutcome> {
   const answer = await send(
-    () =>
+    (signal) =>
       api.POST('/v1/auth/2fa/reset/{userId}', {
+        signal,
         params: { path: { userId } },
         body: { currentPassword },
       }),
@@ -325,7 +355,7 @@ export async function resetStaffTwoFactor(
   );
   staleAfter(qc, answer.status);
   if (answer.status === 204) return { kind: 'done' };
-  if (answer.status === 500) {
+  if (answer.status === 500 || answer.status === 0) {
     const off = await readTwoFactorOff(userId);
     return {
       kind: 'failed',

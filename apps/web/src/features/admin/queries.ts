@@ -122,7 +122,7 @@ export async function checkInviteOutcome(
 /** What to tell the user after the unknown-outcome 500 on an invite, given what the list says. */
 export const INVITE_UNKNOWN_TEXT = {
   found:
-    'The invitation may have been sent. The person is now in the list, so the account exists, but we could not confirm the email went out. Ask them to check their inbox before you send anything again.',
+    'The person is now in the list, so the account exists, but we could not confirm that the email went out. Ask them to check their inbox, or use Resend invite on their row to make a new link: the earlier link stops working.',
   missing:
     'We could not confirm the invitation. The person is not in the list yet, so it probably was not created. Check the list, then send it again if they are still missing.',
   unknown:

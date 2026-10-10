@@ -162,9 +162,9 @@ describe('Users (FR-103)', () => {
     const dialog = await screen.findByRole('dialog');
     await confirmWithPassword(u, dialog, 'Change role');
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      'We could not reach the server',
+      'We could not confirm the result',
     );
-    expect(dialog).toHaveTextContent('Check your connection');
+    expect(dialog).toHaveTextContent('check the list before trying again');
     await u.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByLabelText('Role for Avery Author')).toHaveValue('AUTHOR');
