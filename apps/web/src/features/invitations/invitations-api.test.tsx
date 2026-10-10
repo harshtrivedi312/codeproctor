@@ -1,3 +1,4 @@
+import { http, HttpResponse } from 'msw';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { apiBaseUrl } from '@/lib/env';
 import { setInvitationScenario } from '@/mocks/invitation-handlers';
@@ -33,7 +34,7 @@ async function call<T = Record<string, unknown>>(
 }
 
 const day = 86_400_000;
-const win = (endDays = 7) => ({
+const win = (endDays = 6) => ({
   windowStart: new Date(Date.now() - 1000).toISOString(),
   windowEnd: new Date(Date.now() + endDays * day).toISOString(),
 });
@@ -95,9 +96,28 @@ describe('Invitations mock: single invitation, in the order the API checks (FR-3
     const text = errorsOf(bad).join(' | ');
     expect(text).toMatch(/property extra should not exist/);
     expect(text).toMatch(/candidate.email must be an email/);
-    expect(text).toMatch(/windowEnd must be after windowStart/);
+    // The window rules belong to the service, which runs only after the pipe passed.
+    expect(text).not.toMatch(/windowEnd must be after windowStart/);
     // The email the caller sent is not echoed back.
     expect(JSON.stringify(bad.body)).not.toContain('"x"');
+  });
+
+  it('FR-303: the window rules are reported together once the body is valid, with the 7 day and 366 day limits', async () => {
+    const r = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'rules@example.test', name: 'Rules' },
+      windowStart: new Date(Date.now() + 400 * 86_400_000).toISOString(),
+      windowEnd: new Date(Date.now() + 410 * 86_400_000).toISOString(),
+    });
+    expect(r.status).toBe(400);
+    const text = errorsOf(r).join(' | ');
+    expect(text).toMatch(/at most 7 day\(s\) long/);
+    expect(text).toMatch(/at most 366 days ahead/);
+    const inverted = await call('RECRUITER', 'POST', path, {
+      candidate: { email: 'rules@example.test', name: 'Rules' },
+      windowStart: win().windowEnd,
+      windowEnd: win().windowStart,
+    });
+    expect(errorsOf(inverted).join(' ')).toMatch(/windowEnd must be after windowStart/);
   });
 
   it('FR-303: a windowStart more than 5 minutes in the past is a 400, like the real API; a minute old is accepted', async () => {
@@ -297,9 +317,15 @@ describe('Invitations mock: rate limit (429)', () => {
 });
 
 describe('Invitations mock: no bulk route (D-84)', () => {
-  it('FR-304: the API has no bulk route; the CSV upload sends single invitations', async () => {
+  it('FR-304: the API has no bulk route (404); the mock does not invent one', async () => {
+    // Hermetic: an explicit handler stands for the API's answer, so nothing can reach the network.
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations/bulk`, () =>
+        HttpResponse.json({ title: 'Not Found', status: 404 }, { status: 404 }),
+      ),
+    );
     const r = await call('RECRUITER', 'POST', `${path}/bulk`, { ...win(), rows: [] });
-    expect(r.status).not.toBe(200);
+    expect(r.status).toBe(404);
   });
 });
 

@@ -77,6 +77,8 @@ export function invalidateAfterInvite(qc: QueryClient, testId: string, startedIn
 }
 
 export interface BulkOutcome {
+  /** The rows of this upload (CSV row number, email, name), so a result never depends on later UI state. */
+  rows: CsvRowInput[];
   /** Rows sent so far that were accepted. */
   created: number;
   /** Rows that were invited but whose email was not queued (the rows' CSV numbers). */
@@ -97,8 +99,25 @@ export interface BulkOutcome {
   failed: InviteFailure | null;
 }
 
-/** The API refuses a start more than 5 minutes in the past; refresh the window well before that. */
-export const WINDOW_REFRESH_MS = 3 * 60_000;
+/**
+ * The API refuses a start more than 5 minutes in the past (invitations.service.ts). An automatic
+ * start (untouched or clamped to now) is refreshed once it is this old, which leaves a margin of
+ * about a minute for clock skew and the request itself.
+ */
+export const START_REFRESH_MS = 60_000;
+
+/**
+ * A start the user chose is kept as typed until it is this old (measured from the start itself,
+ * not from the upload), then it moves to now and the end stays. Four minutes leaves the same
+ * margin under the API's 5-minute limit.
+ */
+export const START_MAX_AGE_MS = 4 * 60_000;
+
+/** What the user fixed in the window: an automatic start or end follows the clock in a long upload. */
+export interface WindowAuto {
+  startAuto: boolean;
+  endAuto: boolean;
+}
 
 /** Requests in flight at once during a CSV upload. Small: the API limits invitations per hour. */
 export const BULK_CONCURRENCY = 4;
@@ -117,17 +136,18 @@ export async function inviteInChunks(
   rows: readonly CsvRowInput[],
   window: { windowStart: string; windowEnd: string },
   /**
-   * `followClock`: the start was not chosen by the user (untouched or clamped to now). A long upload
-   * must not outlive the API's "start at most 5 minutes in the past" rule, so once the cached start
-   * is older than WINDOW_REFRESH_MS the whole window is shifted by the time elapsed (same length).
-   * A start the user chose is kept; only if it went stale it moves to now and the end stays.
+   * `startAuto`: the start was not chosen by the user (untouched or clamped to now); it is moved to
+   * the exact now whenever it is START_REFRESH_MS old, and an automatic end (`endAuto`) moves with
+   * it, so the length is kept. A chosen end never moves. A chosen start is kept until it is
+   * START_MAX_AGE_MS old, then it moves to now (the end stays).
    */
-  followClock: boolean,
+  auto: WindowAuto,
   onProgress?: (sent: number) => void,
   signal?: { aborted: boolean },
 ): Promise<BulkOutcome> {
   const startedIn = getGeneration();
   const out: BulkOutcome = {
+    rows: [...rows],
     created: 0,
     mailNotSent: [],
     errors: [],
@@ -138,22 +158,19 @@ export async function inviteInChunks(
     retryAfterSeconds: null,
     failed: null,
   };
-  const t0 = Date.now();
-  const start0 = Date.parse(window.windowStart);
-  const end0 = Date.parse(window.windowEnd);
+  let curStart = Date.parse(window.windowStart);
+  let curEnd = Date.parse(window.windowEnd);
   const windowNow = (): { windowStart: string; windowEnd: string } => {
     const now = Date.now();
-    if (now - t0 < WINDOW_REFRESH_MS) return window;
-    if (followClock) {
-      const shift = now - t0;
-      return {
-        windowStart: new Date(start0 + shift).toISOString(),
-        windowEnd: new Date(end0 + shift).toISOString(),
-      };
+    const age = now - curStart;
+    if (auto.startAuto ? age >= START_REFRESH_MS : age >= START_MAX_AGE_MS) {
+      if (auto.startAuto && auto.endAuto) curEnd += age;
+      curStart = now;
     }
-    return start0 < now - WINDOW_REFRESH_MS
-      ? { windowStart: new Date(now).toISOString(), windowEnd: window.windowEnd }
-      : window;
+    return {
+      windowStart: new Date(curStart).toISOString(),
+      windowEnd: new Date(curEnd).toISOString(),
+    };
   };
   const settled = new Set<number>();
   const uncertainAt = new Set<number>();

@@ -284,20 +284,33 @@ function accommodationProblems(raw: unknown): string[] {
   return out;
 }
 
-function windowProblems(b: Record<string, unknown>): string[] {
+/** The ValidationPipe part: both values are ISO 8601 instants. */
+function windowFormatProblems(b: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const k of ['windowStart', 'windowEnd'] as const) {
     if (typeof b[k] !== 'string' || Number.isNaN(Date.parse(b[k])))
       out.push(`${k} must be an ISO 8601 date string`);
   }
-  // The real API: windowStart may be at most 5 minutes in the past (invitations.service.ts).
-  if (out.length === 0 && Date.parse(b.windowStart as string) < Date.now() - 5 * 60_000)
-    out.push('windowStart may be at most 5 minutes in the past');
-  if (out.length === 0 && Date.parse(b.windowEnd as string) <= Date.parse(b.windowStart as string))
-    out.push('windowEnd must be after windowStart');
-  // The real API answers a window that ends in the past with a 400 (not a 422).
-  if (out.length === 0 && Date.parse(b.windowEnd as string) <= Date.now())
-    out.push('windowEnd must be in the future');
+  return out;
+}
+
+const DAY = 86_400_000;
+const MAX_WINDOW_DAYS = 7;
+const MAX_START_AHEAD_DAYS = 366;
+
+/** The service part (invitations.service.ts window()): all rules, reported together as the API does. */
+function windowRuleProblems(b: Record<string, unknown>): string[] {
+  const start = Date.parse(b.windowStart as string);
+  const end = Date.parse(b.windowEnd as string);
+  const now = Date.now();
+  const out: string[] = [];
+  if (end <= start) out.push('windowEnd must be after windowStart');
+  if (end <= now) out.push('windowEnd must be in the future');
+  if (end - start > MAX_WINDOW_DAYS * DAY)
+    out.push(`the window may be at most ${MAX_WINDOW_DAYS} day(s) long`);
+  if (now - start > 5 * 60_000) out.push('windowStart may be at most 5 minutes in the past');
+  if (start - now > MAX_START_AHEAD_DAYS * DAY)
+    out.push(`windowStart may be at most ${MAX_START_AHEAD_DAYS} days ahead`);
   return out;
 }
 
@@ -360,7 +373,7 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
       const dto = [
         ...unknownKeys(b, ['candidate', 'windowStart', 'windowEnd', 'accommodations']),
         ...candidateProblems(b.candidate, 'candidate'),
-        ...windowProblems(b),
+        ...windowFormatProblems(b),
         ...(b.accommodations === undefined
           ? []
           : state.scenario.acceptsAccommodations
@@ -369,6 +382,8 @@ export function createInvitationHandlers(options: { latencyMs: number }) {
         ...(MOCK_ID.test(String(params.testId)) ? [] : ['testId must be a UUID']),
       ];
       if (dto.length) return problem(400, 'x', dto);
+      const rules = windowRuleProblems(b);
+      if (rules.length) return problem(400, 'x', rules);
       await wait();
       // The real order (invitations.service.ts): the hourly slot is taken BEFORE the test lookup,
       // the 409 and the 422, and those keep their slot. The answer has no Retry-After header.

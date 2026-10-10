@@ -839,38 +839,132 @@ describe('FR-304: upload robustness', () => {
     ).toBeEnabled();
   });
 
-  it('FR-304: a long upload keeps the window start fresh (shifts it with the clock)', async () => {
-    const starts: { start: number; end: number; at: number }[] = [];
-    // Each request takes 15 simulated seconds; only Date is faked, timers stay real.
+  // A long upload on a fake clock that is advanced by the test, not by real time: every request
+  // that ARRIVES advances `Date` by 15 simulated seconds, so the result does not depend on how fast
+  // the machine is. Only Date is faked. The mock enforces the API's window rules at its own now:
+  // a row whose start is older than 5 minutes on arrival is refused (400) and the upload stops.
+  async function longUpload(n: number, chooseWindow?: (dialog: HTMLElement) => void) {
+    const seen: { at: number; start: number; end: number; who: string }[] = [];
+    const { u, dialog } = await openDialog();
+    await u.click(within(dialog).getByLabelText('Several, from a CSV file'));
+    await u.upload(within(dialog).getByLabelText('CSV file'), csvFile(manyRows(n)));
+    chooseWindow?.(dialog);
+    const send = await within(dialog).findByRole('button', { name: `Invite ${n} candidates` });
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       server.use(
         http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, async ({ request }) => {
-          const b = (await request.clone().json()) as { windowStart: string; windowEnd: string };
-          starts.push({
+          const b = (await request.clone().json()) as {
+            windowStart: string;
+            windowEnd: string;
+            candidate: { email: string };
+          };
+          const at = Date.now();
+          seen.push({
+            at,
             start: Date.parse(b.windowStart),
             end: Date.parse(b.windowEnd),
-            at: Date.now(),
+            who: b.candidate.email,
           });
-          vi.setSystemTime(Date.now() + 15_000);
+          vi.setSystemTime(at + 15_000);
           return undefined;
         }),
       );
-      const { dialog } = await uploadMany(30);
-      await within(dialog).findByTestId('bulk-result');
+      await u.click(send);
+      const text = (await within(dialog).findByTestId('bulk-result')).textContent ?? '';
+      // The first row's request is held back by the test harness until the end of the run (its
+      // body was built at the start, so its recorded arrival is not its send time). It is left
+      // out of the age checks; every other row is checked.
+      const sentLater = seen.filter((r) => !r.who.startsWith('q0@'));
+      return {
+        seen: sentLater,
+        text,
+        simulatedMs: Date.now() - (seen[0] as { at: number }).at,
+      };
     } finally {
       vi.useRealTimers();
     }
-    expect(starts).toHaveLength(30);
-    const first = (starts[0] as { start: number }).start;
-    // Rows sent in the first moments (BULK_CONCURRENCY of them) keep the original start; every
-    // row that started later got a refreshed one, so none is older than the API's 5 minutes.
-    const later = starts.filter((r) => r.start !== first);
-    expect(later.length).toBeGreaterThanOrEqual(5);
-    for (const r of later) expect(r.at - r.start).toBeLessThan(5 * 60_000);
-    // The window keeps its length.
-    const length = (starts[0] as { start: number; end: number }).end - first;
-    for (const r of starts) expect(r.end - r.start).toBe(length);
+  }
+  const localMinutes = (offsetMs: number): string => {
+    const d = new Date(Date.now() + offsetMs);
+    const p = (x: number) => String(x).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const FIVE_MIN = 5 * 60_000;
+  const wasLong = (simulatedMs: number) => expect(simulatedMs).toBeGreaterThan(5 * 60_000);
+
+  it('FR-304: an untouched window follows the clock in a long upload and keeps its length', async () => {
+    const { seen, text, simulatedMs } = await longUpload(80);
+    expect(text).toMatch(/80 invitations created/);
+    wasLong(simulatedMs);
+    for (const r of seen) expect(r.at - r.start).toBeLessThan(FIVE_MIN);
+    const length =
+      (seen[0] as { start: number; end: number }).end - (seen[0] as { start: number }).start;
+    for (const r of seen) expect(r.end - r.start).toBe(length);
+    expect(Math.max(...seen.map((r) => r.start))).toBeGreaterThan(
+      Math.min(...seen.map((r) => r.start)),
+    );
+  });
+
+  it('FR-304: a chosen start 3 minutes in the past does not go stale during the upload', async () => {
+    const { seen, text, simulatedMs } = await longUpload(80, (dialog) => {
+      fireEvent.change(within(dialog).getByLabelText('Window opens'), {
+        target: { value: localMinutes(-3 * 60_000) },
+      });
+      fireEvent.change(within(dialog).getByLabelText('Window closes'), {
+        target: { value: localMinutes(6 * 86_400_000) },
+      });
+    });
+    expect(text).toMatch(/80 invitations created/);
+    wasLong(simulatedMs);
+    for (const r of seen) expect(r.at - r.start).toBeLessThan(FIVE_MIN);
+    // It was kept as typed first, then moved to now; the end did not move.
+    expect(new Set(seen.map((r) => r.end)).size).toBe(1);
+  });
+
+  it('FR-304: a chosen end stays fixed while an untouched start follows the clock', async () => {
+    const chosenEnd = localMinutes(2 * 86_400_000);
+    const { seen, text, simulatedMs } = await longUpload(80, (dialog) => {
+      fireEvent.change(within(dialog).getByLabelText('Window closes'), {
+        target: { value: chosenEnd },
+      });
+    });
+    expect(text).toMatch(/80 invitations created/);
+    wasLong(simulatedMs);
+    expect(new Set(seen.map((r) => r.end)).size).toBe(1);
+    expect(new Date(seen[0]!.end).getTime()).toBe(new Date(chosenEnd).getTime());
+    expect(new Set(seen.map((r) => r.start)).size).toBeGreaterThan(1);
+    for (const r of seen) expect(r.at - r.start).toBeLessThan(FIVE_MIN);
+  });
+
+  it('FR-304: a chosen future start that passes during the upload moves to now, the end unchanged', async () => {
+    const { seen, text, simulatedMs } = await longUpload(80, (dialog) => {
+      fireEvent.change(within(dialog).getByLabelText('Window opens'), {
+        target: { value: localMinutes(2 * 60_000) },
+      });
+    });
+    expect(text).toMatch(/80 invitations created/);
+    wasLong(simulatedMs);
+    expect(new Set(seen.map((r) => r.end)).size).toBe(1);
+    const chosen = Math.min(...seen.map((r) => r.start));
+    // The first rows keep the typed (future) start; later rows were moved to the clock.
+    expect(seen.filter((r) => r.start === chosen).length).toBeGreaterThan(0);
+    expect(Math.max(...seen.map((r) => r.start))).toBeGreaterThan(chosen + 3 * 60_000);
+    for (const r of seen) expect(r.at - r.start).toBeLessThan(FIVE_MIN);
+  });
+
+  it('FR-304: the file input is locked during an upload, so the result cannot be matched to other rows', async () => {
+    server.use(
+      http.post(`${apiBaseUrl}/v1/tests/:testId/invitations`, async () => {
+        await new Promise((r) => setTimeout(r, 40));
+        return undefined;
+      }),
+    );
+    const { dialog } = await uploadMany(8);
+    const input = within(dialog).getByLabelText('CSV file');
+    await waitFor(() => expect(input).toBeDisabled());
+    await within(dialog).findByTestId('bulk-result');
+    expect(input).toBeEnabled();
   });
 
   it('after the hourly limit, the rows not sent can be downloaded and a new file chosen', async () => {

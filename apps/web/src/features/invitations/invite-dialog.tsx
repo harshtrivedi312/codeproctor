@@ -40,6 +40,7 @@ import {
   inviteInChunks,
   useInvite,
   type BulkOutcome,
+  type WindowAuto,
 } from './queries';
 import {
   ACCOMMODATION_DETECTORS,
@@ -146,7 +147,7 @@ function InviteBody({
   const [outcome, setOutcome] = React.useState<BulkOutcome | null>(null);
   const stop = React.useRef({ aborted: false });
   // The start was not chosen by the user (untouched, or clamped to now at submit).
-  const startAuto = React.useRef(true);
+  const windowAuto = React.useRef<WindowAuto>({ startAuto: true, endAuto: true });
   React.useEffect(() => {
     const flag = stop.current;
     // React strict mode runs setup, cleanup, setup again: the flag must be reset on every setup.
@@ -238,7 +239,7 @@ function InviteBody({
       test,
       csv.parse.valid,
       window,
-      startAuto.current,
+      windowAuto.current,
       setProgress,
       stop.current,
     );
@@ -255,7 +256,7 @@ function InviteBody({
     const rows = [
       ...problems,
       ...(outcome?.errors ?? []).map((e) => {
-        const sent = csv?.parse.valid.find((r) => r.row === e.row);
+        const sent = outcome?.rows.find((r) => r.row === e.row);
         return { row: e.row, message: e.message, email: sent?.email ?? '', name: sent?.name ?? '' };
       }),
     ];
@@ -279,7 +280,7 @@ function InviteBody({
 
   function downloadMailNotSent(): void {
     const rows = (outcome?.mailNotSent ?? []).flatMap((m) => {
-      const r = csv?.parse.valid.find((v) => v.row === m.row);
+      const r = outcome?.rows.find((v) => v.row === m.row);
       return r ? [r] : [];
     });
     const blob = new Blob([unsentRowsCsv(rows)], { type: 'text/csv;charset=utf-8' });
@@ -321,7 +322,10 @@ function InviteBody({
             initialWindow.current,
             new Date(),
           );
-          startAuto.current = !dirtyFields.windowStart || next.clamped;
+          windowAuto.current = {
+            startAuto: !dirtyFields.windowStart || next.clamped,
+            endAuto: !dirtyFields.windowEnd,
+          };
           form.setValue('windowStart', next.windowStart);
           form.setValue('windowEnd', next.windowEnd);
           setClampNote(
@@ -422,6 +426,7 @@ function InviteBody({
                 <Input
                   {...aria}
                   type="file"
+                  disabled={progress !== null}
                   accept=".csv,text/csv"
                   onChange={(e) => {
                     const input = e.currentTarget;
@@ -697,7 +702,7 @@ function InviteBody({
             {outcome.mailNotSent.length > 0 ? (
               <ul className="mt-2 list-disc pl-5" data-testid="bulk-mail-not-sent">
                 {outcome.mailNotSent.slice(0, 20).map((m) => {
-                  const r = csv?.parse.valid.find((v) => v.row === m.row);
+                  const r = outcome.rows.find((v) => v.row === m.row);
                   return (
                     <li key={m.row} className="break-all">
                       Row {m.row}
